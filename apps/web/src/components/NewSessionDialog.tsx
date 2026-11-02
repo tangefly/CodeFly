@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { FolderOpen, ShieldCheck } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { useAppStore } from "../lib/store.js";
 import { Button, Modal } from "./ui.js";
+import { WorkspacePicker } from "./WorkspacePicker.js";
 
 export function NewSessionDialog() {
   const open = useAppStore((state) => state.ui.newSessionOpen);
@@ -13,15 +14,12 @@ export function NewSessionDialog() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [title, setTitle] = useState("");
   const [pending, setPending] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setPending(false);
     setWorkspaceRoot("");
     setTitle("");
-    const frame = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(frame);
   }, [open]);
 
   const submit = async (): Promise<void> => {
@@ -64,25 +62,19 @@ export function NewSessionDialog() {
         }}
         className="space-y-3.5"
       >
-        <label className="block">
+        <div className="block">
           <span className="mb-1.5 block text-xs font-medium text-foreground">
             工作区路径 <span className="text-danger">*</span>
           </span>
-          <div className="relative">
-            <FolderOpen className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <input
-              ref={inputRef}
-              value={workspaceRoot}
-              onChange={(event) => setWorkspaceRoot(event.target.value)}
-              placeholder="/home/you/project"
-              spellCheck={false}
-              className="h-10 w-full rounded-lg border border-border bg-background pl-9 pr-3 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/20"
-            />
-          </div>
+          <WorkspacePicker
+            value={workspaceRoot}
+            onChange={setWorkspaceRoot}
+            disabled={pending}
+          />
           <span className="mt-1 block text-[10px] leading-4 text-muted-foreground/70">
-            必须是绝对路径，且目录已存在。
+            点击浏览并选择已存在的目录；创建后不可更改。
           </span>
-        </label>
+        </div>
 
         <label className="block">
           <span className="mb-1.5 block text-xs font-medium text-foreground">

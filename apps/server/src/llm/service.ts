@@ -201,6 +201,13 @@ export class ChatService {
           status: "complete",
           error: undefined,
           model: config.model,
+          ...(result.usage !== undefined ? { usage: result.usage } : {}),
+          ...(result.durationMs !== undefined
+            ? { durationMs: result.durationMs }
+            : {}),
+          ...(result.firstTokenMs !== undefined
+            ? { firstTokenMs: result.firstTokenMs }
+            : {}),
         });
 
         emit({
@@ -210,6 +217,9 @@ export class ChatService {
               ...assistantMessage,
               content: assistantContent,
               status: "complete",
+              usage: result.usage,
+              durationMs: result.durationMs,
+              firstTokenMs: result.firstTokenMs,
             },
           usage,
         });

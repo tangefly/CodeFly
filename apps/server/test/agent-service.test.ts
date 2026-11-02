@@ -88,6 +88,14 @@ class FakeAgentClient implements LlmClientLike {
       return {
         content: "working",
         finishReason: "tool_calls",
+        usage: {
+          promptTokens: 100,
+          completionTokens: 5,
+          totalTokens: 105,
+          cachedTokens: 60,
+        },
+        durationMs: 42,
+        firstTokenMs: 10,
         toolCalls: [
           {
             id: "call_1",
@@ -99,7 +107,17 @@ class FakeAgentClient implements LlmClientLike {
     }
 
     onDelta("done");
-    return { content: "done", finishReason: "stop", toolCalls: [] };
+    return {
+      content: "done",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 120,
+        completionTokens: 8,
+        totalTokens: 128,
+        cachedTokens: 90,
+      },
+      toolCalls: [],
+    };
   }
 
   async complete(): Promise<LlmCompleteResult> {
@@ -234,6 +252,14 @@ describe("AgentService", () => {
     ]);
     expect(records[0]).toMatchObject({ content: "please check" });
     expect(records[1]).toMatchObject({ content: "working", status: "complete" });
+    expect(records[1]!.usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 5,
+      totalTokens: 105,
+      cachedTokens: 60,
+    });
+    expect(records[1]!.durationMs).toBe(42);
+    expect(records[1]!.firstTokenMs).toBe(10);
     expect(records[1]!.toolCalls).toEqual([
       {
         id: "call_1",
@@ -249,6 +275,12 @@ describe("AgentService", () => {
       status: "complete",
     });
     expect(records[3]).toMatchObject({ content: "done", status: "complete" });
+    expect(records[3]!.usage).toEqual({
+      promptTokens: 120,
+      completionTokens: 8,
+      totalTokens: 128,
+      cachedTokens: 90,
+    });
 
     expect(tools.executed).toEqual([
       { name: "run_command", args: '{"command":"echo hi"}' },

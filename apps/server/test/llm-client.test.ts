@@ -92,6 +92,86 @@ describe("LlmClient", () => {
     expect(result.finishReason).toBe("stop");
   });
 
+  it("parses streamed token usage, cache hits, and timing", async () => {
+    let receivedBody = "";
+    const baseUrl = await startServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        receivedBody = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        setTimeout(() => {
+          res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+          res.write(
+            `data: ${JSON.stringify({
+              choices: [],
+              usage: {
+                prompt_tokens: 100,
+                completion_tokens: 5,
+                total_tokens: 105,
+                prompt_tokens_details: { cached_tokens: 80 },
+              },
+            })}\n\n`,
+          );
+          res.end("data: [DONE]\n\n");
+        }, 5);
+      });
+    });
+
+    const client = new LlmClient();
+    const result = await client.streamChat(
+      makeConfig(baseUrl),
+      messages,
+      () => undefined,
+      new AbortController().signal,
+    );
+
+    expect(result.usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 5,
+      totalTokens: 105,
+      cachedTokens: 80,
+    });
+    expect(typeof result.firstTokenMs).toBe("number");
+    expect(typeof result.durationMs).toBe("number");
+    const body = JSON.parse(receivedBody) as {
+      stream_options?: { include_usage?: boolean };
+    };
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it("reads DeepSeek-style cache hit tokens", async () => {
+    const baseUrl = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" } }],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 1,
+            total_tokens: 101,
+            prompt_cache_hit_tokens: 64,
+            prompt_cache_miss_tokens: 36,
+          },
+        }),
+      );
+    });
+
+    const client = new LlmClient();
+    const result = await client.streamChat(
+      makeConfig(baseUrl),
+      messages,
+      () => undefined,
+      new AbortController().signal,
+    );
+
+    expect(result.usage).toMatchObject({
+      promptTokens: 100,
+      completionTokens: 1,
+      cachedTokens: 64,
+    });
+  });
+
   it("supports non-streaming JSON responses", async () => {
     const baseUrl = await startServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });

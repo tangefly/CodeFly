@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  AGENT_MAX_STEPS_LIMIT,
   AGENT_TOOL_NAMES,
   APPROVAL_POLICIES,
   SANDBOX_MODES,
@@ -84,7 +85,7 @@ export const llmTestSchema = z.object({
 });
 
 export const agentSettingsUpdateSchema = z.object({
-  maxSteps: z.number().int().min(1).max(30).optional(),
+  maxSteps: z.number().int().min(1).max(AGENT_MAX_STEPS_LIMIT).optional(),
   commandTimeoutMs: z.number().int().min(1000).max(600_000).optional(),
   enabledTools: z
     .array(z.enum(AGENT_TOOL_NAMES))

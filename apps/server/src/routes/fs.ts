@@ -1,4 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
@@ -51,6 +52,66 @@ function byteLength(text: string): number {
 }
 
 export function registerFsRoutes(app: FastifyInstance, deps: FsRouteDeps): void {
+  /**
+   * Directory browser for the new-session workspace picker. A session does
+   * not exist yet when that dialog opens, so this endpoint is intentionally
+   * session-free; the global bearer-token hook still applies.
+   */
+  app.get("/api/fs/browse", async (request) => {
+    const query = fsPathQuerySchema.parse(request.query);
+    const home = homedir();
+    const target =
+      query.path === undefined || query.path.trim() === ""
+        ? home
+        : path.resolve(query.path);
+
+    let info;
+    try {
+      info = await stat(target);
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new AppError("FS_NOT_FOUND", `path does not exist: ${target}`, 404);
+      }
+      throw error;
+    }
+    if (!info.isDirectory()) {
+      throw new AppError(
+        "FS_NOT_A_DIRECTORY",
+        `path is not a directory: ${target}`,
+        400,
+      );
+    }
+
+    const entries = await readdir(target, { withFileTypes: true });
+    const items = await Promise.all(
+      entries
+        .filter((entry) => !entry.name.startsWith("."))
+        .map(async (entry) => {
+          const entryPath = path.join(target, entry.name);
+          if (!entry.isDirectory()) {
+            if (!entry.isSymbolicLink()) return null;
+            try {
+              if (!(await stat(entryPath)).isDirectory()) return null;
+            } catch {
+              return null;
+            }
+          }
+          return { name: entry.name, path: entryPath };
+        }),
+    );
+
+    const directories = items
+      .filter((item): item is { name: string; path: string } => item !== null)
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      path: target,
+      parent: path.dirname(target) === target ? null : path.dirname(target),
+      home,
+      entries: directories,
+    };
+  });
+
   app.get("/api/sessions/:id/fs/list", async (request) => {
     const { id } = request.params as { id: string };
     const session = deps.sessions.getOrThrow(id);

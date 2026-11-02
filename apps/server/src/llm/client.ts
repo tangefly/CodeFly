@@ -39,6 +39,10 @@ export interface LlmStreamResult {
   finishReason: string | null;
   usage?: ChatUsage;
   toolCalls: LlmToolCall[];
+  /** Milliseconds from request start to the first content delta. */
+  firstTokenMs?: number;
+  /** Milliseconds from request start to the end of the stream. */
+  durationMs?: number;
 }
 
 export interface LlmCompleteResult {
@@ -103,6 +107,11 @@ interface OpenAiResponse {
     prompt_tokens?: unknown;
     completion_tokens?: unknown;
     total_tokens?: unknown;
+    /** OpenAI / OpenRouter style cache reporting. */
+    prompt_tokens_details?: { cached_tokens?: unknown };
+    /** DeepSeek style cache reporting. */
+    prompt_cache_hit_tokens?: unknown;
+    prompt_cache_miss_tokens?: unknown;
   };
   error?: unknown;
   model?: unknown;
@@ -168,6 +177,13 @@ function mapUsage(value: OpenAiResponse["usage"]): ChatUsage | undefined {
     usage.completionTokens = value.completion_tokens;
   }
   if (typeof value.total_tokens === "number") usage.totalTokens = value.total_tokens;
+  const cached =
+    typeof value.prompt_tokens_details?.cached_tokens === "number"
+      ? value.prompt_tokens_details.cached_tokens
+      : typeof value.prompt_cache_hit_tokens === "number"
+        ? value.prompt_cache_hit_tokens
+        : undefined;
+  if (cached !== undefined && cached >= 0) usage.cachedTokens = cached;
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
@@ -242,6 +258,10 @@ function bodyFor(
     messages,
     stream,
   };
+  if (stream) {
+    // OpenAI only reports usage on streamed responses when asked.
+    body.stream_options = { include_usage: true };
+  }
   if (config.temperature !== null) body.temperature = config.temperature;
   const maxTokens = maxTokensOverride ?? config.maxTokens;
   if (maxTokens !== null) body.max_tokens = maxTokens;
@@ -307,6 +327,17 @@ export class LlmClient implements LlmClientLike {
     signal: AbortSignal,
     options?: StreamChatOptions,
   ): Promise<LlmStreamResult> {
+    const startedAt = Date.now();
+    let firstDeltaAt: number | null = null;
+    const onContentDelta = (text: string): void => {
+      if (firstDeltaAt === null) firstDeltaAt = Date.now();
+      onDelta(text);
+    };
+    const timing = (): Pick<LlmStreamResult, "firstTokenMs" | "durationMs"> => ({
+      ...(firstDeltaAt !== null ? { firstTokenMs: firstDeltaAt - startedAt } : {}),
+      durationMs: Date.now() - startedAt,
+    });
+
     const response = await postChat(
       config,
       bodyFor(config, messages, true, undefined, options),
@@ -320,12 +351,15 @@ export class LlmClient implements LlmClientLike {
       this.throwIfUpstreamError(json, config);
       const choice = json.choices?.[0];
       const content = extractDeltaContent(choice);
+      // No incremental deltas here, so leave firstTokenMs unset: the UI will
+      // fall back to the full request duration for throughput.
       if (content) onDelta(content);
       return {
         content,
         finishReason: extractFinishReason(choice),
         usage: mapUsage(json.usage),
         toolCalls: responseToolCalls(choice),
+        ...timing(),
       };
     }
 
@@ -397,7 +431,7 @@ export class LlmClient implements LlmClientLike {
       const delta = extractDeltaContent(choice);
       if (delta !== "") {
         content += delta;
-        onDelta(delta);
+        onContentDelta(delta);
       }
       const chunkUsage = mapUsage(json.usage);
       if (chunkUsage) usage = chunkUsage;
@@ -429,6 +463,7 @@ export class LlmClient implements LlmClientLike {
           finishReason,
           usage,
           toolCalls: collectToolCalls(),
+          ...timing(),
         };
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -451,7 +486,7 @@ export class LlmClient implements LlmClientLike {
       throw new LlmError("LLM_EMPTY_RESPONSE", "模型返回了空响应", 502);
     }
 
-    return { content, finishReason, usage, toolCalls };
+    return { content, finishReason, usage, toolCalls, ...timing() };
   }
 
   async complete(

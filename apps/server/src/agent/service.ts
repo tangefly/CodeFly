@@ -226,6 +226,13 @@ export class AgentService {
             status: "complete",
             model: config.model,
             ...(toolCalls.length > 0 ? { toolCalls } : {}),
+            ...(result.usage !== undefined ? { usage: result.usage } : {}),
+            ...(result.durationMs !== undefined
+              ? { durationMs: result.durationMs }
+              : {}),
+            ...(result.firstTokenMs !== undefined
+              ? { firstTokenMs: result.firstTokenMs }
+              : {}),
           },
         );
         const assistantRecord: ChatMessageRecord =
@@ -234,6 +241,9 @@ export class AgentService {
             content: finalContent,
             status: "complete",
             toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+            usage: result.usage,
+            durationMs: result.durationMs,
+            firstTokenMs: result.firstTokenMs,
           };
 
         emit({

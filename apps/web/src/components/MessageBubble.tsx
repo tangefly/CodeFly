@@ -1,7 +1,48 @@
-import { Info, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { Check, Copy, Info, Sparkles } from "lucide-react";
 import type { ChatMessage } from "../lib/store.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
 import { ToolCard } from "./ToolCard.js";
+import { Button } from "./ui.js";
+
+function UserMessage({ id, text }: { id: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = (): void => {
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => undefined);
+  };
+
+  return (
+    <div className="group flex justify-end gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={copied ? "已复制消息" : "复制消息"}
+        title={copied ? "已复制" : "复制消息"}
+        onClick={copy}
+        className="mt-1 h-7 w-7 shrink-0 text-muted-foreground/70 opacity-100 transition-opacity focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-primary" />
+        ) : (
+          <Copy className="h-3.5 w-3.5" />
+        )}
+      </Button>
+      <div
+        data-user-message-id={id}
+        className="max-w-[86%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-primary/20 bg-primary/10 px-4 py-2.5 text-[14px] leading-6 text-foreground"
+      >
+        {text}
+      </div>
+    </div>
+  );
+}
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.kind === "tool") {
@@ -20,13 +61,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   if (message.kind === "user") {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[86%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-primary/20 bg-primary/10 px-4 py-2.5 text-[14px] leading-6 text-foreground">
-          {message.text}
-        </div>
-      </div>
-    );
+    return <UserMessage id={message.id} text={message.text} />;
   }
 
   // A tool-call-only assistant step has no prose; the tool cards below carry

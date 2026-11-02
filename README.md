@@ -65,7 +65,8 @@ pnpm start
 ### 通过 UI
 
 1. 顶栏齿轮 → 「设置」→「聊天模型」→「配置」。
-2. 填写 Base URL、API Key、Model，例如：
+2. 在「厂商」下拉选择服务商，Base URL 与模型会自动填充；列表中没有的厂商/模型选
+   「其他（自定义）」后手动填写 URL 与模型名。常见示例：
    - DeepSeek：`https://api.deepseek.com/v1`，`deepseek-chat`
    - OpenAI：`https://api.openai.com/v1`，`gpt-4o-mini` 等
    - Ollama：`http://127.0.0.1:11434/v1`，`qwen2.5`（API Key 可留空）
@@ -136,7 +137,7 @@ Composer 的「Agent」标签会启动 tool-calling loop：
 
 Agent 设置（顶栏设置 → Agent 模式 → 配置，或 Agent 标签旁的齿轮）：
 
-- 最大步数（默认 10，范围 1–30）
+- 最大步数（默认 10，范围 1–500）
 - 每条命令超时（默认 60s）
 - 启用哪些工具
 - 自定义 Agent system prompt
@@ -165,7 +166,7 @@ Agent SSE 事件：`agent.started`、`agent.step`、`agent.delta`、`agent.messa
 
 ## 使用
 
-1. 「新建会话」输入一个已存在的**绝对路径**作为工作区。
+1. 「新建会话」点击工作区下拉框，逐级浏览目录并选择已存在的**绝对路径**作为工作区。
 2. Composer 的「聊天」标签与模型流式对话；生成中可点「停止」取消。
 3. Composer 的「Agent」标签启动 tool-calling loop；工具卡片显示命令/文件操作及结果，
    提权时弹出审批；执行中可点「停止」。
@@ -192,6 +193,7 @@ data/                # 运行时数据（gitignore）
 | `PUT /api/llm/settings` | 保存 OpenAI-compatible 配置（不返回 Key） |
 | `GET /api/llm/settings` | 公开配置（`configured` / `model` / `apiKeyHint`） |
 | `POST /api/llm/test` | 用保存的配置做一次最小非流式请求 |
+| `GET /api/fs/browse` | 新建会话时的目录浏览（子目录列表，无需会话） |
 | `POST /api/sessions/:id/chat` | SSE 聊天流（`chat.started` / `chat.delta` / `chat.done`） |
 | `PUT /api/agent/settings` | 保存 Agent 最大步数 / 工具 / 超时 / prompt |
 | `POST /api/sessions/:id/agent` | Agent tool-calling SSE 流（工具调用/结果、审批） |

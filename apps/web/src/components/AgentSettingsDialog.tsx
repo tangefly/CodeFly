@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Bot, Loader2, ShieldCheck } from "lucide-react";
-import type { AgentToolName } from "@codefly/protocol";
+import { AGENT_MAX_STEPS_LIMIT, type AgentToolName } from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { Button, Modal } from "./ui.js";
@@ -74,8 +74,8 @@ export function AgentSettingsDialog() {
 
   const save = async (): Promise<void> => {
     const steps = Number(maxSteps);
-    if (!Number.isInteger(steps) || steps < 1 || steps > 30) {
-      setError("最大步数必须是 1 到 30 之间的整数。");
+    if (!Number.isInteger(steps) || steps < 1 || steps > AGENT_MAX_STEPS_LIMIT) {
+      setError(`最大步数必须是 1 到 ${AGENT_MAX_STEPS_LIMIT} 之间的整数。`);
       return;
     }
     const timeout = Number(commandTimeoutMs);
@@ -134,7 +134,9 @@ export function AgentSettingsDialog() {
           <label className="block">
             <span className="mb-1 flex items-baseline justify-between">
               <span className="text-[11px] font-medium text-foreground">最大步数</span>
-              <span className="text-[9px] text-muted-foreground/60">1–30</span>
+              <span className="text-[9px] text-muted-foreground/60">
+                1–{AGENT_MAX_STEPS_LIMIT}
+              </span>
             </span>
             <input
               value={maxSteps}

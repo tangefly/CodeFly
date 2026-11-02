@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Bot,
   MessageSquare,
@@ -7,7 +7,16 @@ import {
   Sparkles,
   Square,
 } from "lucide-react";
-import { selectCurrentSession, useAppStore } from "../lib/store.js";
+import {
+  selectCurrentMessages,
+  selectCurrentSession,
+  useAppStore,
+} from "../lib/store.js";
+import {
+  computeSessionUsage,
+  formatSpeed,
+  formatTokens,
+} from "../lib/token-stats.js";
 import { cn } from "../lib/utils.js";
 import { PermissionPicker } from "./PermissionPicker.js";
 import { Button, Kbd } from "./ui.js";
@@ -16,6 +25,7 @@ type Tab = "chat" | "agent";
 
 export function Composer() {
   const session = useAppStore(selectCurrentSession);
+  const messages = useAppStore(selectCurrentMessages);
   const sendChat = useAppStore((state) => state.sendChat);
   const cancelChat = useAppStore((state) => state.cancelChat);
   const sendAgent = useAppStore((state) => state.sendAgent);
@@ -35,6 +45,10 @@ export function Composer() {
   const chatStreaming = session ? Boolean(chatBusy[session.id]) : false;
   const agentStreaming = session ? Boolean(agentBusy[session.id]) : false;
   const busy = chatStreaming || agentStreaming;
+  const sessionUsage = useMemo(
+    () => (messages ? computeSessionUsage(messages) : null),
+    [messages],
+  );
 
   useEffect(() => {
     const element = textareaRef.current;
@@ -62,7 +76,7 @@ export function Composer() {
 
   return (
     <div className="relative z-10 shrink-0 border-t border-border bg-gradient-to-t from-background via-background to-background/95 px-3 pb-3 pt-2.5 sm:px-6">
-      <div className="mx-auto w-full max-w-3xl">
+      <div className="mx-auto w-full max-w-5xl">
         <div className="mb-2 flex items-center gap-2">
           <div className="flex items-center gap-0.5 rounded-lg border border-border bg-card/60 p-0.5">
             <TabButton
@@ -220,6 +234,41 @@ export function Composer() {
             </div>
           </div>
         </form>
+
+        {sessionUsage ? (
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 px-1 font-mono text-[10px] text-muted-foreground/55">
+            <span className="font-sans text-muted-foreground/45">
+              本会话用量
+            </span>
+            {sessionUsage.promptTokens > 0 ? (
+              <span title={`${sessionUsage.promptTokens} prompt tokens`}>
+                输入 {formatTokens(sessionUsage.promptTokens)} tok
+              </span>
+            ) : null}
+            {sessionUsage.completionTokens > 0 ? (
+              <span title={`${sessionUsage.completionTokens} completion tokens`}>
+                输出 {formatTokens(sessionUsage.completionTokens)} tok
+              </span>
+            ) : null}
+            {sessionUsage.promptTokens === 0 &&
+            sessionUsage.completionTokens === 0 &&
+            sessionUsage.totalTokens > 0 ? (
+              <span title={`${sessionUsage.totalTokens} total tokens`}>
+                合计 {formatTokens(sessionUsage.totalTokens)} tok
+              </span>
+            ) : null}
+            {sessionUsage.speed !== null ? (
+              <span title="按已上报用量的生成阶段耗时加权计算">
+                {formatSpeed(sessionUsage.speed)} tok/s
+              </span>
+            ) : null}
+            {sessionUsage.cacheHitRate !== null ? (
+              <span title={`${sessionUsage.cachedTokens} cached prompt tokens`}>
+                缓存命中 {Math.round(sessionUsage.cacheHitRate * 100)}%
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

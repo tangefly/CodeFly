@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  AGENT_MAX_STEPS_LIMIT,
   AGENT_TOOL_NAMES,
   type AgentToolName,
 } from "@codefly/protocol";
@@ -38,13 +39,13 @@ describe("AgentConfigStore", () => {
     const store = new AgentConfigStore(file);
     await store.init();
     const updated = await store.update({
-      maxSteps: 99,
+      maxSteps: AGENT_MAX_STEPS_LIMIT + 100,
       commandTimeoutMs: 1000,
       enabledTools: ["read_file", "write_file", "read_file"] as AgentToolName[],
       systemPrompt: "custom agent prompt",
     });
 
-    expect(updated.maxSteps).toBe(30);
+    expect(updated.maxSteps).toBe(AGENT_MAX_STEPS_LIMIT);
     expect(updated.commandTimeoutMs).toBe(1000);
     expect(updated.enabledTools).toEqual(["read_file", "write_file"]);
     expect(updated.systemPrompt).toBe("custom agent prompt");
@@ -53,7 +54,7 @@ describe("AgentConfigStore", () => {
     const reloaded = new AgentConfigStore(file);
     await reloaded.init();
     expect(reloaded.getPublic()).toMatchObject({
-      maxSteps: 30,
+      maxSteps: AGENT_MAX_STEPS_LIMIT,
       commandTimeoutMs: 1000,
       enabledTools: ["read_file", "write_file"],
       systemPrompt: "custom agent prompt",

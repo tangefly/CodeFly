@@ -125,6 +125,19 @@ body {
   animation: cf-slide-in 200ms ease-out both;
 }
 
+@keyframes cf-jump-highlight {
+  from {
+    box-shadow: 0 0 0 3px rgb(52 211 153 / 0.35);
+  }
+  to {
+    box-shadow: 0 0 0 8px rgb(52 211 153 / 0);
+  }
+}
+
+.cf-jump-highlight {
+  animation: cf-jump-highlight 700ms ease-out both;
+}
+
 /* ---------------------------------------------------------------- prose */
 
 .sd-prose {
@@ -222,8 +235,8 @@ body {
   font-family: var(--font-mono);
   font-size: 0.86em;
   background: rgb(255 255 255 / 0.06);
-  border: 1px solid rgb(255 255 255 / 0.06);
-  border-radius: 0.35rem;
+  border: 0;
+  border-radius: 0.3rem;
   padding: 0.1em 0.35em;
 }
 
@@ -288,7 +301,54 @@ body {
   padding: 0.3em 0;
 }
 
-/* Streamdown's code block shell */
+/* Fenced code blocks: the shell draws the only frame. Its body, <pre> and
+   action pill are stripped of borders/backgrounds so nothing nests. */
 .sd-prose [data-streamdown="code-block"] {
+  --cf-code-header: 2.25rem;
   margin: 0.9em 0;
+  gap: 0;
+  padding: 0;
+  border-radius: 0.75rem;
+  background: #07090d;
+  overflow: hidden;
+}
+
+.sd-prose [data-streamdown="code-block-header"] {
+  height: var(--cf-code-header);
+  padding: 0 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: rgb(255 255 255 / 0.025);
+  font-size: 0.68rem;
+}
+
+/* Copy/download hover over the header; center them in that bar instead of
+   letting the fixed offset push them across the divider. */
+.sd-prose
+  [data-streamdown="code-block"]
+  > div:has(> [data-streamdown="code-block-actions"]) {
+  top: 0;
+  height: var(--cf-code-header);
+}
+
+.sd-prose [data-streamdown="code-block-body"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.sd-prose [data-streamdown="code-block"] pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.85rem 1rem;
+}
+
+.sd-prose [data-streamdown="code-block-actions"] {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }

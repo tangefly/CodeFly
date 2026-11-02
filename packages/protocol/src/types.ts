@@ -117,6 +117,12 @@ export interface ChatMessageRecord {
   status: ChatMessageStatus;
   error?: string;
   model?: string;
+  /** Assistant messages: token usage reported by the provider. */
+  usage?: ChatUsage;
+  /** Assistant messages: milliseconds from request start to stream end. */
+  durationMs?: number;
+  /** Assistant messages: milliseconds from request start to first content delta. */
+  firstTokenMs?: number;
   /** Assistant messages: tool calls requested by the model. */
   toolCalls?: AgentToolCall[];
   /** Tool messages: which assistant tool call this result answers. */
@@ -137,6 +143,9 @@ export const AGENT_TOOL_NAMES = [
   "edit_file",
   "list_files",
 ] as const;
+
+/** Hard ceiling for Agent loop steps in a single run. */
+export const AGENT_MAX_STEPS_LIMIT = 500;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 
@@ -159,6 +168,8 @@ export interface ChatUsage {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
+  /** Prompt tokens served from a provider cache, when reported. */
+  cachedTokens?: number;
 }
 
 export interface LlmSettingsPublic {
@@ -232,6 +243,23 @@ export interface AuditEvent {
 
 export interface SessionListResponse {
   sessions: Session[];
+}
+
+export interface WorkspaceBrowseEntry {
+  name: string;
+  path: string;
+}
+
+/** GET /api/fs/browse: subdirectories for the new-session workspace picker. */
+export interface WorkspaceBrowseResponse {
+  /** Absolute, resolved path that was listed. */
+  path: string;
+  /** Parent directory, or null at the filesystem root. */
+  parent: string | null;
+  /** The server user's home directory, used as the picker's home shortcut. */
+  home: string;
+  /** Visible subdirectories, sorted by name. */
+  entries: WorkspaceBrowseEntry[];
 }
 
 export interface CreateSessionResponse {

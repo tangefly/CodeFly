@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
+  ChevronDown,
   KeyRound,
   Loader2,
   Sparkles,
@@ -12,6 +13,12 @@ import type {
   LlmTestResult,
 } from "@codefly/protocol";
 import { asApiError } from "../lib/api.js";
+import {
+  CUSTOM_PROVIDER_ID,
+  LLM_PROVIDERS,
+  findProvider,
+  findProviderByBaseUrl,
+} from "../lib/llm-providers.js";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { Button, Modal } from "./ui.js";
@@ -41,6 +48,34 @@ function Field({
   );
 }
 
+function Select({
+  value,
+  onChange,
+  ariaLabel,
+  className,
+  children,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={ariaLabel}
+        className={cn(INPUT_CLASS, "appearance-none pr-8", className)}
+      >
+        {children}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+    </div>
+  );
+}
+
 export function LlmSettingsDialog() {
   const open = useAppStore((state) => state.ui.llmSettingsOpen);
   const close = useAppStore((state) => state.closeLlmSettings);
@@ -48,6 +83,7 @@ export function LlmSettingsDialog() {
   const saveLlmSettings = useAppStore((state) => state.saveLlmSettings);
   const testLlm = useAppStore((state) => state.testLlm);
 
+  const [providerId, setProviderId] = useState(CUSTOM_PROVIDER_ID);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
@@ -63,7 +99,9 @@ export function LlmSettingsDialog() {
 
   useEffect(() => {
     if (!open) return;
-    setBaseUrl(current?.baseUrl ?? "");
+    const savedBaseUrl = current?.baseUrl ?? "";
+    setProviderId(findProviderByBaseUrl(savedBaseUrl)?.id ?? CUSTOM_PROVIDER_ID);
+    setBaseUrl(savedBaseUrl);
     setModel(current?.model ?? "");
     setApiKey("");
     setTemperature(
@@ -84,6 +122,36 @@ export function LlmSettingsDialog() {
     setSaving(false);
     setTesting(false);
   }, [open, current?.updatedAt]);
+
+  const provider = findProvider(providerId);
+  const modelOptions = provider
+    ? model !== "" && !provider.models.includes(model)
+      ? [model, ...provider.models]
+      : provider.models
+    : [];
+
+  const selectProvider = (id: string): void => {
+    setProviderId(id);
+    setFormError(null);
+    setTestResult(null);
+    const next = findProvider(id);
+    if (!next) {
+      // 自定义：清空后手动填写 URL 与模型名。
+      setBaseUrl("");
+      setModel("");
+      return;
+    }
+    setBaseUrl(next.baseUrl);
+    setModel((previous) =>
+      next.models.includes(previous) ? previous : (next.models[0] ?? ""),
+    );
+  };
+
+  const changeModel = (value: string): void => {
+    setModel(value);
+    setFormError(null);
+    setTestResult(null);
+  };
 
   const parseForm = (): { settings: LlmSettingsInput; test: LlmTestInput } | null => {
     const base = baseUrl.trim();
@@ -229,14 +297,38 @@ export function LlmSettingsDialog() {
           </span>
         </div>
 
+        <Field label="厂商" hint="选择后自动填充 URL 与模型">
+          <Select
+            value={providerId}
+            onChange={selectProvider}
+            ariaLabel="模型厂商"
+          >
+            {LLM_PROVIDERS.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.label}
+              </option>
+            ))}
+            <option value={CUSTOM_PROVIDER_ID}>其他（自定义）</option>
+          </Select>
+        </Field>
+        {provider?.note ? (
+          <p className="-mt-1.5 text-[10px] leading-4 text-muted-foreground/70">
+            {provider.note}
+          </p>
+        ) : null}
+
         <Field
           label="Base URL"
-          hint="不含 /chat/completions 也可以"
+          hint={provider ? "已自动填充，可改为代理地址" : "需为 OpenAI-compatible 地址"}
         >
           <input
             value={baseUrl}
-            onChange={(event) => setBaseUrl(event.target.value)}
-            placeholder="https://api.deepseek.com/v1"
+            onChange={(event) => {
+              setBaseUrl(event.target.value);
+              setFormError(null);
+              setTestResult(null);
+            }}
+            placeholder="https://api.example.com/v1"
             spellCheck={false}
             className={cn(INPUT_CLASS, "font-mono")}
           />
@@ -274,14 +366,32 @@ export function LlmSettingsDialog() {
           </label>
         ) : null}
 
-        <Field label="Model">
-          <input
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            placeholder="deepseek-chat"
-            spellCheck={false}
-            className={cn(INPUT_CLASS, "font-mono")}
-          />
+        <Field
+          label="Model"
+          hint={provider ? "从厂商模型列表选择" : "手动填写模型名"}
+        >
+          {provider ? (
+            <Select
+              value={model}
+              onChange={changeModel}
+              ariaLabel="模型"
+              className="font-mono"
+            >
+              {modelOptions.map((candidate) => (
+                <option key={candidate} value={candidate}>
+                  {candidate}
+                </option>
+              ))}
+            </Select>
+          ) : (
+            <input
+              value={model}
+              onChange={(event) => changeModel(event.target.value)}
+              placeholder="deepseek-chat / your-model-name"
+              spellCheck={false}
+              className={cn(INPUT_CLASS, "font-mono")}
+            />
+          )}
         </Field>
 
         <div className="grid grid-cols-2 gap-3">
@@ -364,8 +474,7 @@ export function LlmSettingsDialog() {
             data/llm.json
           </code>{" "}
           （权限 0600），不会返回给前端，也不会传给执行 shell 的进程。
-          Base URL 示例：<code className="font-mono">https://api.deepseek.com/v1</code>、{" "}
-          <code className="font-mono">http://127.0.0.1:11434/v1</code>。
+          选择厂商会自动填充 Base URL 与模型；列表中没有的模型请选「其他（自定义）」后手动填写。
         </p>
       </div>
     </Modal>

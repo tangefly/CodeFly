@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  AGENT_MAX_STEPS_LIMIT,
   AGENT_TOOL_NAMES,
   type AgentSettingsInput,
   type AgentSettingsPublic,
@@ -71,7 +72,7 @@ export class AgentConfigStore {
         maxSteps:
           typeof parsed.maxSteps === "number" &&
           parsed.maxSteps >= 1 &&
-          parsed.maxSteps <= 30
+          parsed.maxSteps <= AGENT_MAX_STEPS_LIMIT
             ? Math.round(parsed.maxSteps)
             : DEFAULTS.maxSteps,
         commandTimeoutMs:
@@ -120,7 +121,10 @@ export class AgentConfigStore {
       maxSteps:
         input.maxSteps === undefined
           ? this.current.maxSteps
-          : Math.min(30, Math.max(1, Math.round(input.maxSteps))),
+          : Math.min(
+              AGENT_MAX_STEPS_LIMIT,
+              Math.max(1, Math.round(input.maxSteps)),
+            ),
       commandTimeoutMs:
         input.commandTimeoutMs === undefined
           ? this.current.commandTimeoutMs

@@ -16,6 +16,9 @@ eggs/
 .eggs/
 lib/
 lib64/
+# ...but keep the web app's source directory that shares the name.
+!apps/web/src/lib/
+!apps/web/src/lib/**
 parts/
 sdist/
 var/

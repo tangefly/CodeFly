@@ -167,6 +167,7 @@ describe("ChatService", () => {
       content: "Hello world",
       status: "complete",
       model: "test-model",
+      usage: { totalTokens: 3 },
     });
 
     expect(events.map((event) => event.type)).toEqual([

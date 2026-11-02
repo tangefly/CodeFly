@@ -1,11 +1,13 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Plus, Sparkles, Terminal, Zap } from "lucide-react";
 import {
   selectCurrentMessages,
   selectCurrentSession,
   useAppStore,
   type ChatMessage,
+  type UserMessage,
 } from "../lib/store.js";
+import { cn } from "../lib/utils.js";
 import { MessageBubble } from "./MessageBubble.js";
 import { Button } from "./ui.js";
 
@@ -22,11 +24,60 @@ export function ChatTimeline() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const activeFrame = useRef<number | null>(null);
+  const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
+
+  const questions = useMemo(
+    () =>
+      messages.filter(
+        (message): message is UserMessage =>
+          message.kind === "user" && message.text.trim() !== "",
+      ),
+    [messages],
+  );
+  const showQuestionNav = Boolean(session) && questions.length >= 2;
+
+  const updateActiveQuestion = (): void => {
+    if (activeFrame.current !== null) return;
+    activeFrame.current = window.requestAnimationFrame(() => {
+      activeFrame.current = null;
+      const element = scrollRef.current;
+      if (!element) return;
+      const nodes = element.querySelectorAll<HTMLElement>(
+        "[data-user-message-id]",
+      );
+      if (nodes.length === 0) {
+        setActiveQuestionId(null);
+        return;
+      }
+      const threshold = element.getBoundingClientRect().top + 96;
+      let current = nodes[0]?.dataset.userMessageId ?? null;
+      for (const node of nodes) {
+        if (node.getBoundingClientRect().top <= threshold) {
+          current = node.dataset.userMessageId ?? current;
+        } else {
+          break;
+        }
+      }
+      setActiveQuestionId(current);
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      if (activeFrame.current !== null) {
+        window.cancelAnimationFrame(activeFrame.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     stickToBottom.current = true;
+    setActiveQuestionId(null);
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
+    updateActiveQuestion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id]);
 
   useEffect(() => {
@@ -34,6 +85,8 @@ export function ChatTimeline() {
     if (element && stickToBottom.current) {
       element.scrollTop = element.scrollHeight;
     }
+    updateActiveQuestion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
   const onScroll = (): void => {
@@ -41,14 +94,40 @@ export function ChatTimeline() {
     if (!element) return;
     stickToBottom.current =
       element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+    updateActiveQuestion();
+  };
+
+  const jumpToQuestion = (id: string): void => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const target = Array.from(
+      element.querySelectorAll<HTMLElement>("[data-user-message-id]"),
+    ).find((node) => node.dataset.userMessageId === id);
+    if (!target) return;
+    stickToBottom.current = false;
+    setActiveQuestionId(id);
+    const top =
+      target.getBoundingClientRect().top -
+      element.getBoundingClientRect().top +
+      element.scrollTop -
+      24;
+    element.scrollTo({ top, behavior: "smooth" });
+    target.classList.add("cf-jump-highlight");
+    window.setTimeout(() => {
+      target.classList.remove("cf-jump-highlight");
+    }, 800);
   };
 
   return (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      className="h-full overflow-y-auto overscroll-contain px-4 py-6 sm:px-6"
-    >
+    <div className="relative h-full">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className={cn(
+          "h-full overflow-y-auto overscroll-contain px-4 py-6 sm:px-6",
+          showQuestionNav && "md:pr-14",
+        )}
+      >
       {!session ? (
         <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center gap-4 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary">
@@ -130,12 +209,53 @@ export function ChatTimeline() {
           </p>
         </div>
       ) : (
-        <div className="mx-auto flex max-w-3xl flex-col gap-5 pb-2">
+        <div className="mx-auto flex max-w-5xl flex-col gap-5 pb-2">
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
         </div>
       )}
+      </div>
+
+      {showQuestionNav ? (
+        <nav
+          aria-label="用户提问导航"
+          className="absolute right-3 top-1/2 z-20 hidden max-h-[70%] -translate-y-1/2 flex-col items-end gap-1 overflow-y-auto overflow-x-hidden py-1 md:flex"
+        >
+          {questions.map((question, index) => {
+            const preview = question.text.replace(/\s+/g, " ").trim();
+            const active = question.id === activeQuestionId;
+            return (
+              <button
+                key={question.id}
+                type="button"
+                title={preview}
+                aria-label={`跳转到第 ${index + 1} 个问题：${preview.slice(0, 60)}`}
+                aria-current={active ? "true" : undefined}
+                onClick={() => jumpToQuestion(question.id)}
+                className={cn(
+                  "group/nav flex max-w-[16rem] shrink-0 items-center gap-1.5 rounded-full border py-1 pl-1 pr-1.5 text-[10px] shadow-lg backdrop-blur transition-colors",
+                  active
+                    ? "border-primary/45 bg-primary/10 text-primary"
+                    : "border-border/70 bg-card/90 text-muted-foreground hover:border-primary/35 hover:text-foreground",
+                )}
+              >
+                <span
+                  className={cn(
+                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-mono text-[9px] font-medium",
+                    active ? "bg-primary/20 text-primary" : "bg-muted/70",
+                  )}
+                >
+                  {index + 1}
+                </span>
+                <span className="max-w-0 overflow-hidden whitespace-nowrap text-left opacity-0 transition-all duration-200 group-hover/nav:max-w-[11rem] group-hover/nav:pr-1 group-hover/nav:opacity-100 group-focus-visible/nav:max-w-[11rem] group-focus-visible/nav:pr-1 group-focus-visible/nav:opacity-100">
+                  {preview}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+      ) : null}
     </div>
   );
 }
