@@ -114,6 +114,11 @@ export class SessionStore {
     return session;
   }
 
+  async delete(id: string): Promise<void> {
+    if (!this.sessions.delete(id)) return;
+    await this.persist();
+  }
+
   async updatePermissions(
     id: string,
     mode: SandboxMode,

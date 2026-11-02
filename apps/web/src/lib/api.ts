@@ -95,6 +95,10 @@ export const api = {
     });
   },
 
+  deleteSession(sessionId: string): Promise<void> {
+    return request(`/api/sessions/${sessionId}`, { method: "DELETE" });
+  },
+
   browseWorkspaces(path?: string): Promise<WorkspaceBrowseResponse> {
     const query =
       path === undefined || path.trim() === ""

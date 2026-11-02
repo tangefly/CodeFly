@@ -3,6 +3,7 @@ import {
   AGENT_MAX_STEPS_LIMIT,
   AGENT_TOOL_NAMES,
   APPROVAL_POLICIES,
+  REASONING_EFFORTS,
   SANDBOX_MODES,
 } from "./types.js";
 
@@ -73,6 +74,8 @@ export const llmSettingsUpdateSchema = z.object({
   maxTokens: z.number().int().min(1).max(131_072).nullable().optional(),
   systemPrompt: z.string().max(20_000).optional(),
   timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  thinking: z.boolean().optional(),
+  reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
 });
 
 export const llmTestSchema = z.object({

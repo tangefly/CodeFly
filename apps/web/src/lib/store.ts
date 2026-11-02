@@ -37,6 +37,8 @@ export interface UserMessage extends BaseMessage {
 export interface AssistantMessage extends BaseMessage {
   kind: "assistant";
   text: string;
+  /** Streamed reasoning/thinking text, when the provider returns it. */
+  reasoning?: string;
   streaming: boolean;
   error?: string;
   cancelled?: boolean;
@@ -110,6 +112,7 @@ export interface AppState {
   selectSession(id: string): void;
   ensureMessagesLoaded(sessionId: string): Promise<void>;
   createSession(workspaceRoot: string, title?: string): Promise<boolean>;
+  deleteSession(sessionId: string): Promise<boolean>;
   updatePermissions(mode: SandboxMode, confirmRisk?: boolean): Promise<boolean>;
   decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
   sendChat(text: string): Promise<void>;
@@ -190,6 +193,7 @@ function storedToUi(record: ChatMessageRecord, live = false): ChatMessage | null
       id: record.id,
       kind: "assistant",
       text: record.content,
+      reasoning: record.reasoning,
       streaming: live && record.status === "streaming",
       error: record.status === "error" ? record.error : undefined,
       cancelled: record.status === "cancelled" || interrupted,
@@ -446,6 +450,63 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  deleteSession: async (sessionId: string) => {
+    const state = get();
+    if (
+      state.chatBusy[sessionId] ||
+      state.agentBusy[sessionId] ||
+      chatAborters.has(sessionId) ||
+      agentAborters.has(sessionId)
+    ) {
+      get().notify("info", "当前会话正在执行回合，请先停止后再删除");
+      return false;
+    }
+
+    try {
+      await api.deleteSession(sessionId);
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+
+    loadedSessionIds.delete(sessionId);
+    const remaining = get().sessions.filter((session) => session.id !== sessionId);
+    const wasCurrent = get().currentSessionId === sessionId;
+    const nextId = wasCurrent
+      ? (remaining[0]?.id ?? null)
+      : get().currentSessionId;
+
+    set((current) => {
+      const messages = { ...current.messages };
+      delete messages[sessionId];
+      const chatBusy = { ...current.chatBusy };
+      delete chatBusy[sessionId];
+      const agentBusy = { ...current.agentBusy };
+      delete agentBusy[sessionId];
+      return {
+        sessions: remaining,
+        currentSessionId: nextId,
+        messages,
+        chatBusy,
+        agentBusy,
+        approvals: current.approvals.filter(
+          (approval) => approval.sessionId !== sessionId,
+        ),
+      };
+    });
+
+    try {
+      if (nextId) localStorage.setItem(CURRENT_SESSION_KEY, nextId);
+      else localStorage.removeItem(CURRENT_SESSION_KEY);
+    } catch {
+      // Ignore storage failures.
+    }
+
+    if (nextId) void get().ensureMessagesLoaded(nextId);
+    get().notify("info", "会话已删除");
+    return true;
+  },
+
   updatePermissions: async (mode: SandboxMode, confirmRisk?: boolean) => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return false;
@@ -537,6 +598,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
               patchAssistant(current, sessionId, event.messageId, (message) => ({
                 ...message,
                 text: message.text + event.data,
+              })),
+            );
+          } else if (event.type === "chat.reasoning") {
+            set((current) =>
+              patchAssistant(current, sessionId, event.messageId, (message) => ({
+                ...message,
+                reasoning: (message.reasoning ?? "") + event.data,
               })),
             );
           } else if (event.type === "chat.done") {
@@ -670,6 +738,14 @@ export const useAppStore = create<AppState>()((set, get) => ({
                 patchAssistant(current, sessionId, event.messageId, (message) => ({
                   ...message,
                   text: message.text + event.data,
+                })),
+              );
+              break;
+            case "agent.reasoning":
+              set((current) =>
+                patchAssistant(current, sessionId, event.messageId, (message) => ({
+                  ...message,
+                  reasoning: (message.reasoning ?? "") + event.data,
                 })),
               );
               break;

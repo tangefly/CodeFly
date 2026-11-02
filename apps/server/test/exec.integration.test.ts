@@ -41,6 +41,25 @@ const exec = new ExecService({
   },
 });
 
+// Same service, but with an explicit extra device grant, to prove that the
+// allowlist reaches the real Landlock runner.
+const execWithDevices = new ExecService({
+  sessions,
+  approvals,
+  audit,
+  sandbox,
+  options: {
+    defaultTimeoutMs: 5000,
+    maxTimeoutMs: 10_000,
+    outputLimitBytes: 64 * 1024,
+    flushIntervalMs: 10,
+    approvalTimeoutMs: 1200,
+    denialTtlMs: 60_000,
+    spillDir,
+    extraReadWritePaths: ["/dev/zero"],
+  },
+});
+
 const createdSessionIds = new Set<string>();
 const outsideFiles = new Set<string>();
 
@@ -178,6 +197,26 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
 
     const allowed = await run(session, { command: "echo ok >/dev/null && echo allowed" });
     expect(allowed.events.at(-1)).toMatchObject({ type: "exec.exit", code: 0 });
+  }, 20_000);
+
+  it("grants explicit read-write access to configured device paths", async () => {
+    const session = await newSession("workspace-write");
+    const command = "exec 3<>/dev/zero";
+
+    // Without the grant, O_RDWR on the device node is denied.
+    const denied = await run(session, { command });
+    expect(denied.events.some((event) => event.type === "exec.denied")).toBe(true);
+    expect(denied.events.at(-1)).toMatchObject({ type: "exec.exit", code: 1 });
+    collectorDenial(denied);
+    denied.unsubscribe();
+
+    // With /dev/zero in extraReadWritePaths, the same command succeeds.
+    const record = await execWithDevices.create(session, { command });
+    const collector = collect(record);
+    await collector.waitFor((event) => event.type === "exec.exit");
+    expect(collector.events.some((event) => event.type === "exec.denied")).toBe(false);
+    expect(collector.events.at(-1)).toMatchObject({ type: "exec.exit", code: 0 });
+    collector.unsubscribe();
   }, 20_000);
 
   it("escalates once after a denial with approval", async () => {
@@ -336,6 +375,7 @@ function collectorDenial(collector: Collector): void {
 }
 
 afterAll(async () => {
+  await execWithDevices.shutdown();
   await exec.shutdown();
   for (const sessionId of createdSessionIds) {
     await rm(path.join("/tmp/codefly", sessionId), { recursive: true, force: true });

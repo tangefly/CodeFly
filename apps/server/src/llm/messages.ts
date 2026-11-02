@@ -103,6 +103,11 @@ export class MessageStore {
     await this.persist();
   }
 
+  async delete(sessionId: string): Promise<void> {
+    if (!this.bySession.delete(sessionId)) return;
+    await this.persist();
+  }
+
   async update(
     sessionId: string,
     messageId: string,

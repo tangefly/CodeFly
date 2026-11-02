@@ -38,6 +38,8 @@ function makeConfig(baseUrl: string, overrides: Partial<LlmInternalConfig> = {})
     maxTokens: null,
     systemPrompt: "system",
     timeoutMs: 5000,
+    thinking: true,
+    reasoningEffort: "high",
     updatedAt: null,
     ...overrides,
   };
@@ -170,6 +172,101 @@ describe("LlmClient", () => {
       completionTokens: 1,
       cachedTokens: 64,
     });
+  });
+
+  it("streams reasoning_content and sends DeepSeek thinking fields", async () => {
+    let receivedBody = "";
+    const baseUrl = await startServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        receivedBody = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "We need " } }] })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "answer." } }] })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [],
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 12,
+              total_tokens: 22,
+              completion_tokens_details: { reasoning_tokens: 7 },
+            },
+          })}\n\n`,
+        );
+        res.end("data: [DONE]\n\n");
+      });
+    });
+
+    const client = new LlmClient();
+    const reasoning: string[] = [];
+    const deltas: string[] = [];
+    const result = await client.streamChat(
+      makeConfig(baseUrl, { model: "deepseek-v4-flash" }),
+      messages,
+      (delta) => deltas.push(delta),
+      new AbortController().signal,
+      { onReasoningDelta: (delta) => reasoning.push(delta) },
+    );
+
+    expect(reasoning).toEqual(["We need ", "answer."]);
+    expect(deltas).toEqual(["ok"]);
+    expect(result.reasoningContent).toBe("We need answer.");
+    expect(result.content).toBe("ok");
+    expect(result.usage).toMatchObject({
+      completionTokens: 12,
+      reasoningTokens: 7,
+    });
+
+    const body = JSON.parse(receivedBody) as {
+      thinking?: unknown;
+      reasoning_effort?: unknown;
+    };
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("honors thinking disabled and leaves other providers untouched", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const baseUrl = await startServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "ok" } }] }));
+      });
+    });
+
+    const client = new LlmClient();
+    await client.streamChat(
+      makeConfig(baseUrl, {
+        model: "deepseek-v4-pro",
+        thinking: false,
+      }),
+      messages,
+      () => undefined,
+      new AbortController().signal,
+    );
+    await client.streamChat(
+      makeConfig(baseUrl, { model: "gpt-4o" }),
+      messages,
+      () => undefined,
+      new AbortController().signal,
+    );
+
+    expect(bodies[0]?.thinking).toEqual({ type: "disabled" });
+    expect(bodies[0]).not.toHaveProperty("reasoning_effort");
+    expect(bodies[1]).not.toHaveProperty("thinking");
+    expect(bodies[1]).not.toHaveProperty("reasoning_effort");
   });
 
   it("supports non-streaming JSON responses", async () => {

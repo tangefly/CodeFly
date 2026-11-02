@@ -37,6 +37,8 @@ export function registerLlmRoutes(app: FastifyInstance, deps: LlmRouteDeps): voi
       type: "llm.config.changed",
       baseUrl: settings.baseUrl,
       model: settings.model,
+      thinking: settings.thinking,
+      reasoningEffort: settings.reasoningEffort,
       hasApiKey: settings.hasApiKey,
       apiKeyChanged:
         before.hasApiKey !== settings.hasApiKey ||

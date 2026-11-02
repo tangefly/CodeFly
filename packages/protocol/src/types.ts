@@ -121,8 +121,10 @@ export interface ChatMessageRecord {
   usage?: ChatUsage;
   /** Assistant messages: milliseconds from request start to stream end. */
   durationMs?: number;
-  /** Assistant messages: milliseconds from request start to first content delta. */
+  /** Assistant messages: milliseconds from request start to first visible delta. */
   firstTokenMs?: number;
+  /** Assistant messages: streamed reasoning/thinking text, when the provider returns it. */
+  reasoning?: string;
   /** Assistant messages: tool calls requested by the model. */
   toolCalls?: AgentToolCall[];
   /** Tool messages: which assistant tool call this result answers. */
@@ -170,7 +172,12 @@ export interface ChatUsage {
   totalTokens?: number;
   /** Prompt tokens served from a provider cache, when reported. */
   cachedTokens?: number;
+  /** Reasoning tokens, included in completionTokens when reported. */
+  reasoningTokens?: number;
 }
+
+export const REASONING_EFFORTS = ["low", "high", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export interface LlmSettingsPublic {
   configured: boolean;
@@ -182,6 +189,9 @@ export interface LlmSettingsPublic {
   maxTokens: number | null;
   systemPrompt: string;
   timeoutMs: number;
+  /** DeepSeek thinking mode. Enabled by default. */
+  thinking: boolean;
+  reasoningEffort: ReasoningEffort;
   updatedAt: string | null;
 }
 
@@ -195,6 +205,8 @@ export interface LlmSettingsInput {
   maxTokens?: number | null;
   systemPrompt?: string;
   timeoutMs?: number;
+  thinking?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }
 
 /** Input accepted by POST /api/llm/test; omitted fields fall back to saved config. */
@@ -220,6 +232,7 @@ export interface ChatHistoryResponse {
 
 export type AuditType =
   | "session.created"
+  | "session.deleted"
   | "permission.changed"
   | "settings.changed"
   | "exec.started"

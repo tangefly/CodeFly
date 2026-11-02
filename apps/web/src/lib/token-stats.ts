@@ -5,10 +5,53 @@ export interface SessionUsage {
   completionTokens: number;
   totalTokens: number;
   cachedTokens: number;
+  /** Reasoning tokens reported by the provider (included in completionTokens). */
+  reasoningTokens: number;
+  /**
+   * Prompt tokens of the most recent request. This is the context size that
+   * was actually sent (history + tools + system prompt), unlike the cumulative
+   * promptTokens total. Null before the first usage report.
+   */
+  contextTokens: number | null;
   /** Output tokens per second, weighted by the generation time of each reply. */
   speed: number | null;
   /** Share of prompt tokens served from the provider cache. */
   cacheHitRate: number | null;
+}
+
+export interface ConversationSize {
+  /** Number of persisted user/assistant/tool messages in the session. */
+  messages: number;
+  /** Total characters across message text, reasoning, and tool arguments/output. */
+  chars: number;
+  /** Rough token estimate from the character count. */
+  tokens: number;
+}
+
+/**
+ * Current session conversation length: every persisted message (user,
+ * assistant, tool), excluding UI-only system notices and provider overhead
+ * (system prompt / tool definitions).
+ */
+export function computeConversationSize(
+  messages: ChatMessage[],
+): ConversationSize {
+  let chars = 0;
+  let count = 0;
+
+  for (const message of messages) {
+    if (message.kind === "system") continue;
+    count += 1;
+    if (message.kind === "user") {
+      chars += message.text.length;
+    } else if (message.kind === "assistant") {
+      chars += message.text.length + (message.reasoning?.length ?? 0);
+    } else if (message.kind === "tool") {
+      chars += message.content.length + message.arguments.length;
+    }
+  }
+
+  return { messages: count, chars, tokens: Math.ceil(chars / 3) };
 }
 
 export function formatTokens(value: number): string {
@@ -29,6 +72,8 @@ export function computeSessionUsage(
   let completionTokens = 0;
   let totalTokens = 0;
   let cachedTokens = 0;
+  let reasoningTokens = 0;
+  let contextTokens: number | null = null;
   let cachePromptTokens = 0;
   let generationMs = 0;
   let timedCompletionTokens = 0;
@@ -43,6 +88,8 @@ export function computeSessionUsage(
 
     if (usage.promptTokens !== undefined) {
       promptTokens += usage.promptTokens;
+      // Messages are chronological, so the last reported request wins.
+      contextTokens = usage.promptTokens;
       hasInput = true;
     }
     if (usage.completionTokens !== undefined) {
@@ -59,6 +106,9 @@ export function computeSessionUsage(
     if (usage.totalTokens !== undefined) {
       totalTokens += usage.totalTokens;
       hasTotal = true;
+    }
+    if (usage.reasoningTokens !== undefined) {
+      reasoningTokens += usage.reasoningTokens;
     }
     if (
       usage.cachedTokens !== undefined &&
@@ -78,6 +128,8 @@ export function computeSessionUsage(
     completionTokens,
     totalTokens,
     cachedTokens,
+    reasoningTokens,
+    contextTokens,
     speed:
       timedCompletionTokens > 0 && generationMs > 0
         ? timedCompletionTokens / (generationMs / 1000)

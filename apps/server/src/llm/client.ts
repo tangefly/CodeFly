@@ -12,6 +12,11 @@ export interface LlmChatMessage {
   content: string | null;
   tool_calls?: LlmRequestToolCall[];
   tool_call_id?: string;
+  /**
+   * DeepSeek thinking mode: assistant history must echo this back whenever
+   * the request carries tools, otherwise the API rejects the request.
+   */
+  reasoning_content?: string | null;
 }
 
 export interface LlmToolCall {
@@ -32,14 +37,18 @@ export interface LlmToolDefinition {
 export interface StreamChatOptions {
   tools?: LlmToolDefinition[];
   toolChoice?: "auto" | "none";
+  /** Called for each streamed reasoning/thinking delta. */
+  onReasoningDelta?: (text: string) => void;
 }
 
 export interface LlmStreamResult {
   content: string;
+  /** Streamed reasoning/thinking text, when the provider returns it. */
+  reasoningContent?: string;
   finishReason: string | null;
   usage?: ChatUsage;
   toolCalls: LlmToolCall[];
-  /** Milliseconds from request start to the first content delta. */
+  /** Milliseconds from request start to the first visible delta. */
   firstTokenMs?: number;
   /** Milliseconds from request start to the end of the stream. */
   durationMs?: number;
@@ -89,9 +98,16 @@ interface OpenAiToolCallDelta {
 }
 
 interface OpenAiChoice {
-  delta?: { content?: unknown; tool_calls?: OpenAiToolCallDelta[] };
+  delta?: {
+    content?: unknown;
+    reasoning_content?: unknown;
+    reasoning?: unknown;
+    tool_calls?: OpenAiToolCallDelta[];
+  };
   message?: {
     content?: unknown;
+    reasoning_content?: unknown;
+    reasoning?: unknown;
     tool_calls?: Array<{
       id?: string;
       type?: string;
@@ -112,6 +128,8 @@ interface OpenAiResponse {
     /** DeepSeek style cache reporting. */
     prompt_cache_hit_tokens?: unknown;
     prompt_cache_miss_tokens?: unknown;
+    /** Reasoning tokens are a subset of completion_tokens. */
+    completion_tokens_details?: { reasoning_tokens?: unknown };
   };
   error?: unknown;
   model?: unknown;
@@ -154,6 +172,21 @@ function extractDeltaContent(choice: OpenAiChoice | undefined): string {
   return extractContent(choice.delta?.content ?? choice.message?.content);
 }
 
+function extractReasoningContent(choice: OpenAiChoice | undefined): string {
+  if (!choice) return "";
+  return extractContent(
+    choice.delta?.reasoning_content ??
+      choice.delta?.reasoning ??
+      choice.message?.reasoning_content ??
+      choice.message?.reasoning,
+  );
+}
+
+/** DeepSeek's OpenAI-compatible endpoint uses these extra request fields. */
+export function isDeepSeekThinkingModel(model: string): boolean {
+  return /^deepseek-(v4|flash|chat|reasoner)/i.test(model.trim());
+}
+
 function responseToolCalls(choice: OpenAiChoice | undefined): LlmToolCall[] {
   const calls = choice?.message?.tool_calls;
   if (!Array.isArray(calls)) return [];
@@ -177,6 +210,10 @@ function mapUsage(value: OpenAiResponse["usage"]): ChatUsage | undefined {
     usage.completionTokens = value.completion_tokens;
   }
   if (typeof value.total_tokens === "number") usage.totalTokens = value.total_tokens;
+  const reasoning = value.completion_tokens_details?.reasoning_tokens;
+  if (typeof reasoning === "number" && reasoning >= 0) {
+    usage.reasoningTokens = reasoning;
+  }
   const cached =
     typeof value.prompt_tokens_details?.cached_tokens === "number"
       ? value.prompt_tokens_details.cached_tokens
@@ -269,6 +306,10 @@ function bodyFor(
     body.tools = options.tools;
     body.tool_choice = options.toolChoice ?? "auto";
   }
+  if (isDeepSeekThinkingModel(config.model)) {
+    body.thinking = { type: config.thinking ? "enabled" : "disabled" };
+    if (config.thinking) body.reasoning_effort = config.reasoningEffort;
+  }
   return body;
 }
 
@@ -329,9 +370,16 @@ export class LlmClient implements LlmClientLike {
   ): Promise<LlmStreamResult> {
     const startedAt = Date.now();
     let firstDeltaAt: number | null = null;
-    const onContentDelta = (text: string): void => {
+    const markFirstDelta = (): void => {
       if (firstDeltaAt === null) firstDeltaAt = Date.now();
+    };
+    const onContentDelta = (text: string): void => {
+      markFirstDelta();
       onDelta(text);
+    };
+    const onReasoningDelta = (text: string): void => {
+      markFirstDelta();
+      options?.onReasoningDelta?.(text);
     };
     const timing = (): Pick<LlmStreamResult, "firstTokenMs" | "durationMs"> => ({
       ...(firstDeltaAt !== null ? { firstTokenMs: firstDeltaAt - startedAt } : {}),
@@ -351,11 +399,14 @@ export class LlmClient implements LlmClientLike {
       this.throwIfUpstreamError(json, config);
       const choice = json.choices?.[0];
       const content = extractDeltaContent(choice);
+      const reasoningContent = extractReasoningContent(choice);
       // No incremental deltas here, so leave firstTokenMs unset: the UI will
       // fall back to the full request duration for throughput.
+      if (reasoningContent) options?.onReasoningDelta?.(reasoningContent);
       if (content) onDelta(content);
       return {
         content,
+        reasoningContent,
         finishReason: extractFinishReason(choice),
         usage: mapUsage(json.usage),
         toolCalls: responseToolCalls(choice),
@@ -371,6 +422,7 @@ export class LlmClient implements LlmClientLike {
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    let reasoningContent = "";
     let finishReason: string | null = null;
     let usage: ChatUsage | undefined;
     let doneSeen = false;
@@ -428,6 +480,11 @@ export class LlmClient implements LlmClientLike {
       const reason = extractFinishReason(choice);
       if (reason !== null) finishReason = reason;
       consumeToolDeltas(choice?.delta?.tool_calls);
+      const reasoningDelta = extractReasoningContent(choice);
+      if (reasoningDelta !== "") {
+        reasoningContent += reasoningDelta;
+        onReasoningDelta(reasoningDelta);
+      }
       const delta = extractDeltaContent(choice);
       if (delta !== "") {
         content += delta;
@@ -460,6 +517,7 @@ export class LlmClient implements LlmClientLike {
       if (signal.aborted) {
         return {
           content,
+          reasoningContent,
           finishReason,
           usage,
           toolCalls: collectToolCalls(),
@@ -479,6 +537,7 @@ export class LlmClient implements LlmClientLike {
     const toolCalls = collectToolCalls();
     if (
       content === "" &&
+      reasoningContent === "" &&
       toolCalls.length === 0 &&
       finishReason === null &&
       !doneSeen
@@ -486,7 +545,14 @@ export class LlmClient implements LlmClientLike {
       throw new LlmError("LLM_EMPTY_RESPONSE", "模型返回了空响应", 502);
     }
 
-    return { content, finishReason, usage, toolCalls, ...timing() };
+    return {
+      content,
+      reasoningContent,
+      finishReason,
+      usage,
+      toolCalls,
+      ...timing(),
+    };
   }
 
   async complete(

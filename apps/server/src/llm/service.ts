@@ -153,6 +153,7 @@ export class ChatService {
     };
 
     let assistantContent = "";
+    let assistantReasoning = "";
 
     try {
       await this.deps.messages.appendMany(session.id, [userMessage, assistantMessage]);
@@ -189,6 +190,16 @@ export class ChatService {
             });
           },
           signal,
+          {
+            onReasoningDelta: (delta) => {
+              assistantReasoning += delta;
+              emit({
+                type: "chat.reasoning",
+                messageId: assistantMessage.id,
+                data: delta,
+              });
+            },
+          },
         );
 
         if (result.content !== "" && result.content.length >= assistantContent.length) {
@@ -201,6 +212,7 @@ export class ChatService {
           status: "complete",
           error: undefined,
           model: config.model,
+          ...(assistantReasoning !== "" ? { reasoning: assistantReasoning } : {}),
           ...(result.usage !== undefined ? { usage: result.usage } : {}),
           ...(result.durationMs !== undefined
             ? { durationMs: result.durationMs }
@@ -217,6 +229,7 @@ export class ChatService {
               ...assistantMessage,
               content: assistantContent,
               status: "complete",
+              ...(assistantReasoning !== "" ? { reasoning: assistantReasoning } : {}),
               usage: result.usage,
               durationMs: result.durationMs,
               firstTokenMs: result.firstTokenMs,
@@ -235,6 +248,7 @@ export class ChatService {
             0,
           ),
           responseChars: assistantContent.length,
+          reasoningChars: assistantReasoning.length,
           contextTrimmed: context.trimmed,
           usage,
         });
@@ -262,6 +276,7 @@ export class ChatService {
           status,
           error: status === "error" ? message : undefined,
           model: config.model,
+          ...(assistantReasoning !== "" ? { reasoning: assistantReasoning } : {}),
         });
 
         if (!aborted) {
@@ -328,6 +343,9 @@ export class ChatService {
       maxTokens:
         input.maxTokens === undefined ? stored.maxTokens : input.maxTokens,
       timeoutMs: input.timeoutMs ?? stored.timeoutMs,
+      // Keep the connection probe small and predictable: reasoning tokens
+      // would count against testMaxTokens.
+      thinking: false,
     };
 
     const startedAt = Date.now();

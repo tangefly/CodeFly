@@ -16,6 +16,11 @@ function bwrapArgs(policy: SandboxPolicy): string[] {
       "--tmpfs", "/tmp",
       "--bind", policy.workspaceRoot, policy.workspaceRoot,
     );
+    // `--dev /dev` creates a minimal /dev without host GPU nodes, so any
+    // explicitly granted devices (and /dev/shm) must be re-bound.
+    for (const readWritePath of policy.readWritePaths ?? []) {
+      args.push("--dev-bind", readWritePath, readWritePath);
+    }
   }
   return args;
 }

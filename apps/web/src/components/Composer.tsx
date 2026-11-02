@@ -13,6 +13,7 @@ import {
   useAppStore,
 } from "../lib/store.js";
 import {
+  computeConversationSize,
   computeSessionUsage,
   formatSpeed,
   formatTokens,
@@ -47,6 +48,10 @@ export function Composer() {
   const busy = chatStreaming || agentStreaming;
   const sessionUsage = useMemo(
     () => (messages ? computeSessionUsage(messages) : null),
+    [messages],
+  );
+  const conversationSize = useMemo(
+    () => computeConversationSize(messages ?? []),
     [messages],
   );
 
@@ -240,14 +245,34 @@ export function Composer() {
             <span className="font-sans text-muted-foreground/45">
               本会话用量
             </span>
+            {conversationSize.messages > 0 ? (
+              <span
+                className="text-foreground/70"
+                title={`当前会话 ${conversationSize.messages} 条消息，共 ${conversationSize.chars} 字符；tokens 按字符数估算，仅供参考`}
+              >
+                会话上下文 {conversationSize.messages} 条消息 · ≈
+                {formatTokens(conversationSize.tokens)} tok
+              </span>
+            ) : null}
             {sessionUsage.promptTokens > 0 ? (
-              <span title={`${sessionUsage.promptTokens} prompt tokens`}>
-                输入 {formatTokens(sessionUsage.promptTokens)} tok
+              <span
+                title={`${sessionUsage.promptTokens} prompt tokens（本会话所有请求的上下文之和，包含缓存命中）`}
+              >
+                累积上下文 {formatTokens(sessionUsage.promptTokens)} tok
               </span>
             ) : null}
             {sessionUsage.completionTokens > 0 ? (
-              <span title={`${sessionUsage.completionTokens} completion tokens`}>
-                输出 {formatTokens(sessionUsage.completionTokens)} tok
+              <span
+                title={`${sessionUsage.completionTokens} completion tokens（本会话累计）`}
+              >
+                累计输出 {formatTokens(sessionUsage.completionTokens)} tok
+              </span>
+            ) : null}
+            {sessionUsage.reasoningTokens > 0 ? (
+              <span
+                title={`${sessionUsage.reasoningTokens} reasoning tokens（已计入输出）`}
+              >
+                思考 {formatTokens(sessionUsage.reasoningTokens)} tok
               </span>
             ) : null}
             {sessionUsage.promptTokens === 0 &&

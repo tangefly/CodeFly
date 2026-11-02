@@ -43,6 +43,7 @@ export class LandlockRunner implements SandboxRunner {
     const readWrite = ["/dev/null"];
     if (policy.mode === "workspace-write") {
       readWrite.push(policy.workspaceRoot, "/tmp", os.tmpdir());
+      readWrite.push(...(policy.readWritePaths ?? []));
     }
 
     return {

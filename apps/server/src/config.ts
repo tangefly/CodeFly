@@ -8,6 +8,14 @@ function num(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function pathList(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === "") return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => path.isAbsolute(entry));
+}
+
 const repoDataDir = fileURLToPath(new URL("../../../data", import.meta.url));
 
 export const config = {
@@ -20,6 +28,13 @@ export const config = {
   token: process.env.CODEFLY_TOKEN?.trim() || crypto.randomBytes(24).toString("base64url"),
   version: "0.1.0",
   approvalTimeoutMs: num(process.env.CODEFLY_APPROVAL_TIMEOUT_MS, 120_000),
+  sandbox: {
+    // Default-on: workspace-write still fences filesystem writes, but GPU
+    // devices and /dev/shm are granted so ordinary local development works
+    // without extra environment variables. Set CODEFLY_ALLOW_GPU=0 to opt out.
+    gpuAccess: process.env.CODEFLY_ALLOW_GPU !== "0",
+    extraReadWritePaths: pathList(process.env.CODEFLY_SANDBOX_RW_PATHS),
+  },
   exec: {
     defaultTimeoutMs: 60_000,
     maxTimeoutMs: 600_000,

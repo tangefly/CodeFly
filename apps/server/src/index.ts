@@ -11,6 +11,7 @@ import { SessionStore } from "./session/store.js";
 import { SettingsStore } from "./settings/store.js";
 import { ApprovalService } from "./approval/service.js";
 import { SandboxManager } from "./sandbox/runner.js";
+import { gpuReadWritePaths } from "./sandbox/devices.js";
 import { ExecService } from "./exec/service.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -80,6 +81,13 @@ async function main(): Promise<void> {
   const sandbox = new SandboxManager();
   sandbox.init();
 
+  const sandboxExtraReadWritePaths = [
+    ...new Set([
+      ...(config.sandbox.gpuAccess ? gpuReadWritePaths() : []),
+      ...config.sandbox.extraReadWritePaths,
+    ]),
+  ];
+
   const approvals = new ApprovalService(audit);
   const exec = new ExecService({
     sessions,
@@ -94,6 +102,7 @@ async function main(): Promise<void> {
       approvalTimeoutMs: config.approvalTimeoutMs,
       denialTtlMs: config.exec.denialTtlMs,
       spillDir: paths.spills,
+      extraReadWritePaths: sandboxExtraReadWritePaths,
     },
   });
 
@@ -184,7 +193,14 @@ async function main(): Promise<void> {
     version: config.version,
     dev: Boolean(config.devWebUrl),
   });
-  registerSessionRoutes(app, { sessions, settings, audit });
+  registerSessionRoutes(app, {
+    sessions,
+    settings,
+    audit,
+    messages: messageStore,
+    lock: runLock,
+    exec,
+  });
   registerExecRoutes(app, { sessions, exec });
   registerFsRoutes(app, {
     sessions,
@@ -248,6 +264,13 @@ async function main(): Promise<void> {
     `  sandbox : ${status.runner ?? "unavailable"} (${status.probe})` +
       (config.devWebUrl ? "  [dev: redirecting to Vite]" : ""),
   );
+  const deviceStatus =
+    sandboxExtraReadWritePaths.length > 0
+      ? `${sandboxExtraReadWritePaths.length} path(s) granted read-write`
+      : config.sandbox.gpuAccess
+        ? "no device paths found"
+        : "device access disabled";
+  console.log(`  devices : ${deviceStatus}`);
   console.log(
     `  llm     : ${
       llmStatus.configured

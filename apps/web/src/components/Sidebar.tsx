@@ -1,8 +1,17 @@
-import { Folder, Plus, Settings, ShieldCheck, ShieldX, Terminal } from "lucide-react";
-import type { SandboxMode } from "@codefly/protocol";
+import { useState } from "react";
+import {
+  Folder,
+  Plus,
+  Settings,
+  ShieldCheck,
+  ShieldX,
+  Terminal,
+  Trash2,
+} from "lucide-react";
+import type { SandboxMode, Session } from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { MODE_SHORT_LABEL, basename, cn, relativeTime } from "../lib/utils.js";
-import { Button, StatusDot } from "./ui.js";
+import { Button, Modal, StatusDot } from "./ui.js";
 
 const MODE_DOT: Record<SandboxMode, string> = {
   "read-only": "bg-sky-400",
@@ -19,6 +28,19 @@ export function Sidebar() {
   const open = useAppStore((state) => state.ui.sidebarOpen);
   const close = useAppStore((state) => state.closeSidebar);
   const sandbox = useAppStore((state) => state.sandbox);
+  const deleteSession = useAppStore((state) => state.deleteSession);
+  const chatBusy = useAppStore((state) => state.chatBusy);
+  const agentBusy = useAppStore((state) => state.agentBusy);
+  const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const confirmDelete = async (): Promise<void> => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    const deleted = await deleteSession(pendingDelete.id);
+    setDeleting(false);
+    if (deleted) setPendingDelete(null);
+  };
 
   return (
     <>
@@ -83,13 +105,16 @@ export function Sidebar() {
             <ul className="space-y-1">
               {sessions.map((session) => {
                 const active = session.id === currentId;
+                const busy = Boolean(
+                  chatBusy[session.id] || agentBusy[session.id],
+                );
                 return (
-                  <li key={session.id}>
+                  <li key={session.id} className="group relative">
                     <button
                       type="button"
                       onClick={() => selectSession(session.id)}
                       className={cn(
-                        "group w-full rounded-xl border px-2.5 py-2 text-left transition-colors",
+                        "w-full rounded-xl border px-2.5 py-2 pr-9 text-left transition-colors",
                         active
                           ? "border-primary/30 bg-primary/10"
                           : "border-transparent hover:border-border hover:bg-muted/40",
@@ -124,6 +149,16 @@ export function Sidebar() {
                           {MODE_SHORT_LABEL[session.mode]}
                         </span>
                       </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingDelete(session)}
+                      disabled={busy}
+                      aria-label={`删除会话 ${session.title}`}
+                      title={busy ? "会话执行中，停止后才能删除" : "删除会话"}
+                      className="absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground/40 opacity-100 transition-colors hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 lg:opacity-0 lg:group-hover:opacity-100"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </li>
                 );
@@ -163,6 +198,38 @@ export function Sidebar() {
           </button>
         </div>
       </aside>
+
+      <Modal
+        open={pendingDelete !== null}
+        onClose={deleting ? undefined : () => setPendingDelete(null)}
+        title="删除会话"
+        description="此操作不可撤销。"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setPendingDelete(null)}
+              disabled={deleting}
+            >
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => void confirmDelete()}
+              disabled={deleting}
+            >
+              {deleting ? "删除中…" : "删除"}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs leading-5 text-muted-foreground">
+          将永久删除会话「{pendingDelete?.title ?? ""}」及其全部聊天与工具记录。
+          工作区中的文件不会被删除。
+        </p>
+      </Modal>
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +29,8 @@ describe("LlmConfigStore", () => {
     expect(empty.hasApiKey).toBe(false);
     expect(empty.apiKeyHint).toBeNull();
     expect(empty.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(empty.thinking).toBe(true);
+    expect(empty.reasoningEffort).toBe("high");
 
     const saved = await store.update({
       baseUrl: "https://api.example.com/v1/",
@@ -118,6 +120,63 @@ describe("LlmConfigStore", () => {
         model: "m",
       }),
     ).rejects.toMatchObject({ code: "LLM_INVALID_CONFIG" });
+  });
+
+  it("persists the thinking toggle and effort", async () => {
+    const store = new LlmConfigStore(file);
+    await store.init();
+    const saved = await store.update({
+      baseUrl: "https://api.example.com/v1",
+      model: "m",
+      thinking: false,
+      reasoningEffort: "max",
+    });
+    expect(saved).toMatchObject({ thinking: false, reasoningEffort: "max" });
+
+    const reloaded = new LlmConfigStore(file);
+    await reloaded.init();
+    expect(reloaded.getInternal()).toMatchObject({
+      thinking: false,
+      reasoningEffort: "max",
+    });
+    const raw = JSON.parse(await readFile(file, "utf8")) as {
+      thinking?: boolean;
+      reasoningEffort?: string;
+    };
+    expect(raw.thinking).toBe(false);
+    expect(raw.reasoningEffort).toBe("max");
+  });
+
+  it("migrates retired DeepSeek model aliases", async () => {
+    await writeFile(
+      file,
+      JSON.stringify({
+        baseUrl: "https://api.deepseek.com/v1",
+        model: "deepseek-chat",
+        apiKey: "k",
+      }),
+      "utf8",
+    );
+    const store = new LlmConfigStore(file);
+    await store.init();
+    expect(store.getInternal().model).toBe("deepseek-v4-flash");
+    const migrated = JSON.parse(await readFile(file, "utf8")) as {
+      model?: string;
+    };
+    expect(migrated.model).toBe("deepseek-v4-flash");
+
+    await writeFile(
+      file,
+      JSON.stringify({
+        baseUrl: "https://api.deepseek.com/v1",
+        model: "deepseek-reasoner",
+        apiKey: "k",
+      }),
+      "utf8",
+    );
+    const reasoningStore = new LlmConfigStore(file);
+    await reasoningStore.init();
+    expect(reasoningStore.getInternal().model).toBe("deepseek-v4-pro");
   });
 
   it("reloads persisted settings", async () => {

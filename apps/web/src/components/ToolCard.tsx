@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -63,7 +63,11 @@ function statusMeta(message: ToolMessage): {
 export function ToolCard({ message }: { message: ToolMessage }) {
   const [copied, setCopied] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
-  const [outputOpen, setOutputOpen] = useState(false);
+  const [outputOpen, setOutputOpen] = useState(message.status === "error");
+
+  useEffect(() => {
+    if (message.status === "error") setOutputOpen(true);
+  }, [message.status]);
   const meta = message.meta ?? {};
   const args = parseArguments(message.arguments);
   const label = TOOL_LABEL[message.toolName] ?? message.toolName;
@@ -111,6 +115,58 @@ export function ToolCard({ message }: { message: ToolMessage }) {
     message.toolName === "list_files" ||
     message.toolName === "write_file" ||
     message.toolName === "edit_file";
+
+  /** Shared collapsible "result" section for file tools and unknown tools. */
+  const renderCollapsibleResult = (label: string) => (
+    <div className="border-t border-border/60 bg-[#080a0f]">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setOutputOpen((value) => !value)}
+          aria-expanded={outputOpen}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          title={outputOpen ? "收起输出" : "展开输出"}
+        >
+          <ChevronRight
+            className={cn(
+              "h-3 w-3 shrink-0 text-muted-foreground/70 transition-transform",
+              outputOpen && "rotate-90",
+            )}
+          />
+          <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground/60">
+            {label}
+          </span>
+          {message.status === "error" ? (
+            <span className="font-mono text-[9px] text-danger/80">失败</span>
+          ) : null}
+          {!outputOpen ? (
+            <span className="truncate font-mono text-[9px] text-muted-foreground/45">
+              点击展开
+            </span>
+          ) : null}
+        </button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="复制工具输出"
+          title="复制工具输出"
+          className="h-6 w-6 shrink-0 text-muted-foreground"
+          onClick={copyText}
+        >
+          {copied ? (
+            <Check className="h-3 w-3 text-primary" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+        </Button>
+      </div>
+      {outputOpen ? (
+        <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] leading-5 text-foreground/85">
+          {message.content || "(empty)"}
+        </pre>
+      ) : null}
+    </div>
+  );
 
   return (
     <div className="cf-fade-up overflow-hidden rounded-xl border border-border bg-card/70">
@@ -262,43 +318,16 @@ export function ToolCard({ message }: { message: ToolMessage }) {
         </div>
       ) : null}
 
-      {showFileContent && message.status !== "running" ? (
-        <div className="border-t border-border/60 bg-[#080a0f]">
-          <div className="flex items-center justify-between px-3 pt-2">
-            <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground/60">
-              result
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="复制工具输出"
-              title="复制工具输出"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={copyText}
-            >
-              {copied ? (
-                <Check className="h-3 w-3 text-primary" />
-              ) : (
-                <Copy className="h-3 w-3" />
-              )}
-            </Button>
-          </div>
-          <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] leading-5 text-foreground/85">
-            {message.content || "(empty)"}
-          </pre>
-        </div>
-      ) : null}
+      {showFileContent && message.status !== "running"
+        ? renderCollapsibleResult("result")
+        : null}
 
       {message.toolName !== "run_command" &&
       !showFileContent &&
       message.content &&
-      message.status !== "running" ? (
-        <div className="border-t border-border/60 bg-[#080a0f] px-3 py-2">
-          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-foreground/85">
-            {message.content}
-          </pre>
-        </div>
-      ) : null}
+      message.status !== "running"
+        ? renderCollapsibleResult("output")
+        : null}
     </div>
   );
 }

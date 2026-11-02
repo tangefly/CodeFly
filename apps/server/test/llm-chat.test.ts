@@ -10,6 +10,7 @@ import {
   type LlmClientLike,
   type LlmCompleteResult,
   type LlmStreamResult,
+  type StreamChatOptions,
 } from "../src/llm/client.js";
 import {
   LlmConfigStore,
@@ -26,6 +27,7 @@ const audit = {
 
 class FakeClient implements LlmClientLike {
   mode: "ok" | "error" | "abort" = "ok";
+  reasoning = "";
   calls: Array<{ config: LlmInternalConfig; messages: LlmChatMessage[] }> = [];
 
   async streamChat(
@@ -33,10 +35,14 @@ class FakeClient implements LlmClientLike {
     messages: LlmChatMessage[],
     onDelta: (text: string) => void,
     signal: AbortSignal,
+    options?: StreamChatOptions,
   ): Promise<LlmStreamResult> {
     this.calls.push({ config, messages });
     if (this.mode === "error") {
       throw new LlmError("LLM_HTTP_ERROR", "upstream failed", 502);
+    }
+    if (this.reasoning !== "") {
+      options?.onReasoningDelta?.(this.reasoning);
     }
     if (this.mode === "abort") {
       onDelta("partial");
@@ -56,6 +62,7 @@ class FakeClient implements LlmClientLike {
     onDelta(" world");
     return {
       content: "Hello world",
+      reasoningContent: this.reasoning !== "" ? this.reasoning : undefined,
       finishReason: "stop",
       usage: { totalTokens: 3 },
       toolCalls: [],
@@ -186,6 +193,29 @@ describe("ChatService", () => {
     const sent = client.calls[0]!;
     expect(sent.messages[0]).toMatchObject({ role: "system" });
     expect(sent.messages.at(-1)).toMatchObject({ role: "user", content: "hi" });
+  });
+
+  it("streams and persists reasoning", async () => {
+    client.reasoning = "let me think";
+    const events: ChatEvent[] = [];
+    await service.chat(session, "hi", new AbortController().signal, (event) =>
+      events.push(event),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "chat.started",
+      "chat.reasoning",
+      "chat.delta",
+      "chat.delta",
+      "chat.done",
+    ]);
+    const history = messageStore.list(session.id);
+    expect(history[1]).toMatchObject({
+      role: "assistant",
+      content: "Hello world",
+      reasoning: "let me think",
+      status: "complete",
+    });
   });
 
   it("includes prior turns in the next request", async () => {

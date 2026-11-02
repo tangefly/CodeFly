@@ -1,6 +1,8 @@
-import { useState } from "react";
-import { Check, Copy, Info, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Brain, Check, ChevronDown, Copy, Info, Sparkles } from "lucide-react";
 import type { ChatMessage } from "../lib/store.js";
+import { formatTokens } from "../lib/token-stats.js";
+import { cn } from "../lib/utils.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
 import { ToolCard } from "./ToolCard.js";
 import { Button } from "./ui.js";
@@ -44,6 +46,67 @@ function UserMessage({ id, text }: { id: string; text: string }) {
   );
 }
 
+function ReasoningBlock({
+  text,
+  streaming,
+  tokens,
+}: {
+  text: string;
+  streaming: boolean;
+  tokens?: number;
+}) {
+  const [open, setOpen] = useState(streaming);
+
+  useEffect(() => {
+    setOpen(streaming);
+  }, [streaming]);
+
+  return (
+    <div className="mb-2 overflow-hidden rounded-xl border border-border/70 bg-muted/20">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/30"
+      >
+        <Brain
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            streaming && "animate-pulse text-primary",
+          )}
+        />
+        <span className="font-medium">
+          {streaming ? "正在思考…" : "思考过程"}
+        </span>
+        {tokens !== undefined && tokens > 0 ? (
+          <span className="font-mono text-[9px] text-muted-foreground/50">
+            {formatTokens(tokens)} tok
+          </span>
+        ) : null}
+        <ChevronDown
+          className={cn(
+            "ml-auto h-3.5 w-3.5 shrink-0 transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+      {open ? (
+        <div className="border-t border-border/60 px-3 py-2">
+          {text.trim() !== "" ? (
+            <div className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-5 text-muted-foreground/85">
+              {text}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground/60">
+              等待模型输出…
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.kind === "tool") {
     return <ToolCard message={message} />;
@@ -64,9 +127,16 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     return <UserMessage id={message.id} text={message.text} />;
   }
 
+  const hasReasoning = Boolean(message.reasoning?.trim());
+
   // A tool-call-only assistant step has no prose; the tool cards below carry
-  // the useful content.
-  if (!message.text && !message.streaming && message.toolCalls?.length) {
+  // the useful content. Keep it visible when it has reasoning worth showing.
+  if (
+    !message.text &&
+    !message.streaming &&
+    message.toolCalls?.length &&
+    !hasReasoning
+  ) {
     return null;
   }
 
@@ -76,6 +146,13 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
         <Sparkles className="h-3.5 w-3.5" />
       </div>
       <div className="min-w-0 flex-1 pt-0.5">
+        {hasReasoning ? (
+          <ReasoningBlock
+            text={message.reasoning ?? ""}
+            streaming={message.streaming}
+            tokens={message.usage?.reasoningTokens}
+          />
+        ) : null}
         {message.text ? (
           <MarkdownRenderer text={message.text} streaming={message.streaming} />
         ) : message.streaming ? (
@@ -84,7 +161,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary/60 [animation-delay:120ms]" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary/40 [animation-delay:240ms]" />
           </div>
-        ) : (
+        ) : hasReasoning ? null : (
           <p className="pt-0.5 text-xs text-muted-foreground/60">
             {message.error ? "未收到回复" : message.cancelled ? "生成已停止" : "（空响应）"}
           </p>

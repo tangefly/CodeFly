@@ -147,6 +147,7 @@ export class AgentService {
 
         const signal = AbortSignal.any([clientSignal, timeoutController.signal]);
         let contentSoFar = "";
+        let reasoningSoFar = "";
         let result: LlmStreamResult;
 
         try {
@@ -162,7 +163,18 @@ export class AgentService {
               });
             },
             signal,
-            { tools: toolDefinitions, toolChoice: toolDefinitions.length > 0 ? "auto" : "none" },
+            {
+              tools: toolDefinitions,
+              toolChoice: toolDefinitions.length > 0 ? "auto" : "none",
+              onReasoningDelta: (delta) => {
+                reasoningSoFar += delta;
+                emit({
+                  type: "agent.reasoning",
+                  messageId: assistantMessage.id,
+                  data: delta,
+                });
+              },
+            },
           );
         } catch (error) {
           clearTimeout(timer);
@@ -191,6 +203,7 @@ export class AgentService {
               status: aborted ? "cancelled" : "error",
               error: aborted ? undefined : message,
               model: config.model,
+              ...(reasoningSoFar !== "" ? { reasoning: reasoningSoFar } : {}),
             },
           );
 
@@ -225,6 +238,7 @@ export class AgentService {
             content: finalContent,
             status: "complete",
             model: config.model,
+            ...(reasoningSoFar !== "" ? { reasoning: reasoningSoFar } : {}),
             ...(toolCalls.length > 0 ? { toolCalls } : {}),
             ...(result.usage !== undefined ? { usage: result.usage } : {}),
             ...(result.durationMs !== undefined
@@ -240,6 +254,7 @@ export class AgentService {
             ...assistantMessage,
             content: finalContent,
             status: "complete",
+            ...(reasoningSoFar !== "" ? { reasoning: reasoningSoFar } : {}),
             toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
             usage: result.usage,
             durationMs: result.durationMs,
@@ -255,6 +270,7 @@ export class AgentService {
         conversation.push({
           role: "assistant",
           content: finalContent !== "" ? finalContent : null,
+          ...(reasoningSoFar !== "" ? { reasoning_content: reasoningSoFar } : {}),
           ...(toolCalls.length > 0
             ? {
                 tool_calls: toolCalls.map((call) => ({
@@ -446,7 +462,10 @@ function trimTurns(records: ChatMessageRecord[], budgetChars: number): ChatMessa
     const turn = turns[index]!;
     const chars = turn.reduce(
       (total, record) =>
-        total + record.content.length + (record.toolArguments?.length ?? 0),
+        total +
+        record.content.length +
+        (record.toolArguments?.length ?? 0) +
+        (record.reasoning?.length ?? 0),
       0,
     );
     if (selected.length > 0 && used + chars > budgetChars) break;
@@ -495,6 +514,7 @@ function recordsToLlmMessages(records: ChatMessageRecord[]): LlmChatMessage[] {
         messages.push({
           role: "assistant",
           content: record.content !== "" ? record.content : null,
+          ...(record.reasoning ? { reasoning_content: record.reasoning } : {}),
           tool_calls: calls.map((call) => ({
             id: call.id,
             type: "function" as const,
@@ -502,7 +522,11 @@ function recordsToLlmMessages(records: ChatMessageRecord[]): LlmChatMessage[] {
           })),
         });
       } else if (record.content.trim() !== "") {
-        messages.push({ role: "assistant", content: record.content });
+        messages.push({
+          role: "assistant",
+          content: record.content,
+          ...(record.reasoning ? { reasoning_content: record.reasoning } : {}),
+        });
       }
       continue;
     }

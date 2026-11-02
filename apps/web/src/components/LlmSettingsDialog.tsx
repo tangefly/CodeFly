@@ -7,10 +7,12 @@ import {
   Sparkles,
   XCircle,
 } from "lucide-react";
-import type {
-  LlmSettingsInput,
-  LlmTestInput,
-  LlmTestResult,
+import {
+  REASONING_EFFORTS,
+  type LlmSettingsInput,
+  type LlmTestInput,
+  type LlmTestResult,
+  type ReasoningEffort,
 } from "@codefly/protocol";
 import { asApiError } from "../lib/api.js";
 import {
@@ -91,6 +93,9 @@ export function LlmSettingsDialog() {
   const [maxTokens, setMaxTokens] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [timeoutMs, setTimeoutMs] = useState("120000");
+  const [thinking, setThinking] = useState(true);
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffort>("high");
   const [clearApiKey, setClearApiKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -116,6 +121,8 @@ export function LlmSettingsDialog() {
     );
     setSystemPrompt(current?.systemPrompt ?? "");
     setTimeoutMs(String(current?.timeoutMs ?? 120000));
+    setThinking(current?.thinking ?? true);
+    setReasoningEffort(current?.reasoningEffort ?? "high");
     setClearApiKey(false);
     setFormError(null);
     setTestResult(null);
@@ -209,6 +216,8 @@ export function LlmSettingsDialog() {
       maxTokens: maxTokensValue,
       systemPrompt,
       timeoutMs: timeoutValue,
+      thinking,
+      reasoningEffort,
       ...(key !== "" ? { apiKey: key } : {}),
       ...(clearApiKey ? { clearApiKey: true } : {}),
     };
@@ -404,7 +413,7 @@ export function LlmSettingsDialog() {
               className={cn(INPUT_CLASS, "font-mono")}
             />
           </Field>
-          <Field label="Max tokens" hint="留空用服务端默认">
+          <Field label="Max tokens" hint="含思考 token；留空用服务端默认">
             <input
               value={maxTokens}
               onChange={(event) => setMaxTokens(event.target.value)}
@@ -413,6 +422,45 @@ export function LlmSettingsDialog() {
               className={cn(INPUT_CLASS, "font-mono")}
             />
           </Field>
+        </div>
+
+        <div className="rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span>
+              <span className="block text-[11px] font-medium text-foreground">
+                思考模式
+              </span>
+              <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground/70">
+                DeepSeek V4 默认开启，思考内容显示在回复上方；思考 token
+                计入输出。
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={thinking}
+              onChange={(event) => setThinking(event.target.checked)}
+              className="h-4 w-4 shrink-0 accent-[var(--primary)]"
+            />
+          </label>
+          {thinking ? (
+            <div className="mt-3">
+              <Field label="思考强度" hint="low / high / max">
+                <Select
+                  value={reasoningEffort}
+                  onChange={(value) =>
+                    setReasoningEffort(value as ReasoningEffort)
+                  }
+                  ariaLabel="思考强度"
+                >
+                  {REASONING_EFFORTS.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          ) : null}
         </div>
 
         <details className="rounded-lg border border-border bg-background/40 px-3 py-2">

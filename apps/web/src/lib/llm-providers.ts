@@ -17,7 +17,8 @@ export const LLM_PROVIDERS: LlmProviderPreset[] = [
     id: "deepseek",
     label: "DeepSeek",
     baseUrl: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
+    models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    note: "V4 模型默认开启思考模式；思考内容会显示在回复上方，可在下方关闭。",
   },
   {
     id: "openai",

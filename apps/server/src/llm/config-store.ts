@@ -1,6 +1,11 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { LlmSettingsInput, LlmSettingsPublic } from "@codefly/protocol";
+import {
+  REASONING_EFFORTS,
+  type LlmSettingsInput,
+  type LlmSettingsPublic,
+  type ReasoningEffort,
+} from "@codefly/protocol";
 import { AppError, isNotFound } from "../http/errors.js";
 import { config as appConfig } from "../config.js";
 
@@ -15,6 +20,8 @@ export interface LlmInternalConfig {
   maxTokens: number | null;
   systemPrompt: string;
   timeoutMs: number;
+  thinking: boolean;
+  reasoningEffort: ReasoningEffort;
   updatedAt: string | null;
 }
 
@@ -26,8 +33,32 @@ const DEFAULTS: LlmInternalConfig = {
   maxTokens: null,
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   timeoutMs: appConfig.llm.defaultTimeoutMs,
+  thinking: true,
+  reasoningEffort: "high",
   updatedAt: null,
 };
+
+/** DeepSeek retired these aliases in favor of the V4 family. */
+const LEGACY_DEEPSEEK_MODELS: Record<string, string> = {
+  "deepseek-chat": "deepseek-v4-flash",
+  "deepseek-reasoner": "deepseek-v4-pro",
+};
+
+function isDeepSeekHost(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "deepseek.com" || hostname.endsWith(".deepseek.com");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeReasoningEffort(value: unknown): ReasoningEffort {
+  return typeof value === "string" &&
+    (REASONING_EFFORTS as readonly string[]).includes(value)
+    ? (value as ReasoningEffort)
+    : "high";
+}
 
 /**
  * Normalizes and validates an OpenAI-compatible base URL. Returns the URL
@@ -115,10 +146,20 @@ export class LlmConfigStore {
         }
       }
 
+      let model = typeof parsed.model === "string" ? parsed.model.trim() : "";
+      let migratedModel = false;
+      if (isDeepSeekHost(baseUrl)) {
+        const mapped = LEGACY_DEEPSEEK_MODELS[model];
+        if (mapped) {
+          model = mapped;
+          migratedModel = true;
+        }
+      }
+
       this.current = {
         baseUrl,
         apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
-        model: typeof parsed.model === "string" ? parsed.model.trim() : "",
+        model,
         temperature: numberOrNull(parsed.temperature),
         maxTokens: numberOrNull(parsed.maxTokens),
         systemPrompt:
@@ -131,9 +172,16 @@ export class LlmConfigStore {
           parsed.timeoutMs <= appConfig.llm.maxTimeoutMs
             ? Math.round(parsed.timeoutMs)
             : appConfig.llm.defaultTimeoutMs,
+        thinking: parsed.thinking !== false,
+        reasoningEffort: normalizeReasoningEffort(parsed.reasoningEffort),
         updatedAt:
           typeof parsed.updatedAt === "string" ? parsed.updatedAt : null,
       };
+
+      if (migratedModel) {
+        console.log(`[llm] migrated legacy model to ${model}`);
+        await this.persist();
+      }
     } catch {
       console.error("[llm] ignoring corrupt llm.json");
       return;
@@ -162,6 +210,8 @@ export class LlmConfigStore {
       maxTokens: config.maxTokens,
       systemPrompt: config.systemPrompt,
       timeoutMs: config.timeoutMs,
+      thinking: config.thinking,
+      reasoningEffort: config.reasoningEffort,
       updatedAt: config.updatedAt,
     };
   }
@@ -204,6 +254,12 @@ export class LlmConfigStore {
           ? this.current.systemPrompt
           : input.systemPrompt,
       timeoutMs,
+      thinking:
+        input.thinking === undefined ? this.current.thinking : input.thinking,
+      reasoningEffort:
+        input.reasoningEffort === undefined
+          ? this.current.reasoningEffort
+          : normalizeReasoningEffort(input.reasoningEffort),
       updatedAt: new Date().toISOString(),
     };
 

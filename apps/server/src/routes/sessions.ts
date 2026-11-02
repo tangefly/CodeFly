@@ -6,7 +6,10 @@ import {
   type Session,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
+import type { ExecService } from "../exec/service.js";
 import { AppError } from "../http/errors.js";
+import type { MessageStore } from "../llm/messages.js";
+import type { SessionRunLock } from "../llm/run-lock.js";
 import type { SessionStore } from "../session/store.js";
 import type { SettingsStore } from "../settings/store.js";
 
@@ -14,6 +17,9 @@ export interface SessionRouteDeps {
   sessions: SessionStore;
   settings: SettingsStore;
   audit: AuditLog;
+  messages: MessageStore;
+  lock: SessionRunLock;
+  exec: ExecService;
 }
 
 export function registerSessionRoutes(
@@ -48,6 +54,32 @@ export function registerSessionRoutes(
   app.get("/api/sessions/:id", async (request) => {
     const { id } = request.params as { id: string };
     return { session: deps.sessions.getOrThrow(id) };
+  });
+
+  app.delete("/api/sessions/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const session = deps.sessions.getOrThrow(id);
+
+    if (deps.lock.isBusy(id)) {
+      throw new AppError(
+        "SESSION_BUSY",
+        "当前会话正在执行回合，请先停止后再删除。",
+        409,
+      );
+    }
+
+    await deps.exec.deleteSession(id);
+    await deps.messages.delete(id);
+    await deps.sessions.delete(id);
+
+    await deps.audit.append({
+      type: "session.deleted",
+      sessionId: id,
+      workspaceRoot: session.workspaceRoot,
+      title: session.title,
+    });
+
+    return reply.code(204).send();
   });
 
   app.patch("/api/sessions/:id/permissions", async (request) => {

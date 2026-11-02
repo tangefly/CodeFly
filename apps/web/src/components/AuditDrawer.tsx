@@ -28,6 +28,8 @@ function summarize(event: AuditEvent): string {
   switch (event.type) {
     case "session.created":
       return `工作区 ${String(event.workspaceRoot ?? "")}`;
+    case "session.deleted":
+      return "会话已删除";
     case "permission.changed": {
       const from = event.from as { mode?: string } | undefined;
       const to = event.to as { mode?: string } | undefined;

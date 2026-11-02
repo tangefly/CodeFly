@@ -33,6 +33,7 @@ import type {
 
 class FakeAgentClient implements LlmClientLike {
   mode: "two-step" | "always-tool" | "error" | "abort" = "two-step";
+  reasoning = "";
   calls: LlmChatMessage[][] = [];
   toolSets: LlmToolDefinition[][] = [];
   private count = 0;
@@ -49,6 +50,10 @@ class FakeAgentClient implements LlmClientLike {
 
     if (this.mode === "error") {
       throw new LlmError("LLM_HTTP_ERROR", "upstream failed", 502);
+    }
+
+    if (this.reasoning !== "") {
+      options?.onReasoningDelta?.(this.reasoning);
     }
 
     if (this.mode === "abort") {
@@ -87,6 +92,7 @@ class FakeAgentClient implements LlmClientLike {
       onDelta("working");
       return {
         content: "working",
+        reasoningContent: this.reasoning !== "" ? this.reasoning : undefined,
         finishReason: "tool_calls",
         usage: {
           promptTokens: 100,
@@ -109,6 +115,7 @@ class FakeAgentClient implements LlmClientLike {
     onDelta("done");
     return {
       content: "done",
+      reasoningContent: this.reasoning !== "" ? this.reasoning : undefined,
       finishReason: "stop",
       usage: {
         promptTokens: 120,
@@ -318,6 +325,27 @@ describe("AgentService", () => {
     expect(lock.isBusy(session.id)).toBe(false);
     expect(auditEvents.some((event) => event.type === "agent.run")).toBe(true);
     expect(auditEvents.some((event) => event.type === "agent.tool")).toBe(true);
+  });
+
+  it("streams reasoning and echoes it back when tools are present", async () => {
+    client.reasoning = "check first";
+    const events: AgentEvent[] = [];
+    await service.run(session, "please check", new AbortController().signal, (event) =>
+      events.push(event),
+    );
+
+    expect(events.some((event) => event.type === "agent.reasoning")).toBe(true);
+    const records = messageStore.list(session.id);
+    expect(records[1]).toMatchObject({
+      content: "working",
+      reasoning: "check first",
+    });
+
+    const secondCall = client.calls[1]!;
+    const assistantToolCall = secondCall.find(
+      (message) => message.role === "assistant" && message.tool_calls?.length,
+    );
+    expect(assistantToolCall?.reasoning_content).toBe("check first");
   });
 
   it("stops at max steps and keeps the executed tool results", async () => {

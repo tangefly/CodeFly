@@ -74,6 +74,7 @@ export type ChatEvent =
       assistantMessage: ChatMessageRecord;
     }
   | { type: "chat.delta"; messageId: string; data: string }
+  | { type: "chat.reasoning"; messageId: string; data: string }
   | { type: "chat.done"; message: ChatMessageRecord; usage?: ChatUsage }
   | { type: "chat.error"; messageId: string; code: string; message: string };
 
@@ -85,6 +86,7 @@ export type AgentEvent =
   | { type: "agent.started"; userMessage: ChatMessageRecord }
   | { type: "agent.step"; message: ChatMessageRecord }
   | { type: "agent.delta"; messageId: string; data: string }
+  | { type: "agent.reasoning"; messageId: string; data: string }
   | { type: "agent.message"; message: ChatMessageRecord; usage?: ChatUsage }
   | { type: "agent.tool.started"; message: ChatMessageRecord; toolCall: AgentToolCall }
   | { type: "agent.tool.finished"; message: ChatMessageRecord }

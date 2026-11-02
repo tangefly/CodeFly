@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { mkdir, realpath, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -83,6 +83,11 @@ export interface ExecServiceOptions {
   approvalTimeoutMs: number;
   denialTtlMs: number;
   spillDir: string;
+  /**
+   * Extra files/directories granted read-write in workspace-write mode,
+   * e.g. GPU device nodes. Empty by default.
+   */
+  extraReadWritePaths?: readonly string[];
 }
 
 export interface ExecServiceDeps {
@@ -283,6 +288,19 @@ export class ExecService {
     return false;
   }
 
+  /**
+   * Cancel anything still running for a session and remove its per-session
+   * tmp directory. Called when the session itself is deleted.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    for (const record of this.records.values()) {
+      if (record.sessionId === sessionId && record.finishedAt === null) {
+        this.cancel(record.id);
+      }
+    }
+    await rm(`/tmp/codefly/${sessionId}`, { recursive: true, force: true });
+  }
+
   async shutdown(): Promise<void> {
     this.deps.approvals.cancelAll("cancelled");
     for (const record of this.records.values()) {
@@ -367,6 +385,10 @@ export class ExecService {
         const confined = this.deps.sandbox.wrap(argv, {
           mode: record.effectiveMode,
           workspaceRoot: record.workspaceRoot,
+          readWritePaths:
+            record.effectiveMode === "workspace-write"
+              ? this.deps.options.extraReadWritePaths
+              : undefined,
         });
         const selected = this.deps.sandbox.getRunner();
         argv = confined.argv;
