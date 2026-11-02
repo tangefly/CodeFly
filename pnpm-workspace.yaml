@@ -1,0 +1,8 @@
+packages:
+  - apps/*
+  - packages/*
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - fastify@5.12.8
+  - '@vitejs/plugin-react@6.2.1'

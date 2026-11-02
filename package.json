@@ -1,0 +1,22 @@
+{
+  "name": "codefly",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build:protocol": "pnpm --filter @codefly/protocol build",
+    "dev": "pnpm build:protocol && concurrently -k -n server,web -c cyan,magenta \"pnpm --filter @codefly/server dev\" \"pnpm --filter @codefly/web dev\"",
+    "build": "pnpm build:protocol && pnpm --filter @codefly/server build && pnpm --filter @codefly/web build",
+    "start": "pnpm --filter @codefly/server start",
+    "typecheck": "pnpm build:protocol && pnpm --filter @codefly/server typecheck && pnpm --filter @codefly/web typecheck",
+    "test": "pnpm build:protocol && pnpm --filter @codefly/server test"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6",
+    "typescript": "5.9.3"
+  }
+}

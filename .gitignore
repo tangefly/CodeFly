@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CodeFly (Node / pnpm)
+node_modules/
+.pnpm-store/
+data/
+coverage/
+*.tsbuildinfo
+pnpm-debug.log*
+apps/server/dist/
+apps/web/dist/
+packages/protocol/dist/
