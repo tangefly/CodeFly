@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { Bot, Loader2, ShieldCheck } from "lucide-react";
-import { AGENT_MAX_STEPS_LIMIT, type AgentToolName } from "@codefly/protocol";
+import {
+  AGENT_MAX_STEPS_LIMIT,
+  DEFAULT_AGENT_MAX_STEPS,
+  type AgentToolName,
+} from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { Button, Modal } from "./ui.js";
@@ -31,12 +35,22 @@ const TOOL_INFO: Array<{
   {
     name: "edit_file",
     label: "编辑文件",
-    description: "精确字符串替换，默认要求唯一匹配。",
+    description: "支持一次多处精确替换；默认要求唯一匹配，全部成功才写入。",
   },
   {
     name: "list_files",
     label: "列出目录",
     description: "浏览工作区或绝对目录，最多 500 项。",
+  },
+  {
+    name: "grep",
+    label: "搜索内容",
+    description: "按正则递归搜索文件内容，可配合 glob 过滤；只读。",
+  },
+  {
+    name: "glob",
+    label: "查找文件",
+    description: "按 glob 模式查找文件路径；只读。",
   },
 ];
 
@@ -47,7 +61,7 @@ export function AgentSettingsDialog() {
   const llmSettings = useAppStore((state) => state.llmSettings);
   const saveAgentSettings = useAppStore((state) => state.saveAgentSettings);
 
-  const [maxSteps, setMaxSteps] = useState("10");
+  const [maxSteps, setMaxSteps] = useState(String(DEFAULT_AGENT_MAX_STEPS));
   const [commandTimeoutMs, setCommandTimeoutMs] = useState("60000");
   const [enabledTools, setEnabledTools] = useState<AgentToolName[]>([]);
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -56,7 +70,7 @@ export function AgentSettingsDialog() {
 
   useEffect(() => {
     if (!open) return;
-    setMaxSteps(String(settings?.maxSteps ?? 10));
+    setMaxSteps(String(settings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS));
     setCommandTimeoutMs(String(settings?.commandTimeoutMs ?? 60_000));
     setEnabledTools(settings?.enabledTools ?? TOOL_INFO.map((tool) => tool.name));
     setSystemPrompt(settings?.systemPrompt ?? "");

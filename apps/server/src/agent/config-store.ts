@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   AGENT_MAX_STEPS_LIMIT,
   AGENT_TOOL_NAMES,
+  DEFAULT_AGENT_MAX_STEPS,
   type AgentSettingsInput,
   type AgentSettingsPublic,
   type AgentToolName,
@@ -10,10 +11,13 @@ import {
 import { isNotFound } from "../http/errors.js";
 
 export const DEFAULT_AGENT_PROMPT = `你是 CodeFly 的本地编码 agent，工作在用户指定的工作区内。
-你可以调用工具读取/写入文件、列目录和执行 shell 命令。
+你可以调用工具读取/写入/编辑文件、搜索内容、查找文件、列目录和执行 shell 命令。
 
 规则：
 - 修改文件前先读取相关文件；修改后尽量运行测试或命令验证。
+- read_file 返回的行号只用于定位，不要把它写进 edit_file 的 old_string/new_string。
+- 搜索代码内容优先用 grep，按文件名/路径查找优先用 glob，不要用 run_command 跑 grep/find。
+- edit_file 支持一次传入多个 edits；同一文件的多个改动尽量一次提交，减少往返。
 - 文件写入受会话权限与工作区围栏限制。被拒绝时不要尝试绕过，向用户说明限制或请用户调整权限。
 - run_command 在 Landlock 沙箱内运行；默认只能写工作区与 /tmp。
 - 如果命令被沙箱拒绝，只有工具结果明确建议时，才可以用完全相同的 command 加上 sandbox_permissions 和 justification 重试；这会弹出一次性审批。
@@ -31,7 +35,7 @@ export interface AgentInternalSettings {
 const VALID_TOOLS = new Set<string>(AGENT_TOOL_NAMES);
 
 const DEFAULTS: AgentInternalSettings = {
-  maxSteps: 10,
+  maxSteps: DEFAULT_AGENT_MAX_STEPS,
   commandTimeoutMs: 60_000,
   enabledTools: [...AGENT_TOOL_NAMES],
   systemPrompt: DEFAULT_AGENT_PROMPT,

@@ -28,7 +28,29 @@ import type { SessionRunLock } from "../llm/run-lock.js";
 import type {
   AgentToolExecutorLike,
   ToolExecutionContext,
+  ToolResult,
 } from "./tools.js";
+
+/** Tools that only read state and can safely run concurrently. */
+const READ_ONLY_TOOL_NAMES = new Set<string>([
+  "read_file",
+  "list_files",
+  "grep",
+  "glob",
+]);
+
+interface ToolRunOptions {
+  session: Session;
+  settings: AgentInternalSettings;
+  signal: AbortSignal;
+  emit: (event: AgentEvent) => void;
+}
+
+interface ToolRunOutcome {
+  call: AgentToolCall;
+  result: ToolResult;
+  durationMs: number;
+}
 
 export interface AgentServiceDeps {
   messages: MessageStore;
@@ -289,109 +311,66 @@ export class AgentService {
           break;
         }
 
-        for (const call of toolCalls) {
+        const toolOptions: ToolRunOptions = {
+          session,
+          settings,
+          signal: clientSignal,
+          emit,
+        };
+        const canRunParallel = (call: AgentToolCall): boolean =>
+          settings.enabledTools.includes(call.name as AgentToolName) &&
+          READ_ONLY_TOOL_NAMES.has(call.name);
+
+        let toolIndex = 0;
+        while (toolIndex < toolCalls.length) {
           if (clientSignal.aborted) {
             outcome = "cancelled";
             break;
           }
 
-          const toolNow = new Date().toISOString();
-          const toolMessage: ChatMessageRecord = {
-            id: `m_${randomUUID()}`,
-            sessionId: session.id,
-            role: "tool",
-            content: "",
-            status: "streaming",
-            toolCallId: call.id,
-            toolName: call.name,
-            toolArguments: call.arguments,
-            createdAt: toolNow,
-            updatedAt: toolNow,
-          };
-          await this.deps.messages.appendMany(session.id, [toolMessage]);
-          emit({
-            type: "agent.tool.started",
-            message: toolMessage,
-            toolCall: call,
-          });
-
-          const toolStartedAt = Date.now();
-          let toolResult;
-          if (!settings.enabledTools.includes(call.name as AgentToolName)) {
-            toolResult = {
-              content: `Tool "${call.name}" is not enabled for this agent session.`,
-              status: "error" as const,
-              meta: { kind: "error" as const },
-            };
+          const call = toolCalls[toolIndex]!;
+          if (canRunParallel(call)) {
+            // Execute a maximal run of read-only calls concurrently, keeping
+            // transcript and SSE ordering identical to the model's call order.
+            const batch: AgentToolCall[] = [];
+            while (
+              toolIndex < toolCalls.length &&
+              canRunParallel(toolCalls[toolIndex]!)
+            ) {
+              batch.push(toolCalls[toolIndex]!);
+              toolIndex += 1;
+            }
+            const results = await this.runToolCalls(batch, toolOptions, true);
+            toolExecutions += results.length;
+            for (const item of results) {
+              conversation.push({
+                role: "tool",
+                tool_call_id: item.call.id,
+                content: item.result.content,
+              });
+            }
+            if (results.some((item) => item.result.status === "cancelled")) {
+              outcome = "cancelled";
+              break;
+            }
           } else {
-            const toolContext: ToolExecutionContext = {
-              session,
-              dataDir: this.deps.dataDir,
-              maxReadBytes: this.deps.maxReadBytes,
-              maxWriteBytes: this.deps.maxWriteBytes,
-              commandTimeoutMs: settings.commandTimeoutMs,
-              exec: this.deps.exec,
-              audit: this.deps.audit,
-              signal: clientSignal,
-              emit,
-              toolCallId: call.id,
-            };
-            try {
-              toolResult = await this.deps.tools.execute(
-                call.name,
-                call.arguments,
-                toolContext,
-              );
-            } catch (error) {
-              toolResult = {
-                content: `Tool execution failed: ${
-                  error instanceof Error ? error.message : String(error)
-                }`,
-                status: "error" as const,
-                meta: { kind: "error" as const },
-              };
+            const results = await this.runToolCalls([call], toolOptions, false);
+            toolIndex += 1;
+            toolExecutions += results.length;
+            for (const item of results) {
+              conversation.push({
+                role: "tool",
+                tool_call_id: item.call.id,
+                content: item.result.content,
+              });
+            }
+            if (results.some((item) => item.result.status === "cancelled")) {
+              outcome = "cancelled";
+              break;
             }
           }
 
-          toolExecutions += 1;
-          const finalTool = await this.deps.messages.update(
-            session.id,
-            toolMessage.id,
-            {
-              content: toolResult.content,
-              status: toolResult.status,
-              meta: toolResult.meta,
-            },
-          );
-          emit({
-            type: "agent.tool.finished",
-            message:
-              finalTool ?? {
-                ...toolMessage,
-                content: toolResult.content,
-                status: toolResult.status,
-                meta: toolResult.meta,
-              },
-          });
-
-          conversation.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: toolResult.content,
-          });
-
-          void this.deps.audit.append({
-            type: "agent.tool",
-            sessionId: session.id,
-            toolName: call.name,
-            toolCallId: call.id,
-            status: toolResult.status,
-            durationMs: Date.now() - toolStartedAt,
-            command: toolResult.meta?.command,
-            path: toolResult.meta?.path,
-          });
-
-          if (toolResult.status === "cancelled") {
+          if (clientSignal.aborted) {
             outcome = "cancelled";
             break;
           }
@@ -424,6 +403,145 @@ export class AgentService {
       });
     } finally {
       this.deps.lock.release(session.id);
+    }
+  }
+
+  /**
+   * Persists and executes one or more tool calls. Read-only batches pass
+   * `parallel: true`; messages, events, and audit entries are still recorded
+   * in the model's call order.
+   */
+  private async runToolCalls(
+    calls: AgentToolCall[],
+    options: ToolRunOptions,
+    parallel: boolean,
+  ): Promise<ToolRunOutcome[]> {
+    const now = new Date().toISOString();
+    const entries = calls.map((call) => ({
+      call,
+      record: {
+        id: `m_${randomUUID()}`,
+        sessionId: options.session.id,
+        role: "tool" as const,
+        content: "",
+        status: "streaming" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        toolArguments: call.arguments,
+        createdAt: now,
+        updatedAt: now,
+      },
+    }));
+
+    await this.deps.messages.appendMany(
+      options.session.id,
+      entries.map((entry) => entry.record),
+    );
+    for (const entry of entries) {
+      options.emit({
+        type: "agent.tool.started",
+        message: entry.record,
+        toolCall: entry.call,
+      });
+    }
+
+    const execute = async (
+      entry: (typeof entries)[number],
+    ): Promise<{ result: ToolResult; durationMs: number }> => {
+      const startedAt = Date.now();
+      const result = await this.executeToolCall(entry.call, options);
+      return { result, durationMs: Date.now() - startedAt };
+    };
+
+    const executed: Array<{ result: ToolResult; durationMs: number }> = [];
+    if (parallel) {
+      executed.push(...(await Promise.all(entries.map(execute))));
+    } else {
+      for (const entry of entries) executed.push(await execute(entry));
+    }
+
+    const outcomes: ToolRunOutcome[] = [];
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]!;
+      const outcome = executed[index]!;
+      const finalTool = await this.deps.messages.update(
+        options.session.id,
+        entry.record.id,
+        {
+          content: outcome.result.content,
+          status: outcome.result.status,
+          meta: outcome.result.meta,
+        },
+      );
+      const message: ChatMessageRecord =
+        finalTool ?? {
+          ...entry.record,
+          content: outcome.result.content,
+          status: outcome.result.status,
+          meta: outcome.result.meta,
+        };
+
+      options.emit({ type: "agent.tool.finished", message });
+      void this.deps.audit.append({
+        type: "agent.tool",
+        sessionId: options.session.id,
+        toolName: entry.call.name,
+        toolCallId: entry.call.id,
+        status: outcome.result.status,
+        durationMs: outcome.durationMs,
+        command: outcome.result.meta?.command,
+        path: outcome.result.meta?.path,
+      });
+
+      outcomes.push({
+        call: entry.call,
+        result: outcome.result,
+        durationMs: outcome.durationMs,
+      });
+    }
+
+    return outcomes;
+  }
+
+  private async executeToolCall(
+    call: AgentToolCall,
+    options: ToolRunOptions,
+  ): Promise<ToolResult> {
+    if (!options.settings.enabledTools.includes(call.name as AgentToolName)) {
+      return {
+        content: `Tool "${call.name}" is not enabled for this agent session.`,
+        status: "error",
+        meta: { kind: "error" },
+      };
+    }
+
+    const toolContext: ToolExecutionContext = {
+      session: options.session,
+      dataDir: this.deps.dataDir,
+      maxReadBytes: this.deps.maxReadBytes,
+      maxWriteBytes: this.deps.maxWriteBytes,
+      commandTimeoutMs: options.settings.commandTimeoutMs,
+      exec: this.deps.exec,
+      audit: this.deps.audit,
+      signal: options.signal,
+      emit: options.emit,
+      toolCallId: call.id,
+    };
+
+    try {
+      return await this.deps.tools.execute(
+        call.name,
+        call.arguments,
+        toolContext,
+      );
+    } catch (error) {
+      return {
+        content: `Tool execution failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        status: "error",
+        meta: { kind: "error" },
+      };
     }
   }
 }

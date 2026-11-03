@@ -32,7 +32,7 @@ import type {
 } from "../src/agent/tools.js";
 
 class FakeAgentClient implements LlmClientLike {
-  mode: "two-step" | "always-tool" | "error" | "abort" = "two-step";
+  mode: "two-step" | "always-tool" | "error" | "abort" | "multi-read" = "two-step";
   reasoning = "";
   calls: LlmChatMessage[][] = [];
   toolSets: LlmToolDefinition[][] = [];
@@ -87,6 +87,20 @@ class FakeAgentClient implements LlmClientLike {
       };
     }
 
+    if (this.mode === "multi-read" && this.count === 0) {
+      this.count += 1;
+      onDelta("reading");
+      return {
+        content: "reading",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "call_r1", name: "read_file", arguments: '{"path":"a.txt"}' },
+          { id: "call_r2", name: "read_file", arguments: '{"path":"b.txt"}' },
+          { id: "call_r3", name: "read_file", arguments: '{"path":"c.txt"}' },
+        ],
+      };
+    }
+
     if (this.count === 0) {
       this.count += 1;
       onDelta("working");
@@ -135,6 +149,9 @@ class FakeAgentClient implements LlmClientLike {
 class FakeTools implements AgentToolExecutorLike {
   executed: Array<{ name: string; args: string }> = [];
   emitApproval = false;
+  delayMs = 0;
+  active = 0;
+  maxActive = 0;
 
   definitions(enabledTools: AgentToolName[]): LlmToolDefinition[] {
     return enabledTools.map((name) => ({
@@ -153,24 +170,33 @@ class FakeTools implements AgentToolExecutorLike {
     ctx: ToolExecutionContext,
   ): Promise<ToolResult> {
     this.executed.push({ name, args: rawArguments });
-    if (this.emitApproval) {
-      ctx.emit({
-        type: "agent.approval_required",
-        approvalId: "a_fake",
-        execId: "e_fake",
-        toolCallId: ctx.toolCallId,
-        command: "echo hi",
-        currentMode: "workspace-write",
-        requestedMode: "danger-full-access",
-        justification: "test",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      });
+    this.active += 1;
+    this.maxActive = Math.max(this.maxActive, this.active);
+    try {
+      if (this.delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+      }
+      if (this.emitApproval) {
+        ctx.emit({
+          type: "agent.approval_required",
+          approvalId: "a_fake",
+          execId: "e_fake",
+          toolCallId: ctx.toolCallId,
+          command: "echo hi",
+          currentMode: "workspace-write",
+          requestedMode: "danger-full-access",
+          justification: "test",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
+      return {
+        content: "tool output",
+        status: "complete",
+        meta: { kind: "command", command: "echo hi", exitCode: 0 },
+      };
+    } finally {
+      this.active -= 1;
     }
-    return {
-      content: "tool output",
-      status: "complete",
-      meta: { kind: "command", command: "echo hi", exitCode: 0 },
-    };
   }
 }
 
@@ -414,6 +440,45 @@ describe("AgentService", () => {
     expect(records[1]).toMatchObject({ status: "cancelled" });
     expect(events.some((event) => event.type === "agent.error")).toBe(false);
     expect(lock.isBusy(session.id)).toBe(false);
+  });
+
+  it("runs read-only tool calls in parallel while preserving order", async () => {
+    client.mode = "multi-read";
+    tools.delayMs = 40;
+    const events: AgentEvent[] = [];
+    await service.run(session, "read files", new AbortController().signal, (event) =>
+      events.push(event),
+    );
+
+    expect(tools.maxActive).toBeGreaterThan(1);
+    expect(tools.executed.map((entry) => entry.args)).toEqual([
+      '{"path":"a.txt"}',
+      '{"path":"b.txt"}',
+      '{"path":"c.txt"}',
+    ]);
+
+    const records = messageStore.list(session.id);
+    expect(records.map((record) => record.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+      "tool",
+      "assistant",
+    ]);
+    expect(records.slice(2, 5).map((record) => record.toolCallId)).toEqual([
+      "call_r1",
+      "call_r2",
+      "call_r3",
+    ]);
+
+    const finished = events
+      .filter(
+        (event): event is Extract<AgentEvent, { type: "agent.tool.finished" }> =>
+          event.type === "agent.tool.finished",
+      )
+      .map((event) => event.message.toolCallId);
+    expect(finished).toEqual(["call_r1", "call_r2", "call_r3"]);
   });
 
   it("forwards approval events from tools", async () => {

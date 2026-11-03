@@ -7,6 +7,7 @@ import {
   Sparkles,
   Square,
 } from "lucide-react";
+import { DEFAULT_AGENT_MAX_STEPS } from "@codefly/protocol";
 import {
   selectCurrentMessages,
   selectCurrentSession,
@@ -103,7 +104,7 @@ export function Composer() {
                 ? `模型：${llmSettings?.model} · 仅聊天，不会执行命令`
                 : "聊天需要先配置模型 API"
               : ready
-                ? `Agent · 最多 ${agentSettings?.maxSteps ?? 10} 步 · 工具在沙箱内执行`
+                ? `Agent · 最多 ${agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} 步 · 工具在沙箱内执行`
                 : "Agent 需要先配置模型 API"}
           </span>
         </div>

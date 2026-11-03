@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Bot, Eye, Pencil, ShieldCheck, ShieldOff, Sparkles } from "lucide-react";
-import type { SandboxMode } from "@codefly/protocol";
+import { DEFAULT_AGENT_MAX_STEPS, type SandboxMode } from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { MODE_LABEL, cn } from "../lib/utils.js";
 import { Button, Modal } from "./ui.js";
@@ -134,7 +134,7 @@ export function SettingsDialog() {
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-foreground">Agent 模式</h3>
             <span className="font-mono text-[9px] text-muted-foreground/60">
-              {agentSettings?.maxSteps ?? 10} steps
+              {agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} steps
             </span>
           </div>
           <div className="mt-2 flex items-start gap-2.5 rounded-lg border border-border bg-background/40 px-3 py-2.5">
@@ -142,7 +142,7 @@ export function SettingsDialog() {
             <div className="min-w-0 flex-1">
               <p className="text-[11px] leading-5 text-muted-foreground">
                 tool-calling / agent loop：模型可调用命令与文件工具，最多{" "}
-                {agentSettings?.maxSteps ?? 10} 步，已启用{" "}
+                {agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} 步，已启用{" "}
                 {agentSettings?.enabledTools.length ?? 0} 个工具。
               </p>
               <p className="mt-0.5 text-[9px] text-muted-foreground/60">

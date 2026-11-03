@@ -90,7 +90,7 @@ export interface AgentToolCall {
 
 /** Structured display metadata for a persisted tool result. */
 export interface AgentToolMeta {
-  kind?: "command" | "read" | "write" | "edit" | "list" | "error";
+  kind?: "command" | "read" | "write" | "edit" | "list" | "grep" | "glob" | "error";
   command?: string;
   cwd?: string;
   path?: string;
@@ -102,6 +102,12 @@ export interface AgentToolMeta {
   stderr?: string;
   bytes?: number;
   replacements?: number;
+  edits?: number;
+  startLine?: number;
+  endLine?: number;
+  totalLines?: number;
+  pattern?: string;
+  matches?: number;
   truncated?: boolean;
   denied?: boolean;
   spillPaths?: string[];
@@ -144,10 +150,15 @@ export const AGENT_TOOL_NAMES = [
   "write_file",
   "edit_file",
   "list_files",
+  "grep",
+  "glob",
 ] as const;
 
 /** Hard ceiling for Agent loop steps in a single run. */
 export const AGENT_MAX_STEPS_LIMIT = 500;
+
+/** Default Agent loop steps for a new install. */
+export const DEFAULT_AGENT_MAX_STEPS = 25;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 

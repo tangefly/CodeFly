@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
   Loader2,
+  Search,
   Terminal,
 } from "lucide-react";
 import type { ToolMessage } from "../lib/store.js";
@@ -19,6 +20,8 @@ const TOOL_LABEL: Record<string, string> = {
   write_file: "写入文件",
   edit_file: "编辑文件",
   list_files: "列出目录",
+  grep: "搜索内容",
+  glob: "查找文件",
 };
 
 function parseArguments(raw: string): Record<string, unknown> {
@@ -84,6 +87,8 @@ export function ToolCard({ message }: { message: ToolMessage }) {
       : typeof args.path === "string"
         ? args.path
         : undefined;
+  const pattern =
+    typeof args.pattern === "string" ? args.pattern : undefined;
 
   const copyText = (): void => {
     const text =
@@ -102,19 +107,24 @@ export function ToolCard({ message }: { message: ToolMessage }) {
   const Icon =
     message.toolName === "run_command"
       ? Terminal
-      : message.toolName === "list_files"
-        ? Folder
-        : message.toolName === "read_file" ||
-            message.toolName === "write_file" ||
-            message.toolName === "edit_file"
-          ? FileText
-          : AlertTriangle;
+      : message.toolName === "grep"
+        ? Search
+        : message.toolName === "list_files" ||
+            message.toolName === "glob"
+          ? Folder
+          : message.toolName === "read_file" ||
+              message.toolName === "write_file" ||
+              message.toolName === "edit_file"
+            ? FileText
+            : AlertTriangle;
 
   const showFileContent =
     message.toolName === "read_file" ||
     message.toolName === "list_files" ||
     message.toolName === "write_file" ||
-    message.toolName === "edit_file";
+    message.toolName === "edit_file" ||
+    message.toolName === "grep" ||
+    message.toolName === "glob";
 
   /** Shared collapsible "result" section for file tools and unknown tools. */
   const renderCollapsibleResult = (label: string) => (
@@ -207,6 +217,22 @@ export function ToolCard({ message }: { message: ToolMessage }) {
                 {command}
               </code>
             </button>
+          ) : pattern ? (
+            <code
+              className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75"
+              title={targetPath}
+            >
+              {message.toolName === "grep" ? (
+                <span className="text-primary/60">/</span>
+              ) : null}
+              {pattern}
+              {message.toolName === "grep" ? (
+                <span className="text-primary/60">/</span>
+              ) : null}
+              {targetPath ? (
+                <span className="text-muted-foreground/60"> · {targetPath}</span>
+              ) : null}
+            </code>
           ) : targetPath ? (
             <code className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75">
               {targetPath}

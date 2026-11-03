@@ -51,6 +51,28 @@ const MAX_TOOL_STREAM_CHARS = 100_000;
 const MAX_MODEL_STREAM_CHARS = 12_000;
 const MAX_TOOL_READ_CHARS = 60_000;
 const MAX_LIST_ENTRIES = 500;
+const MAX_EDIT_OPERATIONS = 100;
+const DEFAULT_GREP_RESULTS = 200;
+const MAX_GREP_RESULTS = 2_000;
+const MAX_GREP_LINE_CHARS = 500;
+const MAX_GLOB_MATCHES = 500;
+const MAX_SCAN_FILES = 50_000;
+const MAX_SCAN_DEPTH = 32;
+
+/** Directories skipped by grep/glob unless include_ignored is set. */
+const IGNORED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".cache",
+  "dist",
+  "build",
+  ".next",
+  "coverage",
+  "target",
+]);
 
 const runCommandArgs = z
   .object({
@@ -65,6 +87,10 @@ const runCommandArgs = z
 const readFileArgs = z
   .object({
     path: z.string().min(1).max(4096),
+    /** 1-based first line to return. */
+    offset: z.number().int().min(1).optional(),
+    /** Maximum number of lines to return. */
+    limit: z.number().int().min(1).max(100_000).optional(),
   })
   .strict();
 
@@ -75,18 +101,76 @@ const writeFileArgs = z
   })
   .strict();
 
-const editFileArgs = z
+const editOperation = z
   .object({
-    path: z.string().min(1).max(4096),
     old_string: z.string().min(1),
     new_string: z.string(),
     replace_all: z.boolean().optional(),
   })
   .strict();
 
+const editFileArgs = z
+  .object({
+    path: z.string().min(1).max(4096),
+    /** Multiple edits applied in order; all-or-nothing. */
+    edits: z.array(editOperation).min(1).max(MAX_EDIT_OPERATIONS).optional(),
+    /** Single-edit compatibility form. */
+    old_string: z.string().min(1).optional(),
+    new_string: z.string().optional(),
+    replace_all: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const hasEdits = value.edits !== undefined;
+    const hasLegacy =
+      value.old_string !== undefined ||
+      value.new_string !== undefined ||
+      value.replace_all !== undefined;
+    if (hasEdits && hasLegacy) {
+      ctx.addIssue({
+        code: "custom",
+        message: "provide either edits or old_string/new_string, not both",
+      });
+    }
+    if (
+      !hasEdits &&
+      (value.old_string === undefined || value.new_string === undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "provide edits, or both old_string and new_string",
+      });
+    }
+  });
+
 const listFilesArgs = z
   .object({
     path: z.string().max(4096).optional(),
+  })
+  .strict();
+
+const grepArgs = z
+  .object({
+    pattern: z.string().min(1).max(10_000),
+    path: z.string().max(4096).optional(),
+    glob: z.string().max(4096).optional(),
+    case_insensitive: z.boolean().optional(),
+    fixed_strings: z.boolean().optional(),
+    include_ignored: z.boolean().optional(),
+    max_results: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_GREP_RESULTS)
+      .optional(),
+  })
+  .strict();
+
+const globArgs = z
+  .object({
+    pattern: z.string().min(1).max(4096),
+    path: z.string().max(4096).optional(),
+    include_ignored: z.boolean().optional(),
   })
   .strict();
 
@@ -137,13 +221,25 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "read_file",
       description:
-        "Read a UTF-8 text file. Relative paths resolve against the workspace; absolute paths are allowed. Large files are rejected or truncated for the model.",
+        "Read a UTF-8 text file with line numbers (format: line_number<TAB>content). Relative paths resolve against the workspace; absolute paths are allowed. Use offset/limit to read a slice of a large file. The line-number prefix is display-only: never include it in edit_file old_string/new_string.",
       parameters: {
         type: "object",
         properties: {
           path: {
             type: "string",
             description: "File path, relative to the workspace or absolute.",
+          },
+          offset: {
+            type: "integer",
+            minimum: 1,
+            description: "1-based line number to start from. Defaults to 1.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 100000,
+            description:
+              "Maximum number of lines to return. Defaults to the rest of the file.",
           },
         },
         required: ["path"],
@@ -177,22 +273,51 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "edit_file",
       description:
-        "Replace an exact string in an existing text file. By default old_string must occur exactly once; set replace_all to replace every occurrence. Writes use the same fence as write_file.",
+        "Edit an existing text file. Pass edits as an array of {old_string, new_string, replace_all?}; edits are applied in order. By default each old_string must occur exactly once; set replace_all to replace every occurrence. If any edit fails, nothing is written. A single {old_string, new_string} pair is also accepted for compatibility. Writes use the same fence as write_file.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "File path." },
+          edits: {
+            type: "array",
+            maxItems: MAX_EDIT_OPERATIONS,
+            description:
+              "Ordered list of replacements, applied atomically to the file content.",
+            items: {
+              type: "object",
+              properties: {
+                old_string: {
+                  type: "string",
+                  description: "Exact text to find (must match whitespace).",
+                },
+                new_string: {
+                  type: "string",
+                  description: "Replacement text.",
+                },
+                replace_all: {
+                  type: "boolean",
+                  description:
+                    "Replace every occurrence instead of requiring uniqueness.",
+                },
+              },
+              required: ["old_string", "new_string"],
+              additionalProperties: false,
+            },
+          },
           old_string: {
             type: "string",
-            description: "Exact text to find (must match whitespace).",
+            description: "Single-edit form: exact text to find.",
           },
-          new_string: { type: "string", description: "Replacement text." },
+          new_string: {
+            type: "string",
+            description: "Single-edit form: replacement text.",
+          },
           replace_all: {
             type: "boolean",
-            description: "Replace every occurrence instead of requiring uniqueness.",
+            description: "Single-edit form: replace every occurrence.",
           },
         },
-        required: ["path", "old_string", "new_string"],
+        required: ["path"],
         additionalProperties: false,
       },
     },
@@ -211,6 +336,85 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
             description: "Directory path; defaults to the workspace root.",
           },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  grep: {
+    type: "function",
+    function: {
+      name: "grep",
+      description:
+        "Search file contents recursively with a regular expression. Prefer this over running grep/rg through run_command. Skips .git, node_modules, dist and other build directories unless include_ignored is true. Returns path:line: text.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description:
+              "Regular expression (JavaScript syntax), or literal text when fixed_strings is true.",
+          },
+          path: {
+            type: "string",
+            description:
+              "File or directory to search; defaults to the workspace root. Relative paths resolve against the workspace.",
+          },
+          glob: {
+            type: "string",
+            description:
+              "Optional glob filter for file paths, e.g. \"**/*.ts\" or \"src/**/*.{ts,tsx}\".",
+          },
+          case_insensitive: {
+            type: "boolean",
+            description: "Match case-insensitively.",
+          },
+          fixed_strings: {
+            type: "boolean",
+            description: "Treat pattern as literal text instead of a regular expression.",
+          },
+          include_ignored: {
+            type: "boolean",
+            description:
+              "Also search .git, node_modules and other ignored directories.",
+          },
+          max_results: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_GREP_RESULTS,
+            description: `Maximum matches to return (default ${DEFAULT_GREP_RESULTS}).`,
+          },
+        },
+        required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+  },
+  glob: {
+    type: "function",
+    function: {
+      name: "glob",
+      description:
+        "Find files by glob pattern. Supports *, ?, ** and {a,b}. Prefer this over find/ls through run_command. Returns matching paths relative to the search root.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description:
+              "Glob pattern matched against paths relative to the search root, e.g. \"**/*.ts\" or \"src/**/*.{ts,tsx}\". A pattern without / matches file names at any depth.",
+          },
+          path: {
+            type: "string",
+            description:
+              "Directory to search; defaults to the workspace root. Relative paths resolve against the workspace.",
+          },
+          include_ignored: {
+            type: "boolean",
+            description:
+              "Also search .git, node_modules and other ignored directories.",
+          },
+        },
+        required: ["pattern"],
         additionalProperties: false,
       },
     },
@@ -296,12 +500,20 @@ function fileErrorResult(error: unknown, session: Session): ToolResult {
   };
 }
 
+/** Splits text into lines, dropping the phantom line after a trailing newline. */
+function splitLines(text: string): string[] {
+  if (text === "") return [];
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+}
+
 async function readFileResult(
   session: Session,
-  input: string,
+  input: { path: string; offset?: number; limit?: number },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
-  const target = resolveReadPath(session, input);
+  const target = resolveReadPath(session, input.path);
   let info;
   try {
     info = await stat(target);
@@ -322,7 +534,7 @@ async function readFileResult(
   }
   if (info.size > ctx.maxReadBytes) {
     return toolError(
-      `File is ${info.size} bytes; the tool read limit is ${ctx.maxReadBytes}. Use run_command with head/tail for a portion.`,
+      `File is ${info.size} bytes; the tool read limit is ${ctx.maxReadBytes}. Use run_command with sed/head to read a portion.`,
       { kind: "read", path: target, bytes: info.size },
     );
   }
@@ -335,11 +547,52 @@ async function readFileResult(
     });
   }
 
-  const text = buffer.toString("utf8");
-  const truncated = text.length > MAX_TOOL_READ_CHARS;
+  const allLines = splitLines(buffer.toString("utf8"));
+  const totalLines = allLines.length;
+  const start = input.offset ?? 1;
+
+  if (totalLines === 0) {
+    return {
+      content: "(empty file)",
+      status: "complete",
+      meta: {
+        kind: "read",
+        path: target,
+        bytes: buffer.byteLength,
+        startLine: 1,
+        endLine: 0,
+        totalLines: 0,
+        truncated: false,
+      },
+    };
+  }
+  if (start > totalLines) {
+    return toolError(
+      `offset ${start} is beyond the end of the file (${totalLines} lines).`,
+      {
+        kind: "read",
+        path: target,
+        bytes: buffer.byteLength,
+        startLine: start,
+        endLine: totalLines,
+        totalLines,
+      },
+    );
+  }
+
+  const end = input.limit === undefined
+    ? totalLines
+    : Math.min(totalLines, start - 1 + input.limit);
+  const width = String(end).length;
+  const numbered = allLines
+    .slice(start - 1, end)
+    .map((line, index) => `${String(start + index).padStart(width)}\t${line}`)
+    .join("\n");
+
+  const truncated = numbered.length > MAX_TOOL_READ_CHARS;
   const content = truncated
-    ? `${text.slice(0, MAX_TOOL_READ_CHARS)}\n\n[... truncated: showing first ${MAX_TOOL_READ_CHARS} of ${text.length} characters]`
-    : text;
+    ? `${numbered.slice(0, MAX_TOOL_READ_CHARS)}\n\n[... truncated at ${MAX_TOOL_READ_CHARS} characters; requested lines ${start}-${end} of ${totalLines}. Use offset/limit for a smaller range.]`
+    : numbered;
 
   return {
     content,
@@ -348,6 +601,9 @@ async function readFileResult(
       kind: "read",
       path: target,
       bytes: buffer.byteLength,
+      startLine: start,
+      endLine: end,
+      totalLines,
       truncated,
     },
   };
@@ -399,6 +655,420 @@ async function listFilesResult(
     content,
     status: "complete",
     meta: { kind: "list", path: target, entries: entries.length },
+  };
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Expands one level of {a,b} alternatives, recursively. */
+function expandBraces(pattern: string, depth = 0): string[] {
+  if (depth >= 8) return [pattern];
+  const open = pattern.indexOf("{");
+  if (open < 0) return [pattern];
+  const close = pattern.indexOf("}", open + 1);
+  if (close < 0) return [pattern];
+  const body = pattern.slice(open + 1, close);
+  const parts = body.split(",");
+  if (parts.length < 2) return [pattern];
+  const before = pattern.slice(0, open);
+  const after = pattern.slice(close + 1);
+  return parts.flatMap((part) => expandBraces(`${before}${part}${after}`, depth + 1));
+}
+
+function globToRegExp(glob: string): RegExp {
+  const normalized = glob.replace(/\\/g, "/").replace(/^\.\//, "");
+  let source = "";
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index]!;
+    if (char === "*") {
+      if (normalized[index + 1] === "*") {
+        if (normalized[index + 2] === "/") {
+          source += "(?:[^/]+/)*";
+          index += 2;
+        } else {
+          source += ".*";
+          index += 1;
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegExp(char);
+    }
+  }
+  if (!normalized.includes("/")) source = `(?:.*/)?${source}`;
+  return new RegExp(`^${source}$`);
+}
+
+function matchesAnyGlob(relPath: string, matchers: RegExp[]): boolean {
+  const base = relPath.includes("/")
+    ? relPath.slice(relPath.lastIndexOf("/") + 1)
+    : relPath;
+  return matchers.some((matcher) => matcher.test(relPath) || matcher.test(base));
+}
+
+type WalkStopReason = "signal" | "max-files" | "visitor" | null;
+
+interface WalkStats {
+  scanned: number;
+  stopReason: WalkStopReason;
+}
+
+/**
+ * Walks regular files under a directory in deterministic order. Symlinks are
+ * not followed; heavy build/VCS directories are skipped unless requested.
+ * The visitor returns true to stop the walk early.
+ */
+async function walkFiles(
+  root: string,
+  options: {
+    includeIgnored: boolean;
+    signal?: AbortSignal;
+    maxFiles?: number;
+    maxDepth?: number;
+  },
+  visit: (filePath: string, relPath: string) => Promise<boolean | void>,
+): Promise<WalkStats> {
+  const stats: WalkStats = { scanned: 0, stopReason: null };
+  const maxFiles = options.maxFiles ?? MAX_SCAN_FILES;
+  const maxDepth = options.maxDepth ?? MAX_SCAN_DEPTH;
+
+  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+    if (stats.stopReason !== null) return;
+    if (options.signal?.aborted) {
+      stats.stopReason = "signal";
+      return;
+    }
+    if (depth > maxDepth) return;
+
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => {
+      if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    for (const entry of entries) {
+      if (stats.stopReason !== null) return;
+      if (options.signal?.aborted) {
+        stats.stopReason = "signal";
+        return;
+      }
+      if (entry.isSymbolicLink()) continue;
+
+      const childPath = path.join(dir, entry.name);
+      const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!options.includeIgnored && IGNORED_DIRS.has(entry.name)) continue;
+        await walk(childPath, childRel, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      stats.scanned += 1;
+      if (stats.scanned > maxFiles) {
+        stats.stopReason = "max-files";
+        return;
+      }
+      const stop = await visit(childPath, childRel);
+      if (stop) {
+        stats.stopReason = "visitor";
+        return;
+      }
+    }
+  };
+
+  await walk(root, "", 0);
+  return stats;
+}
+
+type SearchableFile =
+  | { ok: true; text: string }
+  | { ok: false; reason: "large" | "binary" | "unreadable" };
+
+async function readSearchableText(
+  filePath: string,
+  maxBytes: number,
+): Promise<SearchableFile> {
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  if (!info.isFile() || info.size > maxBytes) {
+    return { ok: false, reason: "large" };
+  }
+
+  let buffer;
+  try {
+    buffer = await readFile(filePath);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  if (buffer.includes(0)) return { ok: false, reason: "binary" };
+  return { ok: true, text: buffer.toString("utf8") };
+}
+
+async function grepResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(grepArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "grep" });
+  const args = parsed.data;
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(
+      args.fixed_strings === true ? escapeRegExp(args.pattern) : args.pattern,
+      args.case_insensitive === true ? "i" : "",
+    );
+  } catch (error) {
+    return toolError(
+      `Invalid regular expression: ${error instanceof Error ? error.message : String(error)}`,
+      { kind: "grep", pattern: args.pattern },
+    );
+  }
+
+  const root = resolveReadPath(ctx.session, args.path);
+  let rootInfo;
+  try {
+    rootInfo = await stat(root);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return toolError(`Path does not exist: ${root}`, { kind: "grep", path: root });
+    }
+    return toolError(
+      `Cannot access ${root}: ${error instanceof Error ? error.message : String(error)}`,
+      { kind: "grep", path: root },
+    );
+  }
+
+  const maxResults = args.max_results ?? DEFAULT_GREP_RESULTS;
+  const matchers =
+    args.glob === undefined
+      ? null
+      : expandBraces(args.glob).map(globToRegExp);
+  const matches: string[] = [];
+  let skipped = 0;
+  let scanned = 0;
+  let stopReason: WalkStopReason = null;
+
+  const inspect = async (
+    filePath: string,
+    relPath: string,
+  ): Promise<boolean | void> => {
+    if (matchers !== null && !matchesAnyGlob(relPath, matchers)) return;
+    const file = await readSearchableText(filePath, ctx.maxReadBytes);
+    if (!file.ok) {
+      skipped += 1;
+      return;
+    }
+
+    const lines = file.text.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const rawLine = lines[index]!;
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+      if (!regex.test(line)) continue;
+      const display =
+        line.length > MAX_GREP_LINE_CHARS
+          ? `${line.slice(0, MAX_GREP_LINE_CHARS)}…`
+          : line;
+      matches.push(`${relPath}:${index + 1}: ${display}`);
+      if (matches.length >= maxResults) return true;
+    }
+  };
+
+  if (rootInfo.isFile()) {
+    scanned = 1;
+    await inspect(root, path.basename(root));
+  } else if (rootInfo.isDirectory()) {
+    const stats = await walkFiles(
+      root,
+      {
+        includeIgnored: args.include_ignored === true,
+        signal: ctx.signal,
+      },
+      inspect,
+    );
+    scanned = stats.scanned;
+    stopReason = stats.stopReason;
+  } else {
+    return toolError(`Path is neither a file nor a directory: ${root}`, {
+      kind: "grep",
+      path: root,
+    });
+  }
+
+  if (ctx.signal.aborted || stopReason === "signal") {
+    return {
+      content: matches.join("\n") || "(cancelled before any match)",
+      status: "cancelled",
+      meta: {
+        kind: "grep",
+        path: root,
+        pattern: args.pattern,
+        matches: matches.length,
+      },
+    };
+  }
+
+  const footer: string[] = [];
+  if (matches.length >= maxResults) {
+    footer.push(
+      `[... stopped at ${maxResults} matches; narrow the pattern, path, or glob]`,
+    );
+  }
+  if (stopReason === "max-files") {
+    footer.push(
+      `[... stopped after scanning ${MAX_SCAN_FILES} files; narrow the path or use glob]`,
+    );
+  }
+  if (skipped > 0) {
+    footer.push(
+      `[... ${skipped} file(s) skipped (binary, too large, or unreadable)]`,
+    );
+  }
+
+  const patternLabel =
+    args.fixed_strings === true
+      ? JSON.stringify(args.pattern)
+      : `/${args.pattern}/`;
+  const content =
+    matches.length === 0
+      ? [
+          `No matches for ${patternLabel} under ${root}`,
+          ...(footer.length > 0 ? ["", ...footer] : []),
+        ].join("\n")
+      : [...matches, ...(footer.length > 0 ? ["", ...footer] : [])].join("\n");
+
+  return {
+    content: truncateContent(content),
+    status: "complete",
+    meta: {
+      kind: "grep",
+      path: root,
+      pattern: args.pattern,
+      matches: matches.length,
+      filesScanned: scanned,
+      truncated: matches.length >= maxResults || stopReason === "max-files",
+    },
+  };
+}
+
+async function globResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(globArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "glob" });
+  const args = parsed.data;
+
+  const matchers = expandBraces(args.pattern).map(globToRegExp);
+  const root = resolveReadPath(ctx.session, args.path);
+  let rootInfo;
+  try {
+    rootInfo = await stat(root);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return toolError(`Path does not exist: ${root}`, { kind: "glob", path: root });
+    }
+    return toolError(
+      `Cannot access ${root}: ${error instanceof Error ? error.message : String(error)}`,
+      { kind: "glob", path: root },
+    );
+  }
+
+  const matches: string[] = [];
+  let scanned = 0;
+  let stopReason: WalkStopReason = null;
+
+  const inspect = async (
+    _filePath: string,
+    relPath: string,
+  ): Promise<boolean | void> => {
+    if (!matchesAnyGlob(relPath, matchers)) return;
+    matches.push(relPath);
+    if (matches.length >= MAX_GLOB_MATCHES) return true;
+  };
+
+  if (rootInfo.isFile()) {
+    scanned = 1;
+    const rel = path.basename(root);
+    if (matchesAnyGlob(rel, matchers)) matches.push(rel);
+  } else if (rootInfo.isDirectory()) {
+    const stats = await walkFiles(
+      root,
+      {
+        includeIgnored: args.include_ignored === true,
+        signal: ctx.signal,
+      },
+      inspect,
+    );
+    scanned = stats.scanned;
+    stopReason = stats.stopReason;
+  } else {
+    return toolError(`Path is neither a file nor a directory: ${root}`, {
+      kind: "glob",
+      path: root,
+    });
+  }
+
+  if (ctx.signal.aborted || stopReason === "signal") {
+    return {
+      content: matches.join("\n") || "(cancelled before any match)",
+      status: "cancelled",
+      meta: {
+        kind: "glob",
+        path: root,
+        pattern: args.pattern,
+        matches: matches.length,
+      },
+    };
+  }
+
+  matches.sort((a, b) => a.localeCompare(b));
+  const truncated = matches.length >= MAX_GLOB_MATCHES;
+  const footer: string[] = [];
+  if (truncated) {
+    footer.push(
+      `[... showing the first ${MAX_GLOB_MATCHES} matches; refine the pattern or path]`,
+    );
+  }
+  if (stopReason === "max-files") {
+    footer.push(
+      `[... stopped after scanning ${MAX_SCAN_FILES} files; narrow the path]`,
+    );
+  }
+
+  const content =
+    matches.length === 0
+      ? [
+          `No files matched ${JSON.stringify(args.pattern)} under ${root}`,
+          ...(footer.length > 0 ? ["", ...footer] : []),
+        ].join("\n")
+      : [...matches, ...(footer.length > 0 ? ["", ...footer] : [])].join("\n");
+
+  return {
+    content: truncateContent(content),
+    status: "complete",
+    meta: {
+      kind: "glob",
+      path: root,
+      pattern: args.pattern,
+      matches: matches.length,
+      filesScanned: scanned,
+      truncated: truncated || stopReason === "max-files",
+    },
   };
 }
 
@@ -458,12 +1128,27 @@ async function editFileResult(
   session: Session,
   input: {
     path: string;
-    old_string: string;
-    new_string: string;
+    edits?: Array<{
+      old_string: string;
+      new_string: string;
+      replace_all?: boolean;
+    }>;
+    old_string?: string;
+    new_string?: string;
     replace_all?: boolean;
   },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
+  if (
+    input.edits === undefined &&
+    (input.old_string === undefined || input.new_string === undefined)
+  ) {
+    return toolError("provide edits, or both old_string and new_string", {
+      kind: "edit",
+      path: input.path,
+    });
+  }
+
   try {
     const target = resolveWritePath(session, input.path);
     const { resolved } = await assertWritable(session, target, ctx.dataDir);
@@ -505,26 +1190,44 @@ async function editFileResult(
       throw error;
     }
 
-    const occurrences = original.split(input.old_string).length - 1;
-    if (occurrences === 0) {
-      return toolError("old_string was not found in the file.", {
-        kind: "edit",
-        path: resolved,
-      });
-    }
-    if (occurrences > 1 && input.replace_all !== true) {
-      return toolError(
-        `old_string matches ${occurrences} places; pass replace_all: true or use a more specific string.`,
-        { kind: "edit", path: resolved },
-      );
+    const operations = input.edits ?? [
+      {
+        old_string: input.old_string!,
+        new_string: input.new_string!,
+        replace_all: input.replace_all,
+      },
+    ];
+
+    // All edits are applied in memory; the file is only written when every
+    // operation succeeds, so a bad edit never leaves a partial result.
+    let updated = original;
+    let totalReplacements = 0;
+    for (let index = 0; index < operations.length; index += 1) {
+      const operation = operations[index]!;
+      const label =
+        operations.length > 1 ? `edit ${index + 1}/${operations.length}: ` : "";
+      const occurrences = updated.split(operation.old_string).length - 1;
+      if (occurrences === 0) {
+        return toolError(
+          `${label}old_string was not found in the file. No changes were written.`,
+          { kind: "edit", path: resolved },
+        );
+      }
+      if (occurrences > 1 && operation.replace_all !== true) {
+        return toolError(
+          `${label}old_string matches ${occurrences} places; pass replace_all: true or use a more specific string. No changes were written.`,
+          { kind: "edit", path: resolved },
+        );
+      }
+
+      updated =
+        operation.replace_all === true
+          ? updated.split(operation.old_string).join(operation.new_string)
+          : updated.replace(operation.old_string, () => operation.new_string);
+      totalReplacements += operation.replace_all === true ? occurrences : 1;
     }
 
-    const updated =
-      input.replace_all === true
-        ? original.split(input.old_string).join(input.new_string)
-        : original.replace(input.old_string, input.new_string);
     const bytes = await atomicWriteFile(resolved, updated);
-    const replacements = input.replace_all === true ? occurrences : 1;
 
     await ctx.audit.append({
       type: "fs.write",
@@ -532,20 +1235,22 @@ async function editFileResult(
       op: "edit",
       path: resolved,
       bytes,
-      replacements,
+      replacements: totalReplacements,
+      edits: operations.length,
       mode: session.mode,
       via: "agent",
     });
 
     return {
-      content: `Replaced ${replacements} occurrence(s) in ${resolved}`,
+      content: `Applied ${operations.length} edit(s) (${totalReplacements} replacement(s)) to ${resolved}`,
       status: "complete",
       meta: {
         kind: "edit",
         operation: "edit",
         path: resolved,
         bytes,
-        replacements,
+        replacements: totalReplacements,
+        edits: operations.length,
         mode: session.mode,
       },
     };
@@ -761,7 +1466,7 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
       case "read_file": {
         const parsed = parseArgs(readFileArgs, rawArguments);
         if (!parsed.ok) return toolError(parsed.message, { kind: "read" });
-        return readFileResult(ctx.session, parsed.data.path, ctx);
+        return readFileResult(ctx.session, parsed.data, ctx);
       }
       case "write_file": {
         const parsed = parseArgs(writeFileArgs, rawArguments);
@@ -778,6 +1483,10 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
         if (!parsed.ok) return toolError(parsed.message, { kind: "list" });
         return listFilesResult(ctx.session, parsed.data.path);
       }
+      case "grep":
+        return grepResult(rawArguments, ctx);
+      case "glob":
+        return globResult(rawArguments, ctx);
       default:
         return toolError(`Unknown tool: ${name}`, { kind: "error" });
     }

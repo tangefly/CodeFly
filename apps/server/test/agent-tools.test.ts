@@ -183,4 +183,155 @@ describe("AgentToolExecutor file tools", () => {
     expect(duplicate.status).toBe("error");
     expect(duplicate.content).toContain("replace_all");
   });
+
+  it("reads line ranges with line numbers", async () => {
+    await writeFile(
+      path.join(workspace, "lines.txt"),
+      "one\ntwo\nthree\nfour\nfive\n",
+      "utf8",
+    );
+
+    const slice = await executor.execute(
+      "read_file",
+      JSON.stringify({ path: "lines.txt", offset: 2, limit: 2 }),
+      context(),
+    );
+    expect(slice.status).toBe("complete");
+    expect(slice.content).toContain("2\ttwo");
+    expect(slice.content).toContain("3\tthree");
+    expect(slice.content).not.toContain("1\tone");
+    expect(slice.content).not.toContain("4\tfour");
+    expect(slice.meta).toMatchObject({
+      startLine: 2,
+      endLine: 3,
+      totalLines: 5,
+      truncated: false,
+    });
+
+    const beyond = await executor.execute(
+      "read_file",
+      JSON.stringify({ path: "lines.txt", offset: 99 }),
+      context(),
+    );
+    expect(beyond.status).toBe("error");
+    expect(beyond.content).toContain("beyond the end");
+  });
+
+  it("applies multiple edits atomically", async () => {
+    await writeFile(
+      path.join(workspace, "multi.txt"),
+      "alpha beta gamma beta\n",
+      "utf8",
+    );
+
+    const edited = await executor.execute(
+      "edit_file",
+      JSON.stringify({
+        path: "multi.txt",
+        edits: [
+          { old_string: "alpha", new_string: "A" },
+          { old_string: "beta", new_string: "B", replace_all: true },
+        ],
+      }),
+      context(),
+    );
+    expect(edited.status).toBe("complete");
+    expect(edited.meta).toMatchObject({ edits: 2, replacements: 3 });
+    expect(await readFile(path.join(workspace, "multi.txt"), "utf8")).toBe(
+      "A B gamma B\n",
+    );
+
+    const failed = await executor.execute(
+      "edit_file",
+      JSON.stringify({
+        path: "multi.txt",
+        edits: [
+          { old_string: "A", new_string: "Z" },
+          { old_string: "does-not-exist", new_string: "x" },
+        ],
+      }),
+      context(),
+    );
+    expect(failed.status).toBe("error");
+    expect(failed.content).toContain("edit 2/2");
+    expect(failed.content).toContain("No changes were written");
+    expect(await readFile(path.join(workspace, "multi.txt"), "utf8")).toBe(
+      "A B gamma B\n",
+    );
+  });
+
+  it("greps contents, honors glob filters, and skips ignored dirs", async () => {
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    await mkdir(path.join(workspace, "node_modules/pkg"), { recursive: true });
+    await writeFile(
+      path.join(workspace, "src/a.ts"),
+      "const needle = 1;\n",
+      "utf8",
+    );
+    await writeFile(path.join(workspace, "src/b.js"), "// needle\n", "utf8");
+    await writeFile(
+      path.join(workspace, "node_modules/pkg/c.ts"),
+      "needle\n",
+      "utf8",
+    );
+
+    const found = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle" }),
+      context(),
+    );
+    expect(found.status).toBe("complete");
+    expect(found.content).toContain("src/a.ts:1:");
+    expect(found.content).toContain("src/b.js:1:");
+    expect(found.content).not.toContain("node_modules");
+    expect(found.meta).toMatchObject({ kind: "grep", matches: 2 });
+
+    const filtered = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle", glob: "**/*.ts" }),
+      context(),
+    );
+    expect(filtered.status).toBe("complete");
+    expect(filtered.content).toContain("src/a.ts:1:");
+    expect(filtered.content).not.toContain("src/b.js");
+    expect(filtered.meta).toMatchObject({ matches: 1 });
+
+    const literal = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle = 1", fixed_strings: true }),
+      context(),
+    );
+    expect(literal.status).toBe("complete");
+    expect(literal.content).toContain("src/a.ts:1:");
+  });
+
+  it("finds files with glob patterns", async () => {
+    await mkdir(path.join(workspace, "src/nested"), { recursive: true });
+    await mkdir(path.join(workspace, "node_modules/pkg"), { recursive: true });
+    await writeFile(path.join(workspace, "src/a.ts"), "a\n", "utf8");
+    await writeFile(path.join(workspace, "src/b.js"), "b\n", "utf8");
+    await writeFile(path.join(workspace, "src/nested/c.ts"), "c\n", "utf8");
+    await writeFile(path.join(workspace, "node_modules/pkg/d.ts"), "d\n", "utf8");
+
+    const found = await executor.execute(
+      "glob",
+      JSON.stringify({ pattern: "**/*.{ts,js}" }),
+      context(),
+    );
+    expect(found.status).toBe("complete");
+    expect(found.content).toContain("src/a.ts");
+    expect(found.content).toContain("src/b.js");
+    expect(found.content).toContain("src/nested/c.ts");
+    expect(found.content).not.toContain("node_modules");
+    expect(found.meta).toMatchObject({ kind: "glob", matches: 3 });
+
+    const shallow = await executor.execute(
+      "glob",
+      JSON.stringify({ pattern: "*.ts" }),
+      context(),
+    );
+    expect(shallow.content).toContain("src/a.ts");
+    expect(shallow.content).toContain("src/nested/c.ts");
+    expect(shallow.content).not.toContain("src/b.js");
+  });
 });
