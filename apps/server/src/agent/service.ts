@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   AgentEvent,
   AgentToolCall,
+  AgentToolMeta,
   AgentToolName,
   ChatMessageRecord,
   ChatUsage,
@@ -15,6 +16,7 @@ import {
   redactSecret,
   type LlmChatMessage,
   type LlmClientLike,
+  type LlmContentPart,
   type LlmStreamResult,
 } from "../llm/client.js";
 import {
@@ -34,10 +36,12 @@ import type {
 /** Tools that only read state and can safely run concurrently. */
 const READ_ONLY_TOOL_NAMES = new Set<string>([
   "read_file",
+  "read_image",
   "list_files",
   "grep",
   "glob",
   "web_search",
+  "web_fetch",
 ]);
 
 interface ToolRunOptions {
@@ -351,7 +355,7 @@ export class AgentService {
               conversation.push({
                 role: "tool",
                 tool_call_id: item.call.id,
-                content: item.result.content,
+                content: toolContentForModel(item.result.content, item.result.meta),
               });
             }
             if (results.some((item) => item.result.status === "cancelled")) {
@@ -366,7 +370,7 @@ export class AgentService {
               conversation.push({
                 role: "tool",
                 tool_call_id: item.call.id,
-                content: item.result.content,
+                content: toolContentForModel(item.result.content, item.result.meta),
               });
             }
             if (results.some((item) => item.result.status === "cancelled")) {
@@ -661,10 +665,28 @@ function recordsToLlmMessages(records: ChatMessageRecord[]): LlmChatMessage[] {
       messages.push({
         role: "tool",
         tool_call_id: record.toolCallId,
-        content: record.content,
+        content: toolContentForModel(record.content, record.meta),
       });
     }
   }
 
   return messages;
+}
+
+/**
+ * Tool results are text unless the tool attached an image (read_image); the
+ * provider then receives a text+image content array so the model can see it.
+ */
+function toolContentForModel(
+  content: string,
+  meta: AgentToolMeta | undefined,
+): string | LlmContentPart[] {
+  const dataUrl = meta?.imageDataUrl;
+  if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) {
+    return [
+      { type: "text", text: content },
+      { type: "image_url", image_url: { url: dataUrl } },
+    ];
+  }
+  return content;
 }

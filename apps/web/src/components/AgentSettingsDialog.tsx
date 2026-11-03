@@ -58,6 +58,18 @@ const TOOL_INFO: Array<{
     description:
       "通过 DeepSeek Search 检索实时网页，返回标题、链接与摘要；需要 DeepSeek 模型配置。",
   },
+  {
+    name: "web_fetch",
+    label: "抓取网页",
+    description:
+      "直接抓取一个 http(s) URL 的正文（HTML 转文本），拒绝内网/回环地址；只读。",
+  },
+  {
+    name: "read_image",
+    label: "查看图片",
+    description:
+      "读取 PNG/JPEG/GIF/WebP 并附给模型查看，支持截图与图表；只读。",
+  },
 ];
 
 export function AgentSettingsDialog() {

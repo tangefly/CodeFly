@@ -32,7 +32,8 @@ import type {
 } from "../src/agent/tools.js";
 
 class FakeAgentClient implements LlmClientLike {
-  mode: "two-step" | "always-tool" | "error" | "abort" | "multi-read" = "two-step";
+  mode: "two-step" | "always-tool" | "error" | "abort" | "multi-read" | "image" =
+    "two-step";
   reasoning = "";
   calls: LlmChatMessage[][] = [];
   toolSets: LlmToolDefinition[][] = [];
@@ -83,6 +84,18 @@ class FakeAgentClient implements LlmClientLike {
             name: "run_command",
             arguments: '{"command":"echo hi"}',
           },
+        ],
+      };
+    }
+
+    if (this.mode === "image" && this.count === 0) {
+      this.count += 1;
+      onDelta("looking");
+      return {
+        content: "looking",
+        finishReason: "tool_calls",
+        toolCalls: [
+          { id: "call_img", name: "read_image", arguments: '{"path":"shot.png"}' },
         ],
       };
     }
@@ -188,6 +201,20 @@ class FakeTools implements AgentToolExecutorLike {
           justification: "test",
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
         });
+      }
+      if (name === "read_image") {
+        return {
+          content: "Read image shot.png (image/png, 1x1, 70 bytes).",
+          status: "complete",
+          meta: {
+            kind: "image",
+            path: "shot.png",
+            mime: "image/png",
+            width: 1,
+            height: 1,
+            imageDataUrl: "data:image/png;base64,AAAA",
+          },
+        };
       }
       return {
         content: "tool output",
@@ -479,6 +506,31 @@ describe("AgentService", () => {
       )
       .map((event) => event.message.toolCallId);
     expect(finished).toEqual(["call_r1", "call_r2", "call_r3"]);
+  });
+
+  it("sends read_image tool results as text+image content parts", async () => {
+    client.mode = "image";
+    await service.run(session, "look at the screenshot", new AbortController().signal, () =>
+      undefined,
+    );
+
+    const records = messageStore.list(session.id);
+    expect(records.map((record) => record.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(records[2]).toMatchObject({
+      toolName: "read_image",
+      meta: { kind: "image", mime: "image/png" },
+    });
+
+    const toolMessage = client.calls[1]!.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toEqual([
+      { type: "text", text: "Read image shot.png (image/png, 1x1, 70 bytes)." },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+    ]);
   });
 
   it("forwards approval events from tools", async () => {

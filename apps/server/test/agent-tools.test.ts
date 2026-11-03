@@ -482,4 +482,262 @@ describe("AgentToolExecutor tools", () => {
       expect(invalid.content).toContain("Invalid tool arguments");
     });
   });
+
+  describe("web_fetch", () => {
+    const fetchExecutor = (): AgentToolExecutor =>
+      new AgentToolExecutor({
+        // Every public URL resolves to a documentation IP in tests.
+        resolveHost: async () => ["93.184.216.34"],
+      });
+
+    it("fetches HTML, strips markup and reports the response", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          calls.push({ url: String(input), init: init ?? {} });
+          return new Response(
+            "<!doctype html><html><head><title>Hello &amp; world</title>" +
+              "<style>.x{color:red}</style></head><body>" +
+              "<p>First paragraph</p><p>Second <b>bold</b> move</p>" +
+              "<script>alert(1)</script></body></html>",
+            {
+              status: 200,
+              headers: { "content-type": "text/html; charset=utf-8" },
+            },
+          );
+        }),
+      );
+
+      const result = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/doc" }),
+        context(),
+      );
+
+      expect(result.status).toBe("complete");
+      expect(result.content).toContain("Hello & world");
+      expect(result.content).toContain("First paragraph");
+      expect(result.content).toContain("Second bold move");
+      expect(result.content).not.toContain("alert(1)");
+      expect(result.content).not.toContain("<p>");
+      expect(result.meta).toMatchObject({
+        kind: "fetch",
+        url: "https://example.com/doc",
+        statusCode: 200,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.init.redirect).toBe("manual");
+    });
+
+    it("follows redirects and reports the final URL", async () => {
+      let call = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          call += 1;
+          if (call === 1) {
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://example.com/final" },
+            });
+          }
+          return new Response("plain text body", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          });
+        }),
+      );
+
+      const result = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/start" }),
+        context(),
+      );
+
+      expect(result.status).toBe("complete");
+      expect(result.content).toContain("plain text body");
+      expect(result.meta?.url).toBe("https://example.com/final");
+      expect(call).toBe(2);
+    });
+
+    it("refuses loopback, private DNS results and non-http schemes", async () => {
+      const executor = new AgentToolExecutor();
+
+      const loopback = await executor.execute(
+        "web_fetch",
+        JSON.stringify({ url: "http://127.0.0.1:8080/admin" }),
+        context(),
+      );
+      expect(loopback.status).toBe("error");
+      expect(loopback.content).toContain("private address");
+
+      const rebinding = new AgentToolExecutor({
+        resolveHost: async () => ["10.0.0.5"],
+      });
+      const internal = await rebinding.execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://intranet.example.com/" }),
+        context(),
+      );
+      expect(internal.status).toBe("error");
+      expect(internal.content).toContain("10.0.0.5");
+
+      const scheme = await executor.execute(
+        "web_fetch",
+        JSON.stringify({ url: "file:///etc/passwd" }),
+        context(),
+      );
+      expect(scheme.status).toBe("error");
+      expect(scheme.content).toContain("only http(s)");
+    });
+
+    it("reports HTTP errors and refuses binary content", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("gone", { status: 404 })),
+      );
+      const missing = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/missing" }),
+        context(),
+      );
+      expect(missing.status).toBe("error");
+      expect(missing.content).toContain("HTTP 404");
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(Buffer.from([0, 1, 2, 3]), {
+              status: 200,
+              headers: { "content-type": "application/pdf" },
+            }),
+        ),
+      );
+      const binary = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/file.pdf" }),
+        context(),
+      );
+      expect(binary.status).toBe("error");
+      expect(binary.content).toContain("Unsupported content type");
+    });
+
+    it("refuses binary bodies even without a content-type header", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(Buffer.from([0, 1, 2, 3, 4]), { status: 200 }),
+        ),
+      );
+      const result = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/blob" }),
+        context(),
+      );
+      expect(result.status).toBe("error");
+      expect(result.content).toContain("looks binary");
+    });
+
+    it("truncates long pages at max_chars", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response("x".repeat(5000), {
+              status: 200,
+              headers: { "content-type": "text/plain" },
+            }),
+        ),
+      );
+      const result = await fetchExecutor().execute(
+        "web_fetch",
+        JSON.stringify({ url: "https://example.com/long", max_chars: 1000 }),
+        context(),
+      );
+      expect(result.status).toBe("complete");
+      expect(result.meta?.truncated).toBe(true);
+      expect(result.content).toContain("truncated at 1000 characters");
+      expect(result.content.length).toBeLessThan(5000);
+    });
+  });
+
+  describe("read_image", () => {
+    const PNG_1X1 = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+      "base64",
+    );
+
+    it("reads a PNG, reports dimensions and attaches a data URL", async () => {
+      await writeFile(path.join(workspace, "shot.png"), PNG_1X1);
+      const result = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "shot.png" }),
+        context(),
+      );
+
+      expect(result.status).toBe("complete");
+      expect(result.content).toContain("image/png");
+      expect(result.content).toContain("1x1");
+      expect(result.meta).toMatchObject({
+        kind: "image",
+        path: path.join(workspace, "shot.png"),
+        mime: "image/png",
+        width: 1,
+        height: 1,
+        bytes: PNG_1X1.length,
+      });
+      expect(String(result.meta?.imageDataUrl)).toMatch(
+        /^data:image\/png;base64,/,
+      );
+    });
+
+    it("rejects non-images, directories and missing files", async () => {
+      await writeFile(path.join(workspace, "note.txt"), "hello");
+      const text = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "note.txt" }),
+        context(),
+      );
+      expect(text.status).toBe("error");
+      expect(text.content).toContain("Not a supported image");
+
+      await mkdir(path.join(workspace, "folder"), { recursive: true });
+      const dir = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "folder" }),
+        context(),
+      );
+      expect(dir.status).toBe("error");
+      expect(dir.content).toContain("directory");
+
+      const missing = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "nope.png" }),
+        context(),
+      );
+      expect(missing.status).toBe("error");
+      expect(missing.content).toContain("does not exist");
+    });
+
+    it("refuses images above the read limit", async () => {
+      await writeFile(path.join(workspace, "big.png"), PNG_1X1);
+      const result = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "big.png" }),
+        context({ maxReadBytes: 10 }),
+      );
+      expect(result.status).toBe("error");
+      expect(result.content).toContain("limit");
+    });
+
+    it("exposes both schemas in the tool catalog", () => {
+      const names = executor
+        .definitions(["web_fetch", "read_image"])
+        .map((definition) => definition.function.name);
+      expect(names).toEqual(["web_fetch", "read_image"]);
+    });
+  });
 });

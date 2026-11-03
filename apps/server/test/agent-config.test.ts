@@ -31,7 +31,7 @@ describe("AgentConfigStore", () => {
     await store.init();
     const settings = store.getPublic();
     expect(settings.maxSteps).toBe(DEFAULT_AGENT_MAX_STEPS);
-    expect(settings.maxSteps).toBe(25);
+    expect(settings.maxSteps).toBe(500);
     expect(settings.commandTimeoutMs).toBe(60_000);
     expect(settings.enabledTools).toEqual([...AGENT_TOOL_NAMES]);
     expect(settings.systemPrompt).toBe(DEFAULT_AGENT_PROMPT);

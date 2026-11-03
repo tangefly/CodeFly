@@ -7,9 +7,15 @@ export interface LlmRequestToolCall {
   function: { name: string; arguments: string };
 }
 
+/** One content part in a multimodal message (OpenAI chat-completions shape). */
+export type LlmContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface LlmChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  /** Plain text, or text/image parts when a tool result carries an image. */
+  content: string | null | LlmContentPart[];
   tool_calls?: LlmRequestToolCall[];
   tool_call_id?: string;
   /**

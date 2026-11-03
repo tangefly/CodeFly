@@ -9,9 +9,15 @@
 - **聊天模式**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
 - **Agent 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
-  `edit_file`、`list_files`、`grep`、`glob`、`web_search`；`read_file` 支持行号与
-  `offset`/`limit`，`edit_file` 支持一次多处原子替换，只读工具（含 `web_search`）
-  并行执行；工具输出以可折叠卡片展示，失败时自动展开。
+  `edit_file`、`list_files`、`grep`、`glob`、`web_search`、`web_fetch`、`read_image`；
+  `read_file` 支持行号与 `offset`/`limit`，`edit_file` 支持一次多处原子替换，
+  只读工具（含 `web_search`、`web_fetch`、`read_image`）并行执行；工具输出以可折叠
+  卡片展示，失败时自动展开；每轮的工具调用汇总为一张可折叠卡片，优先展示模型最终回答。
+- **抓取网页**：`web_fetch` 直接读取一个 http(s) URL 的正文（HTML 转纯文本，JSON/XML
+  原样返回），最多 5 次重定向、2 MiB、10 万字符；拒绝回环/内网/链路本地地址并在
+  每次重定向后重新校验，防止 DNS rebinding 绕过。
+- **看图**：`read_image` 读取 PNG/JPEG/GIF/WebP（≤ 4 MiB），解析尺寸后把图片作为
+  带图的多模态 tool result 发给模型，UI 直接渲染缩略图。
 - **联网搜索**：`web_search` 使用 DeepSeek Search（`POST /v1/tools/search`）返回
   标题、链接、摘要与可选网页正文，支持 `site:`、`lang:`、`after:` 等搜索语法；
   复用当前 DeepSeek API Key，仅在 Base URL 属于 `deepseek.com` 时启用。
@@ -103,7 +109,10 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
   `CODEFLY_HOST` 改成 `0.0.0.0`。
 - **读取、网络、PID 可见性不隔离**；Landlock 只限制文件写。命令可以读取本机任意
   可读文件，包括 `data/llm.json` 中的 API Key。不要执行不受信任的命令。
-- 启用 `web_search` 时，搜索查询词与可选网页正文会发送到 DeepSeek Search 服务。
+- 启用 `web_search` 时，搜索查询词与可选网页正文会发送到 DeepSeek Search 服务；
+  启用 `web_fetch` 时，目标 URL 会从本机直接访问（只放行公网 http/https）。
+- `read_image` 会把图片以 base64 存入 `data/messages.json`，并把图片发送给模型
+  提供商；不要读取含敏感信息的截图。
 - `danger-full-access` 没有沙箱也没有审批，仅在明确确认后使用。
 - `workspace-write` 默认放行 GPU 设备、`/dev/shm` 与 `/proc`（CUDA 需要）；可用
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。

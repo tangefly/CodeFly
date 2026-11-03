@@ -12,14 +12,84 @@ import {
   selectCurrentMessages,
   selectCurrentSession,
   useAppStore,
+  type AssistantMessage,
   type ChatMessage,
   type UserMessage,
 } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { MessageBubble } from "./MessageBubble.js";
+import { TurnActivity } from "./TurnActivity.js";
 import { Button } from "./ui.js";
 
 const EMPTY: ChatMessage[] = [];
+
+type TimelineItem =
+  | { kind: "message"; message: ChatMessage }
+  | {
+      kind: "turn";
+      id: string;
+      activity: ChatMessage[];
+      answer?: AssistantMessage;
+    };
+
+/**
+ * Splits the flat message list into turns. Everything the model did between
+ * the user's question and its final answer (tool-call steps, tool results,
+ * reasoning) becomes one foldable activity group; the final answer — the last
+ * assistant message that requested no tools — stays visible.
+ */
+function buildTimeline(messages: ChatMessage[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let index = 0;
+
+  while (index < messages.length) {
+    const message = messages[index]!;
+    if (message.kind === "user" || message.kind === "system") {
+      items.push({ kind: "message", message });
+      index += 1;
+      continue;
+    }
+
+    const run: ChatMessage[] = [];
+    while (
+      index < messages.length &&
+      messages[index]!.kind !== "user" &&
+      messages[index]!.kind !== "system"
+    ) {
+      run.push(messages[index]!);
+      index += 1;
+    }
+
+    let answerIndex = -1;
+    for (let cursor = run.length - 1; cursor >= 0; cursor -= 1) {
+      const candidate = run[cursor]!;
+      if (candidate.kind === "assistant" && !candidate.toolCalls?.length) {
+        answerIndex = cursor;
+        break;
+      }
+    }
+    const answer =
+      answerIndex >= 0 && run[answerIndex]?.kind === "assistant"
+        ? (run[answerIndex] as AssistantMessage)
+        : undefined;
+    const activity = run.filter((_, cursor) => cursor !== answerIndex);
+    const hasTools = activity.some((entry) => entry.kind === "tool");
+
+    if (!hasTools) {
+      for (const entry of run) items.push({ kind: "message", message: entry });
+      continue;
+    }
+
+    items.push({
+      kind: "turn",
+      id: activity[0]?.id ?? run[0]!.id,
+      activity,
+      answer,
+    });
+  }
+
+  return items;
+}
 
 /** Distance from the bottom under which scrolling down re-attaches. */
 const STICK_THRESHOLD_PX = 48;
@@ -33,6 +103,11 @@ export function ChatTimeline() {
   const sendAgent = useAppStore((state) => state.sendAgent);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
   const llmSettings = useAppStore((state) => state.llmSettings);
+  const agentBusy = useAppStore(
+    (state) =>
+      state.currentSessionId !== null &&
+      state.agentBusy[state.currentSessionId] === true,
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -57,6 +132,7 @@ export function ChatTimeline() {
     () => questions.map((question) => question.id).join("|"),
     [questions],
   );
+  const timeline = useMemo(() => buildTimeline(messages), [messages]);
 
   const updateActiveQuestion = (): void => {
     if (activeFrame.current !== null) return;
@@ -304,9 +380,22 @@ export function ChatTimeline() {
         </div>
       ) : (
         <div className="mx-auto flex max-w-5xl flex-col gap-5 pb-2">
-          {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
-          ))}
+          {timeline.map((item, index) =>
+            item.kind === "message" ? (
+              <MessageBubble key={item.message.id} message={item.message} />
+            ) : (
+              <div key={item.id} className="flex flex-col gap-3">
+                <TurnActivity
+                  messages={item.activity}
+                  final={item.answer}
+                  busy={agentBusy && index === timeline.length - 1}
+                />
+                {item.answer ? (
+                  <MessageBubble message={item.answer} />
+                ) : null}
+              </div>
+            ),
+          )}
         </div>
       )}
       </div>

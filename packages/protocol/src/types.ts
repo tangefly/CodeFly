@@ -99,6 +99,8 @@ export interface AgentToolMeta {
     | "grep"
     | "glob"
     | "search"
+    | "fetch"
+    | "image"
     | "error";
   command?: string;
   cwd?: string;
@@ -119,6 +121,15 @@ export interface AgentToolMeta {
   matches?: number;
   query?: string;
   resultCount?: number;
+  /** web_fetch: request URL, response status and media type. */
+  url?: string;
+  statusCode?: number;
+  contentType?: string;
+  /** read_image: decoded image facts plus an inline data URL for UI/model. */
+  mime?: string;
+  width?: number;
+  height?: number;
+  imageDataUrl?: string;
   truncated?: boolean;
   denied?: boolean;
   spillPaths?: string[];
@@ -164,13 +175,15 @@ export const AGENT_TOOL_NAMES = [
   "grep",
   "glob",
   "web_search",
+  "web_fetch",
+  "read_image",
 ] as const;
 
 /** Hard ceiling for Agent loop steps in a single run. */
 export const AGENT_MAX_STEPS_LIMIT = 500;
 
 /** Default Agent loop steps for a new install. */
-export const DEFAULT_AGENT_MAX_STEPS = 25;
+export const DEFAULT_AGENT_MAX_STEPS = 500;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
 

@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
   Globe,
+  Image as ImageIcon,
   Loader2,
   Search,
   Terminal,
@@ -15,7 +16,7 @@ import type { ToolMessage } from "../lib/store.js";
 import { cn, formatDuration } from "../lib/utils.js";
 import { Button } from "./ui.js";
 
-const TOOL_LABEL: Record<string, string> = {
+export const TOOL_LABEL: Record<string, string> = {
   run_command: "运行命令",
   read_file: "读取文件",
   write_file: "写入文件",
@@ -24,6 +25,8 @@ const TOOL_LABEL: Record<string, string> = {
   grep: "搜索内容",
   glob: "查找文件",
   web_search: "联网搜索",
+  web_fetch: "抓取网页",
+  read_image: "查看图片",
 };
 
 function parseArguments(raw: string): Record<string, unknown> {
@@ -99,6 +102,18 @@ export function ToolCard({ message }: { message: ToolMessage }) {
           ? meta.query
           : undefined
       : undefined;
+  const fetchUrl =
+    message.toolName === "web_fetch"
+      ? typeof args.url === "string"
+        ? args.url
+        : typeof meta.url === "string"
+          ? meta.url
+          : undefined
+      : undefined;
+  const imageDataUrl =
+    message.toolName === "read_image" && typeof meta.imageDataUrl === "string"
+      ? meta.imageDataUrl
+      : undefined;
 
   const copyText = (): void => {
     const text =
@@ -117,8 +132,10 @@ export function ToolCard({ message }: { message: ToolMessage }) {
   const Icon =
     message.toolName === "run_command"
       ? Terminal
-      : message.toolName === "web_search"
+      : message.toolName === "web_search" || message.toolName === "web_fetch"
         ? Globe
+        : message.toolName === "read_image"
+          ? ImageIcon
         : message.toolName === "grep"
           ? Search
           : message.toolName === "list_files" ||
@@ -137,7 +154,8 @@ export function ToolCard({ message }: { message: ToolMessage }) {
     message.toolName === "edit_file" ||
     message.toolName === "grep" ||
     message.toolName === "glob" ||
-    message.toolName === "web_search";
+    message.toolName === "web_search" ||
+    message.toolName === "web_fetch";
 
   /** Shared collapsible "result" section for file tools and unknown tools. */
   const renderCollapsibleResult = (label: string) => (
@@ -230,6 +248,22 @@ export function ToolCard({ message }: { message: ToolMessage }) {
                 {command}
               </code>
             </button>
+          ) : fetchUrl ? (
+            <a
+              href={fetchUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75 hover:text-primary"
+              title={fetchUrl}
+            >
+              {fetchUrl}
+              {typeof meta.statusCode === "number" ? (
+                <span className="text-muted-foreground/60">
+                  {" "}
+                  · HTTP {meta.statusCode}
+                </span>
+              ) : null}
+            </a>
           ) : searchQuery ? (
             <code
               className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75"
@@ -290,6 +324,27 @@ export function ToolCard({ message }: { message: ToolMessage }) {
           </span>
         </div>
       </div>
+
+      {imageDataUrl ? (
+        <div className="border-t border-border/60 bg-[#080a0f] p-3">
+          <img
+            src={imageDataUrl}
+            alt={targetPath ?? "image"}
+            className="max-h-72 w-auto max-w-full rounded-md border border-border/60 object-contain"
+          />
+          <div className="mt-1.5 flex flex-wrap items-center gap-2 font-mono text-[9px] text-muted-foreground/60">
+            {typeof meta.width === "number" && typeof meta.height === "number" ? (
+              <span>
+                {meta.width}×{meta.height}
+              </span>
+            ) : null}
+            {typeof meta.mime === "string" ? <span>{meta.mime}</span> : null}
+            {typeof meta.bytes === "number" ? (
+              <span>{Math.round(meta.bytes / 1024)} KB</span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {message.status === "running" ? (
         <div className="flex items-center gap-2 border-t border-border/60 bg-[#080a0f] px-4 py-2 text-[11px] text-muted-foreground">

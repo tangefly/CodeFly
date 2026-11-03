@@ -1,4 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
 import type {
@@ -63,6 +65,12 @@ const MAX_SEARCH_COUNT = 50;
 const SEARCH_TIMEOUT_MS = 60_000;
 const MAX_SEARCH_CONTENT_CHARS = 4_000;
 const MAX_SEARCH_ERROR_CHARS = 2_000;
+const DEFAULT_FETCH_CHARS = 20_000;
+const MAX_FETCH_CHARS = 100_000;
+const FETCH_TIMEOUT_MS = 20_000;
+const FETCH_MAX_BYTES = 2 * 1024 * 1024;
+const FETCH_MAX_REDIRECTS = 5;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /** Directories skipped by grep/glob unless include_ignored is set. */
 const IGNORED_DIRS = new Set([
@@ -188,6 +196,25 @@ const webSearchArgs = z
     need_content: z.boolean().optional(),
     /** Optional original user question that motivated the search. */
     ori_question: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+
+const webFetchArgs = z
+  .object({
+    url: z.string().trim().min(1).max(4096),
+    /** Max characters of decoded page text returned to the model. */
+    max_chars: z
+      .number()
+      .int()
+      .min(500)
+      .max(MAX_FETCH_CHARS)
+      .optional(),
+  })
+  .strict();
+
+const readImageArgs = z
+  .object({
+    path: z.string().trim().min(1).max(4096),
   })
   .strict();
 
@@ -488,6 +515,51 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
           },
         },
         required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  web_fetch: {
+    type: "function",
+    function: {
+      name: "web_fetch",
+      description:
+        "Fetch one HTTP(S) URL and return its readable text. Use it after web_search to read the full page behind a result, or when the user already gave you a URL (docs, raw source, an error page). HTML is converted to plain text; JSON and XML are returned as-is. Only public http(s) hosts are fetched: private, loopback and link-local addresses are refused, redirects are followed up to 5 hops, and the response is capped. Prefer this over run_command with curl/wget.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "Absolute http:// or https:// URL to fetch.",
+          },
+          max_chars: {
+            type: "integer",
+            minimum: 500,
+            maximum: MAX_FETCH_CHARS,
+            description: `Maximum characters of text to return (default ${DEFAULT_FETCH_CHARS}). Larger pages are truncated with a note.`,
+          },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+  },
+  read_image: {
+    type: "function",
+    function: {
+      name: "read_image",
+      description:
+        "Read a local image file (PNG, JPEG, GIF or WebP) and attach it to the conversation so you can inspect what it shows. Use it for screenshots, rendered charts, UI captures or any visual artifact you produced or found. Supports paths relative to the workspace or absolute paths. Images larger than 4 MiB (or the session read limit, if smaller) are refused.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Image path, relative to the workspace or absolute.",
+          },
+        },
+        required: ["path"],
         additionalProperties: false,
       },
     },
@@ -1533,6 +1605,8 @@ export interface AgentToolExecutorOptions {
    * Return null when the provider is not DeepSeek or has no API key.
    */
   searchEndpoint?: () => WebSearchEndpoint | null;
+  /** Overrides DNS resolution for web_fetch (tests use a fake resolver). */
+  resolveHost?: HostResolver;
 }
 
 /**
@@ -1774,11 +1848,493 @@ async function webSearchResult(
   };
 }
 
+/** Resolves a hostname to every address it points at; injectable for tests. */
+export type HostResolver = (host: string) => Promise<string[]>;
+
+async function defaultResolveHost(host: string): Promise<string[]> {
+  const records = await dnsLookup(host, { all: true });
+  return records.map((record) => record.address);
+}
+
+function isBlockedIpv4(address: string): boolean {
+  const parts = address.split(".").map((part) => Number(part));
+  if (
+    parts.length !== 4 ||
+    parts.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
+  ) {
+    return true;
+  }
+  const [a, b] = parts as [number, number, number, number];
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 192 && b === 0) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  return a >= 224;
+}
+
+function isBlockedIpv6(address: string): boolean {
+  const ip = address.toLowerCase().replace(/^\[|\]$/g, "");
+  if (ip === "::" || ip === "::1") return true;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+  if (mapped !== null) return isBlockedIpv4(mapped[1]!);
+  if (ip.startsWith("fc") || ip.startsWith("fd")) return true;
+  if (/^fe[89ab]/.test(ip)) return true;
+  return ip.startsWith("ff");
+}
+
+function isBlockedAddress(address: string): boolean {
+  return isIP(address) === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address);
+}
+
+const BLOCKED_HOSTNAMES = /(^|\.)(localhost|local|internal|home\.arpa)$/i;
+
+/**
+ * Refuses loopback, private, link-local and other non-public targets, and
+ * re-checks on every redirect hop to blunt DNS-rebinding and redirect tricks.
+ */
+async function assertPublicUrl(
+  url: URL,
+  resolveHost: HostResolver,
+): Promise<void> {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`only http(s) URLs are supported (got ${url.protocol})`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("URLs with embedded credentials are not fetched");
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (host === "") throw new Error("URL has no host");
+  if (BLOCKED_HOSTNAMES.test(host)) {
+    throw new Error(`refusing to fetch a private host: ${host}`);
+  }
+  if (isIP(host) !== 0) {
+    if (isBlockedAddress(host)) {
+      throw new Error(`refusing to fetch a private address: ${host}`);
+    }
+    return;
+  }
+  let addresses: string[];
+  try {
+    addresses = await resolveHost(host);
+  } catch (error) {
+    throw new Error(
+      `cannot resolve host ${host}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (addresses.length === 0) throw new Error(`cannot resolve host: ${host}`);
+  const blocked = addresses.find((address) => isBlockedAddress(address));
+  if (blocked !== undefined) {
+    throw new Error(`refusing to fetch a private address: ${blocked}`);
+  }
+}
+
+async function fetchWithRedirects(
+  start: URL,
+  resolveHost: HostResolver,
+  signal: AbortSignal,
+): Promise<{ response: Response; url: URL }> {
+  let current = start;
+  for (let hop = 0; hop <= FETCH_MAX_REDIRECTS; hop += 1) {
+    await assertPublicUrl(current, resolveHost);
+    const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    const response = await fetch(current, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.any([signal, timeout]),
+      headers: {
+        "user-agent": "codefly-agent/0.1 (+web_fetch)",
+        accept:
+          "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      },
+    });
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location !== null) {
+      await response.body?.cancel().catch(() => undefined);
+      current = new URL(location, current);
+      continue;
+    }
+    return { response, url: current };
+  }
+  throw new Error(`too many redirects (> ${FETCH_MAX_REDIRECTS})`);
+}
+
+async function readBodyCapped(
+  response: Response,
+  limit: number,
+): Promise<{ buffer: Buffer; truncated: boolean }> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) return { buffer: Buffer.alloc(0), truncated: false };
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let truncated = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    const chunk = Buffer.from(value);
+    if (total + chunk.length > limit) {
+      chunks.push(chunk.subarray(0, limit - total));
+      total = limit;
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(chunk);
+    total += chunk.length;
+  }
+  return { buffer: Buffer.concat(chunks, total), truncated };
+}
+
+function charsetOf(contentType: string | null): string {
+  const match = /charset\s*=\s*([^;]+)/i.exec(contentType ?? "");
+  return match?.[1]?.trim().replace(/^["']|["']$/g, "").toLowerCase() ?? "";
+}
+
+function decodeText(buffer: Buffer, charset: string): string {
+  if (charset !== "") {
+    try {
+      return new TextDecoder(charset).decode(buffer);
+    } catch {
+      // Unknown charset label: fall back to UTF-8.
+    }
+  }
+  return new TextDecoder("utf-8").decode(buffer);
+}
+
+const ENTITY_MAP: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  ndash: "-",
+  mdash: "-",
+  hellip: "...",
+  middot: "·",
+  copy: "(c)",
+  reg: "(R)",
+  trade: "(TM)",
+};
+
+/** Decodes named and numeric HTML entities without a DOM dependency. */
+export function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, entity: string) => {
+    if (entity.startsWith("#x") || entity.startsWith("#X")) {
+      const code = Number.parseInt(entity.slice(2), 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : whole;
+    }
+    if (entity.startsWith("#")) {
+      const code = Number.parseInt(entity.slice(1), 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : whole;
+    }
+    return ENTITY_MAP[entity.toLowerCase()] ?? whole;
+  });
+}
+
+/** Converts an HTML document to readable plain text (no DOM/libxml). */
+export function htmlToText(html: string): string {
+  const text = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|section|article|header|footer|main|li|tr|h[1-6]|pre|blockquote|table|ul|ol)>/gi, "\n")
+    .replace(/<li\b[^>]*>/gi, "\n- ")
+    .replace(/<[^>]+>/g, " ");
+  return decodeHtmlEntities(text)
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function htmlTitle(html: string): string {
+  const match = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  if (match === null) return "";
+  return decodeHtmlEntities(match[1]!).replace(/\s+/g, " ").trim();
+}
+
+function isTextualContentType(contentType: string): boolean {
+  return (
+    contentType === "" ||
+    /^text\//i.test(contentType) ||
+    /^application\/(json|xml|xhtml\+xml|rss\+xml|atom\+xml|ld\+json)\b/i.test(contentType) ||
+    /\+json\b/i.test(contentType) ||
+    /\+xml\b/i.test(contentType)
+  );
+}
+
+async function webFetchResult(
+  rawArguments: string,
+  ctx: ToolExecutionContext,
+  resolveHost: HostResolver,
+): Promise<ToolResult> {
+  const parsed = parseArgs(webFetchArgs, rawArguments);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "fetch" });
+
+  let target: URL;
+  try {
+    target = new URL(parsed.data.url);
+  } catch {
+    return toolError(`Invalid URL: ${parsed.data.url}`, {
+      kind: "fetch",
+      url: parsed.data.url,
+    });
+  }
+
+  let response: Response;
+  let finalUrl: URL;
+  try {
+    const fetched = await fetchWithRedirects(target, resolveHost, ctx.signal);
+    response = fetched.response;
+    finalUrl = fetched.url;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return toolError(`Fetch failed for ${target.href}: ${message}`, {
+      kind: "fetch",
+      url: target.href,
+    });
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return toolError(
+      `Fetch failed: HTTP ${response.status} ${response.statusText} for ${finalUrl.href}`,
+      {
+        kind: "fetch",
+        url: finalUrl.href,
+        statusCode: response.status,
+        contentType: contentType ?? undefined,
+      },
+    );
+  }
+  if (!isTextualContentType(contentType ?? "")) {
+    await response.body?.cancel().catch(() => undefined);
+    return toolError(
+      `Unsupported content type "${contentType}" for ${finalUrl.href}. web_fetch returns text only; download binary files with run_command (curl -o).`,
+      {
+        kind: "fetch",
+        url: finalUrl.href,
+        statusCode: response.status,
+        contentType: contentType ?? undefined,
+      },
+    );
+  }
+
+  const { buffer, truncated: bodyTruncated } = await readBodyCapped(
+    response,
+    FETCH_MAX_BYTES,
+  );
+  if (buffer.subarray(0, 512).includes(0)) {
+    return toolError(
+      `Fetched ${finalUrl.href} looks binary (content-type ${contentType ?? "unknown"}). web_fetch returns text only; download it with run_command (curl -o).`,
+      {
+        kind: "fetch",
+        url: finalUrl.href,
+        statusCode: response.status,
+        contentType: contentType ?? undefined,
+      },
+    );
+  }
+  const raw = decodeText(buffer, charsetOf(contentType));
+  const isHtml =
+    /html/i.test(contentType ?? "") || /^\s*<(!doctype|html)/i.test(raw);
+  const title = isHtml ? htmlTitle(raw) : "";
+  const body = isHtml ? htmlToText(raw) : raw.trim();
+  const maxChars = parsed.data.max_chars ?? DEFAULT_FETCH_CHARS;
+  const clipped = body.length > maxChars;
+  const shown = clipped ? body.slice(0, maxChars) : body;
+
+  const header = [
+    `Fetched ${finalUrl.href}`,
+    `HTTP ${response.status} · ${contentType ?? "unknown content type"} · ${buffer.length} bytes`,
+    title === "" ? null : `Title: ${title}`,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+  const tail =
+    shown === ""
+      ? "(no readable text)"
+      : `${shown}${clipped ? `\n\n[... truncated at ${maxChars} characters; ${body.length} total. Raise max_chars or fetch a narrower URL.]` : ""}`;
+
+  return {
+    content: truncateContent(`${header}\n\n${tail}`),
+    status: "complete",
+    meta: {
+      kind: "fetch",
+      url: finalUrl.href,
+      statusCode: response.status,
+      contentType: contentType ?? "unknown",
+      bytes: buffer.length,
+      title,
+      truncated: bodyTruncated || clipped,
+    },
+  };
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function sniffImageMime(buffer: Buffer): string | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (buffer.length >= 6 && buffer.toString("ascii", 0, 4) === "GIF8") {
+    return "image/gif";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/** Reads width/height straight from the container header (PNG/GIF/JPEG/WebP). */
+export function imageDimensions(
+  buffer: Buffer,
+  mime: string,
+): { width: number; height: number } | null {
+  try {
+    if (mime === "image/png" && buffer.length >= 24) {
+      return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+    }
+    if (mime === "image/gif" && buffer.length >= 10) {
+      return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+    }
+    if (mime === "image/jpeg") {
+      let offset = 2;
+      while (offset + 9 < buffer.length) {
+        if (buffer[offset] !== 0xff) {
+          offset += 1;
+          continue;
+        }
+        const marker = buffer[offset + 1]!;
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          offset += 2;
+          continue;
+        }
+        const length = buffer.readUInt16BE(offset + 2);
+        if (length < 2) return null;
+        const isSof =
+          marker >= 0xc0 &&
+          marker <= 0xcf &&
+          marker !== 0xc4 &&
+          marker !== 0xc8 &&
+          marker !== 0xcc;
+        if (isSof) {
+          return {
+            height: buffer.readUInt16BE(offset + 5),
+            width: buffer.readUInt16BE(offset + 7),
+          };
+        }
+        offset += 2 + length;
+      }
+      return null;
+    }
+    if (mime === "image/webp" && buffer.length >= 30) {
+      const kind = buffer.toString("ascii", 12, 16);
+      if (kind === "VP8X") {
+        const width = 1 + (buffer[24]! | (buffer[25]! << 8) | (buffer[26]! << 16));
+        const height = 1 + (buffer[27]! | (buffer[28]! << 8) | (buffer[29]! << 16));
+        return { width, height };
+      }
+      if (kind === "VP8 " && buffer.length >= 30) {
+        return {
+          width: buffer.readUInt16LE(26) & 0x3fff,
+          height: buffer.readUInt16LE(28) & 0x3fff,
+        };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function readImageResult(
+  session: Session,
+  input: { path: string },
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const target = resolveReadPath(session, input.path);
+  let info;
+  try {
+    info = await stat(target);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return toolError(`Image does not exist: ${target}`, {
+        kind: "image",
+        path: target,
+      });
+    }
+    return toolError(
+      `Cannot stat ${target}: ${error instanceof Error ? error.message : String(error)}`,
+      { kind: "image", path: target },
+    );
+  }
+  if (info.isDirectory()) {
+    return toolError(`Path is a directory: ${target}`, {
+      kind: "image",
+      path: target,
+    });
+  }
+  const limit = Math.min(MAX_IMAGE_BYTES, Math.max(ctx.maxReadBytes, 0));
+  if (info.size > limit) {
+    return toolError(
+      `Image is ${info.size} bytes; the tool limit is ${limit}. Resize or crop it first.`,
+      { kind: "image", path: target, bytes: info.size },
+    );
+  }
+
+  const buffer = await readFile(target);
+  const mime = sniffImageMime(buffer);
+  if (mime === null) {
+    return toolError(
+      `Not a supported image: ${target}. Supported formats: PNG, JPEG, GIF, WebP.`,
+      { kind: "image", path: target, bytes: buffer.length },
+    );
+  }
+  const dimensions = imageDimensions(buffer, mime);
+  const size =
+    dimensions === null ? "unknown dimensions" : `${dimensions.width}x${dimensions.height}`;
+  const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+
+  return {
+    content: `Read image ${target} (${mime}, ${size}, ${buffer.length} bytes). The image is attached to this tool result; inspect it directly instead of guessing from the path.`,
+    status: "complete",
+    meta: {
+      kind: "image",
+      path: target,
+      bytes: buffer.length,
+      mime,
+      width: dimensions?.width,
+      height: dimensions?.height,
+      imageDataUrl: dataUrl,
+    },
+  };
+}
+
 export class AgentToolExecutor implements AgentToolExecutorLike {
   private readonly searchEndpoint: () => WebSearchEndpoint | null;
+  private readonly resolveHost: HostResolver;
 
   constructor(options: AgentToolExecutorOptions = {}) {
     this.searchEndpoint = options.searchEndpoint ?? (() => null);
+    this.resolveHost = options.resolveHost ?? defaultResolveHost;
   }
 
   private resolveSearchEndpoint(): WebSearchEndpoint | null {
@@ -1833,6 +2389,13 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
         return webSearchResult(rawArguments, ctx, () =>
           this.resolveSearchEndpoint(),
         );
+      case "web_fetch":
+        return webFetchResult(rawArguments, ctx, this.resolveHost);
+      case "read_image": {
+        const parsed = parseArgs(readImageArgs, rawArguments);
+        if (!parsed.ok) return toolError(parsed.message, { kind: "image" });
+        return readImageResult(ctx.session, parsed.data, ctx);
+      }
       default:
         return toolError(`Unknown tool: ${name}`, { kind: "error" });
     }
