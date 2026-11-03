@@ -58,6 +58,11 @@ const MAX_GREP_LINE_CHARS = 500;
 const MAX_GLOB_MATCHES = 500;
 const MAX_SCAN_FILES = 50_000;
 const MAX_SCAN_DEPTH = 32;
+const DEFAULT_SEARCH_COUNT = 10;
+const MAX_SEARCH_COUNT = 50;
+const SEARCH_TIMEOUT_MS = 60_000;
+const MAX_SEARCH_CONTENT_CHARS = 4_000;
+const MAX_SEARCH_ERROR_CHARS = 2_000;
 
 /** Directories skipped by grep/glob unless include_ignored is set. */
 const IGNORED_DIRS = new Set([
@@ -173,6 +178,38 @@ const globArgs = z
     include_ignored: z.boolean().optional(),
   })
   .strict();
+
+const webSearchArgs = z
+  .object({
+    /** Search query; DeepSeek supports site:, lang:, after:, before:, quotes. */
+    query: z.string().trim().min(1).max(128),
+    count: z.number().int().min(1).max(MAX_SEARCH_COUNT).optional(),
+    /** Return full page text in addition to the ~600-800 char summary. */
+    need_content: z.boolean().optional(),
+    /** Optional original user question that motivated the search. */
+    ori_question: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+
+const searchResultSchema = z
+  .object({
+    title: z.string().optional(),
+    url: z.string().optional(),
+    snippet: z.string().optional(),
+    summary: z.string().optional(),
+    content: z.string().optional(),
+    site_name: z.string().nullable().optional(),
+    date: z.string().nullable().optional(),
+    rerank_score: z.number().optional(),
+    authority: z.number().optional(),
+  })
+  .passthrough();
+
+const searchResponseSchema = z
+  .object({
+    results: z.array(searchResultSchema).default([]),
+  })
+  .passthrough();
 
 const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
   run_command: {
@@ -415,6 +452,42 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
           },
         },
         required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+  },
+  web_search: {
+    type: "function",
+    function: {
+      name: "web_search",
+      description:
+        "Search the live web through the DeepSeek Search API. Returns ranked results with title, URL, summary, site, date and score. Use it for current information outside the workspace: library releases, official docs, package versions, error messages, news. Supports search operators in query: site:, -site:, \"exact phrase\", -word, lang:zh,en, after:2025-01-01, before:2026-01-01. Full page text is omitted by default because summaries are written for models; set need_content=true only when the summary is not enough. Requires a DeepSeek model provider configured in the model API settings.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Search query of 1-128 characters, optionally using DeepSeek search operators.",
+          },
+          count: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_SEARCH_COUNT,
+            description: `Number of results to return (default ${DEFAULT_SEARCH_COUNT}).`,
+          },
+          need_content: {
+            type: "boolean",
+            description:
+              "Also return each page's body as Markdown. Use sparingly: bodies can be long.",
+          },
+          ori_question: {
+            type: "string",
+            description:
+              "Optional original user question (1-128 characters) that helps the search engine understand intent.",
+          },
+        },
+        required: ["query"],
         additionalProperties: false,
       },
     },
@@ -1448,9 +1521,278 @@ async function runCommandResult(
   };
 }
 
+export interface WebSearchEndpoint {
+  /** Full DeepSeek Search URL, e.g. https://api.deepseek.com/v1/tools/search. */
+  url: string;
+  apiKey: string;
+}
+
+export interface AgentToolExecutorOptions {
+  /**
+   * Resolves the DeepSeek Search endpoint from the active provider config.
+   * Return null when the provider is not DeepSeek or has no API key.
+   */
+  searchEndpoint?: () => WebSearchEndpoint | null;
+}
+
+/**
+ * DeepSeek Search is served at <origin>/v1/tools/search. The chat base URL
+ * may be the origin itself or include /v1, so only the host decides whether
+ * the provider supports the search endpoint.
+ */
+export function deepseekSearchUrl(baseUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const host = url.hostname.toLowerCase();
+  if (host !== "deepseek.com" && !host.endsWith(".deepseek.com")) return null;
+  return `${url.protocol}//${url.host}/v1/tools/search`;
+}
+
+function redactText(text: string, secret: string): string {
+  return secret === "" ? text : text.split(secret).join("[redacted]");
+}
+
+function searchHttpMessage(status: number): string {
+  if (status === 400) return "DeepSeek Search request is invalid (HTTP 400)";
+  if (status === 401) {
+    return "DeepSeek Search authentication failed (HTTP 401); check the API key";
+  }
+  if (status === 402) {
+    return "DeepSeek account balance is insufficient (HTTP 402)";
+  }
+  if (status === 403) {
+    return "DeepSeek Search request was rejected by the security policy (HTTP 403)";
+  }
+  if (status === 408) {
+    return "DeepSeek Search upstream read timed out (HTTP 408); retry later";
+  }
+  if (status === 413) {
+    return "DeepSeek Search request body is too large (HTTP 413)";
+  }
+  if (status === 429) {
+    return "DeepSeek Search rate limit exceeded (HTTP 429); retry later";
+  }
+  if (status >= 500) {
+    return `DeepSeek Search service error (HTTP ${status}); retry later`;
+  }
+  return `DeepSeek Search returned an error (HTTP ${status})`;
+}
+
+async function readSearchErrorBody(
+  response: Response,
+  apiKey: string,
+): Promise<string> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return "";
+  }
+  const trimmed = redactText(text.trim(), apiKey).slice(0, MAX_SEARCH_ERROR_CHARS);
+  if (trimmed === "") return "";
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown };
+    const error = parsed.error;
+    if (typeof error === "object" && error !== null && "message" in error) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim() !== "") {
+        return message.trim().slice(0, MAX_SEARCH_ERROR_CHARS);
+      }
+    }
+  } catch {
+    // Not an OpenAI-style error body; use the raw text.
+  }
+  return trimmed;
+}
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function formatSearchResults(
+  query: string,
+  results: Array<z.infer<typeof searchResultSchema>>,
+  needContent: boolean,
+): string {
+  if (results.length === 0) return `No web results for "${query}".`;
+
+  const blocks = results.map((result, index) => {
+    const title = collapseWhitespace(result.title ?? "") || "(untitled)";
+    const lines = [`${index + 1}. ${title}`, `   URL: ${result.url ?? ""}`];
+
+    const details: string[] = [];
+    if (result.site_name) details.push(result.site_name);
+    if (result.date) details.push(result.date.slice(0, 10));
+    if (typeof result.rerank_score === "number") {
+      details.push(`score ${result.rerank_score.toFixed(2)}`);
+    }
+    if (typeof result.authority === "number" && result.authority >= 0) {
+      details.push(`authority ${result.authority}`);
+    }
+    if (details.length > 0) lines.push(`   ${details.join(" · ")}`);
+
+    const summary =
+      collapseWhitespace(result.summary ?? "") ||
+      collapseWhitespace(result.snippet ?? "");
+    if (summary !== "") lines.push(`   Summary: ${summary}`);
+
+    const body = result.content ?? "";
+    if (needContent && body.trim() !== "") {
+      const capped =
+        body.length > MAX_SEARCH_CONTENT_CHARS
+          ? `${body.slice(0, MAX_SEARCH_CONTENT_CHARS)}\n[... page content truncated]`
+          : body;
+      lines.push(
+        "   Content:",
+        ...capped.split("\n").map((line) => `   ${line}`),
+      );
+    }
+    return lines.join("\n");
+  });
+
+  return `Web search: "${query}" — ${results.length} result(s)\n\n${blocks.join("\n\n")}`;
+}
+
+function cancelledSearch(
+  meta: AgentToolMeta,
+  startedAt: number,
+): ToolResult {
+  return {
+    content: "Web search cancelled.",
+    status: "cancelled",
+    meta: { ...meta, durationMs: Date.now() - startedAt },
+  };
+}
+
+async function webSearchResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+  resolveEndpoint: () => WebSearchEndpoint | null,
+): Promise<ToolResult> {
+  const parsed = parseArgs(webSearchArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "search" });
+  const args = parsed.data;
+  const startedAt = Date.now();
+  const meta: AgentToolMeta = { kind: "search", query: args.query };
+
+  const endpoint = resolveEndpoint();
+  if (endpoint === null) {
+    return toolError(
+      "web_search is unavailable: it requires a DeepSeek model provider (Base URL on api.deepseek.com) with an API key. Change the provider in the model API settings or disable this tool.",
+      meta,
+    );
+  }
+
+  const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+  const signal = AbortSignal.any([ctx.signal, timeoutSignal]);
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${endpoint.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        query: args.query,
+        count: args.count ?? DEFAULT_SEARCH_COUNT,
+        need_content: args.need_content === true,
+        ...(args.ori_question === undefined
+          ? {}
+          : { ori_question: args.ori_question }),
+      }),
+      signal,
+    });
+  } catch (error) {
+    if (ctx.signal.aborted) return cancelledSearch(meta, startedAt);
+    if (timeoutSignal.aborted) {
+      return toolError(
+        `DeepSeek Search timed out after ${SEARCH_TIMEOUT_MS} ms.`,
+        { ...meta, durationMs: Date.now() - startedAt },
+      );
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return toolError(
+      `Cannot reach DeepSeek Search API: ${redactText(message, endpoint.apiKey)}`,
+      { ...meta, durationMs: Date.now() - startedAt },
+    );
+  }
+
+  if (!response.ok) {
+    const detail = await readSearchErrorBody(response, endpoint.apiKey);
+    return toolError(
+      `${searchHttpMessage(response.status)}${detail === "" ? "" : `\n${detail}`}`,
+      { ...meta, durationMs: Date.now() - startedAt },
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    if (ctx.signal.aborted) return cancelledSearch(meta, startedAt);
+    if (timeoutSignal.aborted) {
+      return toolError(
+        `DeepSeek Search timed out after ${SEARCH_TIMEOUT_MS} ms.`,
+        { ...meta, durationMs: Date.now() - startedAt },
+      );
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return toolError(
+      `DeepSeek Search returned an invalid response: ${redactText(message, endpoint.apiKey)}`,
+      { ...meta, durationMs: Date.now() - startedAt },
+    );
+  }
+
+  const parsedResponse = searchResponseSchema.safeParse(payload);
+  if (!parsedResponse.success) {
+    return toolError("DeepSeek Search returned an unexpected response shape.", {
+      ...meta,
+      durationMs: Date.now() - startedAt,
+    });
+  }
+
+  const results = parsedResponse.data.results;
+  return {
+    content: truncateContent(
+      formatSearchResults(args.query, results, args.need_content === true),
+    ),
+    status: "complete",
+    meta: {
+      ...meta,
+      resultCount: results.length,
+      durationMs: Date.now() - startedAt,
+      contentReturned: args.need_content === true,
+    },
+  };
+}
+
 export class AgentToolExecutor implements AgentToolExecutorLike {
+  private readonly searchEndpoint: () => WebSearchEndpoint | null;
+
+  constructor(options: AgentToolExecutorOptions = {}) {
+    this.searchEndpoint = options.searchEndpoint ?? (() => null);
+  }
+
+  private resolveSearchEndpoint(): WebSearchEndpoint | null {
+    try {
+      return this.searchEndpoint();
+    } catch {
+      return null;
+    }
+  }
+
   definitions(enabledTools: AgentToolName[]): LlmToolDefinition[] {
+    const searchReady = this.resolveSearchEndpoint() !== null;
     return enabledTools
+      .filter((name) => name !== "web_search" || searchReady)
       .map((name) => DEFINITIONS[name])
       .filter((definition): definition is LlmToolDefinition => Boolean(definition));
   }
@@ -1487,6 +1829,10 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
         return grepResult(rawArguments, ctx);
       case "glob":
         return globResult(rawArguments, ctx);
+      case "web_search":
+        return webSearchResult(rawArguments, ctx, () =>
+          this.resolveSearchEndpoint(),
+        );
       default:
         return toolError(`Unknown tool: ${name}`, { kind: "error" });
     }

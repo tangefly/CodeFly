@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type TouchEvent as ReactTouchEvent,
+  type WheelEvent as ReactWheelEvent,
+} from "react";
 import { Plus, Sparkles, Terminal, Zap } from "lucide-react";
 import {
   selectCurrentMessages,
@@ -13,6 +21,10 @@ import { Button } from "./ui.js";
 
 const EMPTY: ChatMessage[] = [];
 
+/** Distance from the bottom under which scrolling down re-attaches. */
+const STICK_THRESHOLD_PX = 48;
+const TOUCH_DETACH_PX = 6;
+
 export function ChatTimeline() {
   const session = useAppStore(selectCurrentSession);
   const messages = useAppStore(selectCurrentMessages) ?? EMPTY;
@@ -25,6 +37,10 @@ export function ChatTimeline() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const activeFrame = useRef<number | null>(null);
+  const scrollFrame = useRef<number | null>(null);
+  /** Last known scrollTop, used to tell upward movement from stream growth. */
+  const lastScrollTop = useRef(0);
+  const touchStartY = useRef<number | null>(null);
   const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
 
   const questions = useMemo(
@@ -36,6 +52,11 @@ export function ChatTimeline() {
     [messages],
   );
   const showQuestionNav = Boolean(session) && questions.length >= 2;
+  /** Changes only when user messages are added, not on every stream delta. */
+  const questionSignature = useMemo(
+    () => questions.map((question) => question.id).join("|"),
+    [questions],
+  );
 
   const updateActiveQuestion = (): void => {
     if (activeFrame.current !== null) return;
@@ -68,6 +89,9 @@ export function ChatTimeline() {
       if (activeFrame.current !== null) {
         window.cancelAnimationFrame(activeFrame.current);
       }
+      if (scrollFrame.current !== null) {
+        window.cancelAnimationFrame(scrollFrame.current);
+      }
     };
   }, []);
 
@@ -75,25 +99,90 @@ export function ChatTimeline() {
     stickToBottom.current = true;
     setActiveQuestionId(null);
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
+    if (element) {
+      element.scrollTop = element.scrollHeight;
+      lastScrollTop.current = element.scrollTop;
+    }
     updateActiveQuestion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id]);
 
   useEffect(() => {
-    const element = scrollRef.current;
-    if (element && stickToBottom.current) {
-      element.scrollTop = element.scrollHeight;
-    }
     updateActiveQuestion();
+    // The active question depends on node positions, which only change when a
+    // user message is added or the viewport scrolls. Streamed assistant text
+    // must not force a layout read on every chunk.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questionSignature]);
+
+  useEffect(() => {
+    // Coalesce streamed deltas into one scroll per frame, and re-check the
+    // user's intent at frame time so an upward scroll cannot be overridden.
+    if (scrollFrame.current === null) {
+      scrollFrame.current = window.requestAnimationFrame(() => {
+        scrollFrame.current = null;
+        const element = scrollRef.current;
+        if (!element || !stickToBottom.current) return;
+        if (element.scrollTop < lastScrollTop.current) {
+          // The compositor can move the viewport before the wheel/scroll
+          // handler runs. Treat that upward movement as user intent instead of
+          // yanking the viewport back to the bottom.
+          stickToBottom.current = false;
+          return;
+        }
+        element.scrollTop = element.scrollHeight;
+        lastScrollTop.current = element.scrollTop;
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
+
+  const detachFromBottom = (): void => {
+    const element = scrollRef.current;
+    if (element && element.scrollHeight > element.clientHeight + 1) {
+      stickToBottom.current = false;
+    }
+  };
+
+  const onWheel = (event: ReactWheelEvent<HTMLDivElement>): void => {
+    // Wheel-up is explicit user intent: detach before the next streamed delta
+    // can snap the viewport back to the bottom.
+    if (event.deltaY < 0) detachFromBottom();
+  };
+
+  const onTouchStart = (event: ReactTouchEvent<HTMLDivElement>): void => {
+    touchStartY.current = event.touches[0]?.clientY ?? null;
+  };
+
+  const onTouchMove = (event: ReactTouchEvent<HTMLDivElement>): void => {
+    const y = event.touches[0]?.clientY;
+    if (
+      y !== undefined &&
+      touchStartY.current !== null &&
+      y > touchStartY.current + TOUCH_DETACH_PX
+    ) {
+      // Dragging the content down means the user is scrolling up.
+      detachFromBottom();
+    }
+  };
+
+  const onTouchEnd = (): void => {
+    touchStartY.current = null;
+  };
 
   const onScroll = (): void => {
     const element = scrollRef.current;
     if (!element) return;
-    stickToBottom.current =
-      element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+    const distance =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (element.scrollTop < lastScrollTop.current) {
+      // Upward movement always detaches, even by a sub-pixel amount close to
+      // the bottom; otherwise one wheel notch would immediately re-stick.
+      stickToBottom.current = false;
+    } else {
+      stickToBottom.current = distance <= STICK_THRESHOLD_PX;
+    }
+    lastScrollTop.current = element.scrollTop;
     updateActiveQuestion();
   };
 
@@ -123,6 +212,11 @@ export function ChatTimeline() {
       <div
         ref={scrollRef}
         onScroll={onScroll}
+        onWheel={onWheel}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        style={{ overflowAnchor: "none" }}
         className={cn(
           "h-full overflow-y-auto overscroll-contain px-4 py-6 sm:px-6",
           showQuestionNav && "md:pr-14",

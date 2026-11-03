@@ -27,7 +27,7 @@ import { LlmClient } from "./llm/client.js";
 import { ChatService } from "./llm/service.js";
 import { SessionRunLock } from "./llm/run-lock.js";
 import { AgentConfigStore } from "./agent/config-store.js";
-import { AgentToolExecutor } from "./agent/tools.js";
+import { AgentToolExecutor, deepseekSearchUrl } from "./agent/tools.js";
 import { AgentService } from "./agent/service.js";
 
 function formatError(error: unknown): string {
@@ -112,7 +112,17 @@ async function main(): Promise<void> {
     agentConfig,
     audit,
     client: new LlmClient(),
-    tools: new AgentToolExecutor(),
+    tools: new AgentToolExecutor({
+      // DeepSeek Search reuses the provider key; other providers have no
+      // equivalent endpoint, so the tool stays hidden for them.
+      searchEndpoint: () => {
+        const current = llmConfig.getInternal();
+        const url = deepseekSearchUrl(current.baseUrl);
+        return url === null || current.apiKey === ""
+          ? null
+          : { url, apiKey: current.apiKey };
+      },
+    }),
     lock: runLock,
     exec,
     dataDir: config.dataDir,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Brain, Check, ChevronDown, Copy, Info, Sparkles } from "lucide-react";
 import type { ChatMessage } from "../lib/store.js";
 import { formatTokens } from "../lib/token-stats.js";
@@ -107,7 +107,11 @@ function ReasoningBlock({
   );
 }
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+export const MessageBubble = memo(function MessageBubble({
+  message,
+}: {
+  message: ChatMessage;
+}) {
   if (message.kind === "tool") {
     return <ToolCard message={message} />;
   }
@@ -185,4 +189,4 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   );
-}
+});

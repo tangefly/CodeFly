@@ -9,9 +9,12 @@
 - **聊天模式**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
 - **Agent 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
-  `edit_file`、`list_files`、`grep`、`glob`；`read_file` 支持行号与 `offset`/`limit`，
-  `edit_file` 支持一次多处原子替换，只读工具并行执行；工具输出以可折叠卡片展示，
-  失败时自动展开。
+  `edit_file`、`list_files`、`grep`、`glob`、`web_search`；`read_file` 支持行号与
+  `offset`/`limit`，`edit_file` 支持一次多处原子替换，只读工具（含 `web_search`）
+  并行执行；工具输出以可折叠卡片展示，失败时自动展开。
+- **联网搜索**：`web_search` 使用 DeepSeek Search（`POST /v1/tools/search`）返回
+  标题、链接、摘要与可选网页正文，支持 `site:`、`lang:`、`after:` 等搜索语法；
+  复用当前 DeepSeek API Key，仅在 Base URL 属于 `deepseek.com` 时启用。
 - **思考模式**：DeepSeek V4 默认开启，思维链流式展示在回复上方，可关闭或调整
   `low / high / max` 强度。
 - **权限与审批**：只读 / 工作区内修改 / 完全权限；越界操作可发起一次性提权审批。
@@ -55,6 +58,9 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
 旧的 `deepseek-chat` / `deepseek-reasoner` 配置会在启动时自动迁移为
 `deepseek-v4-flash` / `deepseek-v4-pro`。
 
+`web_search` 复用同一个 DeepSeek API Key 调用 DeepSeek Search，不会暴露给其他厂商
+（Base URL 不是 `deepseek.com` 时该工具不会出现在 Agent 的工具列表中）。
+
 ## 使用
 
 1. 点击「新建会话」，选择一个已存在的绝对路径作为工作区。
@@ -97,6 +103,7 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
   `CODEFLY_HOST` 改成 `0.0.0.0`。
 - **读取、网络、PID 可见性不隔离**；Landlock 只限制文件写。命令可以读取本机任意
   可读文件，包括 `data/llm.json` 中的 API Key。不要执行不受信任的命令。
+- 启用 `web_search` 时，搜索查询词与可选网页正文会发送到 DeepSeek Search 服务。
 - `danger-full-access` 没有沙箱也没有审批，仅在明确确认后使用。
 - `workspace-write` 默认放行 GPU 设备、`/dev/shm` 与 `/proc`（CUDA 需要）；可用
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。

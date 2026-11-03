@@ -1,13 +1,17 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditEvent, Session } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
-import { AgentToolExecutor, type ToolExecutionContext } from "../src/agent/tools.js";
+import {
+  AgentToolExecutor,
+  deepseekSearchUrl,
+  type ToolExecutionContext,
+} from "../src/agent/tools.js";
 
-describe("AgentToolExecutor file tools", () => {
+describe("AgentToolExecutor tools", () => {
   let base: string;
   let workspace: string;
   let dataDir: string;
@@ -36,6 +40,7 @@ describe("AgentToolExecutor file tools", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await rm(base, { recursive: true, force: true });
   });
 
@@ -333,5 +338,148 @@ describe("AgentToolExecutor file tools", () => {
     expect(shallow.content).toContain("src/a.ts");
     expect(shallow.content).toContain("src/nested/c.ts");
     expect(shallow.content).not.toContain("src/b.js");
+  });
+
+  describe("web_search", () => {
+    function searchExecutor(): AgentToolExecutor {
+      return new AgentToolExecutor({
+        searchEndpoint: () => ({
+          url: "https://api.deepseek.com/v1/tools/search",
+          apiKey: "secret-key",
+        }),
+      });
+    }
+
+    it("derives the DeepSeek search URL from the provider base URL", () => {
+      expect(deepseekSearchUrl("https://api.deepseek.com")).toBe(
+        "https://api.deepseek.com/v1/tools/search",
+      );
+      expect(deepseekSearchUrl("https://api.deepseek.com/v1")).toBe(
+        "https://api.deepseek.com/v1/tools/search",
+      );
+      expect(deepseekSearchUrl("https://api.deepseek.com/v1/")).toBe(
+        "https://api.deepseek.com/v1/tools/search",
+      );
+      expect(deepseekSearchUrl("https://api.openai.com/v1")).toBeNull();
+      expect(deepseekSearchUrl("not a url")).toBeNull();
+    });
+
+    it("is only exposed when a DeepSeek endpoint is configured", () => {
+      expect(executor.definitions(["web_search"])).toEqual([]);
+      expect(
+        searchExecutor()
+          .definitions(["web_search"])
+          .map((definition) => definition.function.name),
+      ).toEqual(["web_search"]);
+    });
+
+    it("posts the query and formats ranked results", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fetchMock = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit) => {
+          calls.push({ url: String(input), init: init ?? {} });
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  rerank_score: 2.4,
+                  title: "DeepSeek V4 released",
+                  url: "https://example.com/v4",
+                  snippet: "short snippet",
+                  summary: "Long summary for the model.",
+                  content: "Full page body text.",
+                  site_name: "Example News",
+                  site_icon: null,
+                  date: "2026-06-01T00:00:00+00:00",
+                  authority: 3,
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await searchExecutor().execute(
+        "web_search",
+        JSON.stringify({
+          query: "DeepSeek V4",
+          count: 3,
+          need_content: true,
+          ori_question: "When was DeepSeek V4 released?",
+        }),
+        context(),
+      );
+
+      expect(result.status).toBe("complete");
+      expect(result.content).toContain("DeepSeek V4 released");
+      expect(result.content).toContain("https://example.com/v4");
+      expect(result.content).toContain("score 2.40");
+      expect(result.content).toContain("Long summary for the model.");
+      expect(result.content).toContain("Full page body text.");
+      expect(result.meta).toMatchObject({
+        kind: "search",
+        query: "DeepSeek V4",
+        resultCount: 1,
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toBe("https://api.deepseek.com/v1/tools/search");
+      expect(calls[0]!.init.method).toBe("POST");
+      const headers = calls[0]!.init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer secret-key");
+      expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+        query: "DeepSeek V4",
+        count: 3,
+        need_content: true,
+        ori_question: "When was DeepSeek V4 released?",
+      });
+    });
+
+    it("reports unavailable providers and upstream errors", async () => {
+      const unavailable = await executor.execute(
+        "web_search",
+        JSON.stringify({ query: "anything" }),
+        context(),
+      );
+      expect(unavailable.status).toBe("error");
+      expect(unavailable.content).toContain("unavailable");
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                error: {
+                  message: "'count' must be between 1 and 50",
+                  type: "invalid_request_error",
+                },
+              }),
+              { status: 400 },
+            ),
+        ),
+      );
+
+      const failed = await searchExecutor().execute(
+        "web_search",
+        JSON.stringify({ query: "anything" }),
+        context(),
+      );
+      expect(failed.status).toBe("error");
+      expect(failed.content).toContain("HTTP 400");
+      expect(failed.content).toContain("must be between 1 and 50");
+    });
+
+    it("rejects invalid arguments", async () => {
+      const invalid = await searchExecutor().execute(
+        "web_search",
+        JSON.stringify({ query: "", count: 51 }),
+        context(),
+      );
+      expect(invalid.status).toBe("error");
+      expect(invalid.content).toContain("Invalid tool arguments");
+    });
   });
 });

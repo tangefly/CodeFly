@@ -37,6 +37,7 @@ const READ_ONLY_TOOL_NAMES = new Set<string>([
   "list_files",
   "grep",
   "glob",
+  "web_search",
 ]);
 
 interface ToolRunOptions {
@@ -111,7 +112,11 @@ export class AgentService {
     const toolDefinitions = this.deps.tools.definitions(settings.enabledTools);
     const prior = this.deps.messages.list(session.id);
     const history = trimTurns(prior, this.deps.contextBudgetChars);
-    const system = buildSystemPrompt(settings, session);
+    const system = buildSystemPrompt(
+      settings,
+      session,
+      toolDefinitions.map((definition) => definition.function.name),
+    );
     const conversation: LlmChatMessage[] = [
       { role: "system", content: system },
       ...recordsToLlmMessages(history),
@@ -491,6 +496,7 @@ export class AgentService {
         durationMs: outcome.durationMs,
         command: outcome.result.meta?.command,
         path: outcome.result.meta?.path,
+        query: outcome.result.meta?.query,
       });
 
       outcomes.push({
@@ -549,13 +555,14 @@ export class AgentService {
 function buildSystemPrompt(
   settings: AgentInternalSettings,
   session: Session,
+  availableTools: string[],
 ): string {
   const base = settings.systemPrompt.trim() || DEFAULT_AGENT_PROMPT;
   return `${base}
 
 工作区: ${session.workspaceRoot}
 当前权限: ${session.mode}
-可用工具: ${settings.enabledTools.length > 0 ? settings.enabledTools.join(", ") : "(无工具，仅可对话)"}`;
+可用工具: ${availableTools.length > 0 ? availableTools.join(", ") : "(无工具，仅可对话)"}`;
 }
 
 function groupTurns(records: ChatMessageRecord[]): ChatMessageRecord[][] {

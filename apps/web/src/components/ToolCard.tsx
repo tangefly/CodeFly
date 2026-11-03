@@ -6,6 +6,7 @@ import {
   Copy,
   FileText,
   Folder,
+  Globe,
   Loader2,
   Search,
   Terminal,
@@ -22,6 +23,7 @@ const TOOL_LABEL: Record<string, string> = {
   list_files: "列出目录",
   grep: "搜索内容",
   glob: "查找文件",
+  web_search: "联网搜索",
 };
 
 function parseArguments(raw: string): Record<string, unknown> {
@@ -89,6 +91,14 @@ export function ToolCard({ message }: { message: ToolMessage }) {
         : undefined;
   const pattern =
     typeof args.pattern === "string" ? args.pattern : undefined;
+  const searchQuery =
+    message.toolName === "web_search"
+      ? typeof args.query === "string"
+        ? args.query
+        : typeof meta.query === "string"
+          ? meta.query
+          : undefined
+      : undefined;
 
   const copyText = (): void => {
     const text =
@@ -107,16 +117,18 @@ export function ToolCard({ message }: { message: ToolMessage }) {
   const Icon =
     message.toolName === "run_command"
       ? Terminal
-      : message.toolName === "grep"
-        ? Search
-        : message.toolName === "list_files" ||
-            message.toolName === "glob"
-          ? Folder
-          : message.toolName === "read_file" ||
-              message.toolName === "write_file" ||
-              message.toolName === "edit_file"
-            ? FileText
-            : AlertTriangle;
+      : message.toolName === "web_search"
+        ? Globe
+        : message.toolName === "grep"
+          ? Search
+          : message.toolName === "list_files" ||
+              message.toolName === "glob"
+            ? Folder
+            : message.toolName === "read_file" ||
+                message.toolName === "write_file" ||
+                message.toolName === "edit_file"
+              ? FileText
+              : AlertTriangle;
 
   const showFileContent =
     message.toolName === "read_file" ||
@@ -124,7 +136,8 @@ export function ToolCard({ message }: { message: ToolMessage }) {
     message.toolName === "write_file" ||
     message.toolName === "edit_file" ||
     message.toolName === "grep" ||
-    message.toolName === "glob";
+    message.toolName === "glob" ||
+    message.toolName === "web_search";
 
   /** Shared collapsible "result" section for file tools and unknown tools. */
   const renderCollapsibleResult = (label: string) => (
@@ -217,6 +230,21 @@ export function ToolCard({ message }: { message: ToolMessage }) {
                 {command}
               </code>
             </button>
+          ) : searchQuery ? (
+            <code
+              className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75"
+              title={searchQuery}
+            >
+              <span className="text-primary/60">“</span>
+              {searchQuery}
+              <span className="text-primary/60">”</span>
+              {typeof meta.resultCount === "number" ? (
+                <span className="text-muted-foreground/60">
+                  {" "}
+                  · {meta.resultCount} 条结果
+                </span>
+              ) : null}
+            </code>
           ) : pattern ? (
             <code
               className="mt-0.5 block truncate font-mono text-[11px] text-foreground/75"

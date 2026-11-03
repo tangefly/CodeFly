@@ -90,7 +90,16 @@ export interface AgentToolCall {
 
 /** Structured display metadata for a persisted tool result. */
 export interface AgentToolMeta {
-  kind?: "command" | "read" | "write" | "edit" | "list" | "grep" | "glob" | "error";
+  kind?:
+    | "command"
+    | "read"
+    | "write"
+    | "edit"
+    | "list"
+    | "grep"
+    | "glob"
+    | "search"
+    | "error";
   command?: string;
   cwd?: string;
   path?: string;
@@ -108,6 +117,8 @@ export interface AgentToolMeta {
   totalLines?: number;
   pattern?: string;
   matches?: number;
+  query?: string;
+  resultCount?: number;
   truncated?: boolean;
   denied?: boolean;
   spillPaths?: string[];
@@ -152,6 +163,7 @@ export const AGENT_TOOL_NAMES = [
   "list_files",
   "grep",
   "glob",
+  "web_search",
 ] as const;
 
 /** Hard ceiling for Agent loop steps in a single run. */

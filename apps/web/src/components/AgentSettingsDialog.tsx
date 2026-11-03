@@ -52,6 +52,12 @@ const TOOL_INFO: Array<{
     label: "查找文件",
     description: "按 glob 模式查找文件路径；只读。",
   },
+  {
+    name: "web_search",
+    label: "联网搜索",
+    description:
+      "通过 DeepSeek Search 检索实时网页，返回标题、链接与摘要；需要 DeepSeek 模型配置。",
+  },
 ];
 
 export function AgentSettingsDialog() {
