@@ -7,7 +7,6 @@ import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
 import {
   AgentToolExecutor,
-  deepseekSearchUrl,
   type ToolExecutionContext,
 } from "../src/agent/tools.js";
 
@@ -346,25 +345,12 @@ describe("AgentToolExecutor tools", () => {
         searchEndpoint: () => ({
           url: "https://api.deepseek.com/v1/tools/search",
           apiKey: "secret-key",
+          timeoutMs: 60_000,
         }),
       });
     }
 
-    it("derives the DeepSeek search URL from the provider base URL", () => {
-      expect(deepseekSearchUrl("https://api.deepseek.com")).toBe(
-        "https://api.deepseek.com/v1/tools/search",
-      );
-      expect(deepseekSearchUrl("https://api.deepseek.com/v1")).toBe(
-        "https://api.deepseek.com/v1/tools/search",
-      );
-      expect(deepseekSearchUrl("https://api.deepseek.com/v1/")).toBe(
-        "https://api.deepseek.com/v1/tools/search",
-      );
-      expect(deepseekSearchUrl("https://api.openai.com/v1")).toBeNull();
-      expect(deepseekSearchUrl("not a url")).toBeNull();
-    });
-
-    it("is only exposed when a DeepSeek endpoint is configured", () => {
+    it("is only exposed when a search API is configured", () => {
       expect(executor.definitions(["web_search"])).toEqual([]);
       expect(
         searchExecutor()

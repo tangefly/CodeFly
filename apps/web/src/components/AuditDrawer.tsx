@@ -13,7 +13,7 @@ function toneFor(event: AuditEvent): string {
       ? "border-primary/25 bg-primary/10 text-primary"
       : "border-danger/30 bg-danger/10 text-danger";
   }
-  if (type === "llm.config.changed")
+  if (type === "llm.config.changed" || type === "search.config.changed")
     return "border-sky-400/25 bg-sky-400/10 text-sky-300";
   if (type.startsWith("approval")) return "border-warning/30 bg-warning/10 text-warning";
   if (type === "exec.denied" || type === "sandbox.unavailable")
@@ -57,6 +57,10 @@ function summarize(event: AuditEvent): string {
       return String(event.message ?? "");
     case "llm.config.changed":
       return `${String(event.model ?? "")} · ${String(event.baseUrl ?? "")}`;
+    case "search.config.changed":
+      return `${String(event.endpoint ?? "disabled")} · key ${
+        event.hasApiKey ? "set" : "none"
+      }`;
     case "llm.chat":
       return `${String(event.outcome ?? "")} · ${String(event.model ?? "")} · ${String(
         event.durationMs ?? 0,

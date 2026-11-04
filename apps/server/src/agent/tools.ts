@@ -62,7 +62,6 @@ const MAX_SCAN_FILES = 50_000;
 const MAX_SCAN_DEPTH = 32;
 const DEFAULT_SEARCH_COUNT = 10;
 const MAX_SEARCH_COUNT = 50;
-const SEARCH_TIMEOUT_MS = 60_000;
 const MAX_SEARCH_CONTENT_CHARS = 4_000;
 const MAX_SEARCH_ERROR_CHARS = 2_000;
 const DEFAULT_FETCH_CHARS = 20_000;
@@ -488,7 +487,7 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "web_search",
       description:
-        "Search the live web through the DeepSeek Search API. Returns ranked results with title, URL, summary, site, date and score. Use it for current information outside the workspace: library releases, official docs, package versions, error messages, news. Supports search operators in query: site:, -site:, \"exact phrase\", -word, lang:zh,en, after:2025-01-01, before:2026-01-01. Full page text is omitted by default because summaries are written for models; set need_content=true only when the summary is not enough. Requires a DeepSeek model provider configured in the model API settings.",
+        "Search the live web through the search API configured in Settings → Search API. Returns ranked results with title, URL, summary, site, date and score. Use it for current information outside the workspace: library releases, official docs, package versions, error messages, news. Supports search operators in query: site:, -site:, \"exact phrase\", -word, lang:zh,en, after:2025-01-01, before:2026-01-01. Full page text is omitted by default because summaries are written for models; set need_content=true only when the summary is not enough. Requires a DeepSeek-compatible search API configured separately from the model provider.",
       parameters: {
         type: "object",
         properties: {
@@ -1594,37 +1593,21 @@ async function runCommandResult(
 }
 
 export interface WebSearchEndpoint {
-  /** Full DeepSeek Search URL, e.g. https://api.deepseek.com/v1/tools/search. */
+  /** POST target, e.g. https://api.deepseek.com/v1/tools/search. */
   url: string;
   apiKey: string;
+  /** Per-request timeout from the independently configured search API. */
+  timeoutMs: number;
 }
 
 export interface AgentToolExecutorOptions {
   /**
-   * Resolves the DeepSeek Search endpoint from the active provider config.
-   * Return null when the provider is not DeepSeek or has no API key.
+   * Resolves the independently configured search endpoint.
+   * Return null when no search API is configured.
    */
   searchEndpoint?: () => WebSearchEndpoint | null;
   /** Overrides DNS resolution for web_fetch (tests use a fake resolver). */
   resolveHost?: HostResolver;
-}
-
-/**
- * DeepSeek Search is served at <origin>/v1/tools/search. The chat base URL
- * may be the origin itself or include /v1, so only the host decides whether
- * the provider supports the search endpoint.
- */
-export function deepseekSearchUrl(baseUrl: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  const host = url.hostname.toLowerCase();
-  if (host !== "deepseek.com" && !host.endsWith(".deepseek.com")) return null;
-  return `${url.protocol}//${url.host}/v1/tools/search`;
 }
 
 function redactText(text: string, secret: string): string {
@@ -1632,29 +1615,29 @@ function redactText(text: string, secret: string): string {
 }
 
 function searchHttpMessage(status: number): string {
-  if (status === 400) return "DeepSeek Search request is invalid (HTTP 400)";
+  if (status === 400) return "Search API request is invalid (HTTP 400)";
   if (status === 401) {
-    return "DeepSeek Search authentication failed (HTTP 401); check the API key";
+    return "Search API authentication failed (HTTP 401); check the API key";
   }
   if (status === 402) {
-    return "DeepSeek account balance is insufficient (HTTP 402)";
+    return "Search API account balance is insufficient (HTTP 402)";
   }
   if (status === 403) {
-    return "DeepSeek Search request was rejected by the security policy (HTTP 403)";
+    return "Search API request was rejected by the security policy (HTTP 403)";
   }
   if (status === 408) {
-    return "DeepSeek Search upstream read timed out (HTTP 408); retry later";
+    return "Search API upstream read timed out (HTTP 408); retry later";
   }
   if (status === 413) {
-    return "DeepSeek Search request body is too large (HTTP 413)";
+    return "Search API request body is too large (HTTP 413)";
   }
   if (status === 429) {
-    return "DeepSeek Search rate limit exceeded (HTTP 429); retry later";
+    return "Search API rate limit exceeded (HTTP 429); retry later";
   }
   if (status >= 500) {
-    return `DeepSeek Search service error (HTTP ${status}); retry later`;
+    return `Search API service error (HTTP ${status}); retry later`;
   }
-  return `DeepSeek Search returned an error (HTTP ${status})`;
+  return `Search API returned an error (HTTP ${status})`;
 }
 
 async function readSearchErrorBody(
@@ -1757,12 +1740,12 @@ async function webSearchResult(
   const endpoint = resolveEndpoint();
   if (endpoint === null) {
     return toolError(
-      "web_search is unavailable: it requires a DeepSeek model provider (Base URL on api.deepseek.com) with an API key. Change the provider in the model API settings or disable this tool.",
+      "web_search is unavailable: configure a search API (Settings → Search API) with a DeepSeek-compatible endpoint and API key, or disable this tool.",
       meta,
     );
   }
 
-  const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(endpoint.timeoutMs);
   const signal = AbortSignal.any([ctx.signal, timeoutSignal]);
 
   let response: Response;
@@ -1770,7 +1753,9 @@ async function webSearchResult(
     response = await fetch(endpoint.url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${endpoint.apiKey}`,
+        ...(endpoint.apiKey === ""
+          ? {}
+          : { Authorization: `Bearer ${endpoint.apiKey}` }),
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -1788,13 +1773,13 @@ async function webSearchResult(
     if (ctx.signal.aborted) return cancelledSearch(meta, startedAt);
     if (timeoutSignal.aborted) {
       return toolError(
-        `DeepSeek Search timed out after ${SEARCH_TIMEOUT_MS} ms.`,
+        `Search API timed out after ${endpoint.timeoutMs} ms.`,
         { ...meta, durationMs: Date.now() - startedAt },
       );
     }
     const message = error instanceof Error ? error.message : String(error);
     return toolError(
-      `Cannot reach DeepSeek Search API: ${redactText(message, endpoint.apiKey)}`,
+      `Cannot reach Search API: ${redactText(message, endpoint.apiKey)}`,
       { ...meta, durationMs: Date.now() - startedAt },
     );
   }
@@ -1814,20 +1799,20 @@ async function webSearchResult(
     if (ctx.signal.aborted) return cancelledSearch(meta, startedAt);
     if (timeoutSignal.aborted) {
       return toolError(
-        `DeepSeek Search timed out after ${SEARCH_TIMEOUT_MS} ms.`,
+        `Search API timed out after ${endpoint.timeoutMs} ms.`,
         { ...meta, durationMs: Date.now() - startedAt },
       );
     }
     const message = error instanceof Error ? error.message : String(error);
     return toolError(
-      `DeepSeek Search returned an invalid response: ${redactText(message, endpoint.apiKey)}`,
+      `Search API returned an invalid response: ${redactText(message, endpoint.apiKey)}`,
       { ...meta, durationMs: Date.now() - startedAt },
     );
   }
 
   const parsedResponse = searchResponseSchema.safeParse(payload);
   if (!parsedResponse.success) {
-    return toolError("DeepSeek Search returned an unexpected response shape.", {
+    return toolError("Search API returned an unexpected response shape.", {
       ...meta,
       durationMs: Date.now() - startedAt,
     });

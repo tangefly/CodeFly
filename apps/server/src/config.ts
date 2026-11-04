@@ -61,6 +61,7 @@ export const paths = {
   settings: path.join(config.dataDir, "settings.json"),
   messages: path.join(config.dataDir, "messages.json"),
   llm: path.join(config.dataDir, "llm.json"),
+  search: path.join(config.dataDir, "search.json"),
   agent: path.join(config.dataDir, "agent.json"),
   spills: path.join(config.dataDir, "spills"),
   webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)),

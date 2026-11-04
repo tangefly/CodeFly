@@ -20,14 +20,16 @@ import { registerFsRoutes } from "./routes/fs.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerMockChatRoutes } from "./routes/mock-chat.js";
 import { registerLlmRoutes } from "./routes/llm.js";
+import { registerSearchRoutes } from "./routes/search.js";
 import { registerAgentRoutes } from "./routes/agent.js";
 import { LlmConfigStore } from "./llm/config-store.js";
+import { SearchConfigStore } from "./search/config-store.js";
 import { MessageStore } from "./llm/messages.js";
 import { LlmClient } from "./llm/client.js";
 import { ChatService } from "./llm/service.js";
 import { SessionRunLock } from "./llm/run-lock.js";
 import { AgentConfigStore } from "./agent/config-store.js";
-import { AgentToolExecutor, deepseekSearchUrl } from "./agent/tools.js";
+import { AgentToolExecutor } from "./agent/tools.js";
 import { AgentService } from "./agent/service.js";
 
 function formatError(error: unknown): string {
@@ -55,6 +57,9 @@ async function main(): Promise<void> {
 
   const llmConfig = new LlmConfigStore(paths.llm);
   await llmConfig.init();
+
+  const searchConfig = new SearchConfigStore(paths.search);
+  await searchConfig.init();
 
   const agentConfig = new AgentConfigStore(paths.agent);
   await agentConfig.init();
@@ -113,15 +118,9 @@ async function main(): Promise<void> {
     audit,
     client: new LlmClient(),
     tools: new AgentToolExecutor({
-      // DeepSeek Search reuses the provider key; other providers have no
-      // equivalent endpoint, so the tool stays hidden for them.
-      searchEndpoint: () => {
-        const current = llmConfig.getInternal();
-        const url = deepseekSearchUrl(current.baseUrl);
-        return url === null || current.apiKey === ""
-          ? null
-          : { url, apiKey: current.apiKey };
-      },
+      // web_search uses its own provider/key, configured independently of
+      // the model API. It stays hidden until a search base URL is saved.
+      searchEndpoint: () => searchConfig.getEndpoint(),
     }),
     lock: runLock,
     exec,
@@ -228,6 +227,7 @@ async function main(): Promise<void> {
     chat,
     audit,
   });
+  registerSearchRoutes(app, { searchConfig, audit });
   registerAgentRoutes(app, {
     sessions,
     agentConfig,
@@ -265,6 +265,7 @@ async function main(): Promise<void> {
 
   const status = sandbox.status();
   const llmStatus = llmConfig.getPublic();
+  const searchStatus = searchConfig.getPublic();
   const displayHost = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
   const url = `http://${displayHost}:${config.port}/?token=${encodeURIComponent(config.token)}`;
 
@@ -286,6 +287,13 @@ async function main(): Promise<void> {
       llmStatus.configured
         ? `${llmStatus.model} @ ${llmStatus.baseUrl}`
         : "not configured (chat disabled)"
+    }`,
+  );
+  console.log(
+    `  search  : ${
+      searchStatus.configured
+        ? (searchStatus.endpoint ?? "configured")
+        : "not configured (web_search disabled)"
     }`,
   );
   console.log(`  data    : ${config.dataDir}`);

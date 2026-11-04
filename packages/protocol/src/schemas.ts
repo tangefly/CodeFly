@@ -87,6 +87,21 @@ export const llmTestSchema = z.object({
   timeoutMs: z.number().int().min(1000).max(600_000).optional(),
 });
 
+export const searchSettingsUpdateSchema = z.object({
+  /** Empty string disables web_search and clears the derived endpoint. */
+  baseUrl: z.string().trim().max(2048),
+  apiKey: z.string().max(8192).optional(),
+  clearApiKey: z.boolean().optional(),
+  timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+});
+
+export const searchTestSchema = z.object({
+  baseUrl: z.string().trim().max(2048).optional(),
+  apiKey: z.string().max(8192).optional(),
+  clearApiKey: z.boolean().optional(),
+  timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+});
+
 export const agentSettingsUpdateSchema = z.object({
   maxSteps: z.number().int().min(1).max(AGENT_MAX_STEPS_LIMIT).optional(),
   commandTimeoutMs: z.number().int().min(1000).max(600_000).optional(),

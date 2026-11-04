@@ -262,6 +262,45 @@ export interface LlmTestResult {
   model: string;
 }
 
+/**
+ * Web search provider settings. Stored separately from the model provider so
+ * `web_search` can use a different vendor, key, or gateway.
+ */
+export interface SearchSettingsPublic {
+  configured: boolean;
+  baseUrl: string;
+  /** Resolved POST endpoint, or null when no base URL is configured. */
+  endpoint: string | null;
+  hasApiKey: boolean;
+  apiKeyHint: string | null;
+  timeoutMs: number;
+  updatedAt: string | null;
+}
+
+/** Input accepted by PUT /api/search/settings. */
+export interface SearchSettingsInput {
+  /** Search service base URL. Empty string disables web_search. */
+  baseUrl: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
+  timeoutMs?: number;
+}
+
+/** Input accepted by POST /api/search/test; omitted fields fall back to saved config. */
+export interface SearchTestInput {
+  baseUrl?: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
+  timeoutMs?: number;
+}
+
+export interface SearchTestResult {
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+  resultCount: number;
+}
+
 export interface ChatHistoryResponse {
   messages: ChatMessageRecord[];
 }
@@ -279,6 +318,7 @@ export type AuditType =
   | "fs.write"
   | "sandbox.unavailable"
   | "llm.config.changed"
+  | "search.config.changed"
   | "llm.chat"
   | "agent.run"
   | "agent.tool";

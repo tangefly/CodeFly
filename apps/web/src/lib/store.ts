@@ -17,6 +17,10 @@ import type {
   LlmTestResult,
   SandboxMode,
   SandboxStatus,
+  SearchSettingsInput,
+  SearchSettingsPublic,
+  SearchTestInput,
+  SearchTestResult,
   Session,
   Settings,
 } from "@codefly/protocol";
@@ -79,6 +83,7 @@ interface UiState {
   auditOpen: boolean;
   llmSettingsOpen: boolean;
   agentSettingsOpen: boolean;
+  searchSettingsOpen: boolean;
 }
 
 interface Notification {
@@ -97,6 +102,7 @@ export interface AppState {
   approvals: ApprovalRequest[];
   settings: Settings | null;
   llmSettings: LlmSettingsPublic | null;
+  searchSettings: SearchSettingsPublic | null;
   agentSettings: AgentSettingsPublic | null;
   sandbox: SandboxStatus | null;
   dev: boolean;
@@ -121,6 +127,8 @@ export interface AppState {
   cancelAgent(): void;
   saveLlmSettings(input: LlmSettingsInput): Promise<boolean>;
   testLlm(input: LlmTestInput): Promise<LlmTestResult>;
+  saveSearchSettings(input: SearchSettingsInput): Promise<boolean>;
+  testSearch(input: SearchTestInput): Promise<SearchTestResult>;
   saveAgentSettings(input: AgentSettingsInput): Promise<boolean>;
   refreshAudit(): Promise<void>;
   saveDefaultPreset(mode: SandboxMode): Promise<boolean>;
@@ -134,6 +142,8 @@ export interface AppState {
   closeSettings(): void;
   openLlmSettings(): void;
   closeLlmSettings(): void;
+  openSearchSettings(): void;
+  closeSearchSettings(): void;
   openAgentSettings(): void;
   closeAgentSettings(): void;
   openAudit(): void;
@@ -313,6 +323,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   approvals: [],
   settings: null,
   llmSettings: null,
+  searchSettings: null,
   agentSettings: null,
   sandbox: null,
   dev: false,
@@ -326,6 +337,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     auditOpen: false,
     llmSettingsOpen: false,
     agentSettingsOpen: false,
+    searchSettingsOpen: false,
   },
 
   init: async () => {
@@ -336,14 +348,21 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
     set({ phase: "loading", error: null });
     try {
-      const [health, sessionsResponse, settingsResponse, llmResponse, agentResponse] =
-        await Promise.all([
-          api.health(),
-          api.listSessions(),
-          api.getSettings(),
-          api.getLlmSettings(),
-          api.getAgentSettings(),
-        ]);
+      const [
+        health,
+        sessionsResponse,
+        settingsResponse,
+        llmResponse,
+        searchResponse,
+        agentResponse,
+      ] = await Promise.all([
+        api.health(),
+        api.listSessions(),
+        api.getSettings(),
+        api.getLlmSettings(),
+        api.getSearchSettings(),
+        api.getAgentSettings(),
+      ]);
 
       const sessions = sessionsResponse.sessions;
       const remembered =
@@ -363,6 +382,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         currentSessionId: current,
         settings: settingsResponse.settings,
         llmSettings: llmResponse.settings,
+        searchSettings: searchResponse.settings,
         agentSettings: agentResponse.settings,
         sandbox: health.sandbox,
         dev: health.dev,
@@ -685,6 +705,22 @@ export const useAppStore = create<AppState>()((set, get) => ({
     return api.testLlm(input);
   },
 
+  saveSearchSettings: async (input: SearchSettingsInput) => {
+    try {
+      const { settings } = await api.updateSearchSettings(input);
+      set({ searchSettings: settings });
+      get().notify("info", "搜索 API 配置已保存");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  testSearch: async (input: SearchTestInput) => {
+    return api.testSearch(input);
+  },
+
   sendAgent: async (text: string) => {
     const state = get();
     const sessionId = state.currentSessionId;
@@ -923,10 +959,27 @@ export const useAppStore = create<AppState>()((set, get) => ({
     set((state) => ({ ui: { ...state.ui, settingsOpen: false } })),
   openLlmSettings: () =>
     set((state) => ({
-      ui: { ...state.ui, llmSettingsOpen: true, settingsOpen: false },
+      ui: {
+        ...state.ui,
+        llmSettingsOpen: true,
+        settingsOpen: false,
+        searchSettingsOpen: false,
+      },
     })),
   closeLlmSettings: () =>
     set((state) => ({ ui: { ...state.ui, llmSettingsOpen: false } })),
+  openSearchSettings: () =>
+    set((state) => ({
+      ui: {
+        ...state.ui,
+        searchSettingsOpen: true,
+        settingsOpen: false,
+        llmSettingsOpen: false,
+        agentSettingsOpen: false,
+      },
+    })),
+  closeSearchSettings: () =>
+    set((state) => ({ ui: { ...state.ui, searchSettingsOpen: false } })),
   openAgentSettings: () =>
     set((state) => ({
       ui: {
@@ -934,6 +987,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
         agentSettingsOpen: true,
         settingsOpen: false,
         llmSettingsOpen: false,
+        searchSettingsOpen: false,
       },
     })),
   closeAgentSettings: () =>

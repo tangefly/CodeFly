@@ -56,7 +56,7 @@ const TOOL_INFO: Array<{
     name: "web_search",
     label: "联网搜索",
     description:
-      "通过 DeepSeek Search 检索实时网页，返回标题、链接与摘要；需要 DeepSeek 模型配置。",
+      "通过独立配置的搜索 API（DeepSeek Search）检索实时网页，返回标题、链接与摘要；未配置搜索 API 时不可用。",
   },
   {
     name: "web_fetch",
@@ -77,6 +77,7 @@ export function AgentSettingsDialog() {
   const close = useAppStore((state) => state.closeAgentSettings);
   const settings = useAppStore((state) => state.agentSettings);
   const llmSettings = useAppStore((state) => state.llmSettings);
+  const searchSettings = useAppStore((state) => state.searchSettings);
   const saveAgentSettings = useAppStore((state) => state.saveAgentSettings);
 
   const [maxSteps, setMaxSteps] = useState(String(DEFAULT_AGENT_MAX_STEPS));
@@ -230,6 +231,13 @@ export function AgentSettingsDialog() {
           {enabledTools.length === 0 ? (
             <p className="mt-1 text-[10px] text-warning">
               未启用任何工具，Agent 只能对话。
+            </p>
+          ) : null}
+          {enabledTools.includes("web_search") &&
+          !searchSettings?.configured ? (
+            <p className="mt-1 text-[10px] leading-4 text-warning">
+              尚未配置搜索 API，web_search 不会出现在模型工具列表中；请在「设置 →
+              联网搜索」中单独配置。
             </p>
           ) : null}
         </div>

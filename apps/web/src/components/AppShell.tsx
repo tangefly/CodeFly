@@ -8,6 +8,7 @@ import { Composer } from "./Composer.js";
 import { AgentSettingsDialog } from "./AgentSettingsDialog.js";
 import { LlmSettingsDialog } from "./LlmSettingsDialog.js";
 import { NewSessionDialog } from "./NewSessionDialog.js";
+import { SearchSettingsDialog } from "./SearchSettingsDialog.js";
 import { SettingsDialog } from "./SettingsDialog.js";
 import { Sidebar } from "./Sidebar.js";
 import { TopBar } from "./TopBar.js";
@@ -67,6 +68,7 @@ export function AppShell() {
       <NewSessionDialog />
       <SettingsDialog />
       <LlmSettingsDialog />
+      <SearchSettingsDialog />
       <AgentSettingsDialog />
       <AuditDrawer />
       <NotificationToast />

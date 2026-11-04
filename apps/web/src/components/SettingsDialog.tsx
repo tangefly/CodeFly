@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, Eye, Pencil, ShieldCheck, ShieldOff, Sparkles } from "lucide-react";
+import { Bot, Eye, Globe, Pencil, ShieldCheck, ShieldOff, Sparkles } from "lucide-react";
 import { DEFAULT_AGENT_MAX_STEPS, type SandboxMode } from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { MODE_LABEL, cn } from "../lib/utils.js";
@@ -33,9 +33,11 @@ export function SettingsDialog() {
   const settings = useAppStore((state) => state.settings);
   const sandbox = useAppStore((state) => state.sandbox);
   const llmSettings = useAppStore((state) => state.llmSettings);
+  const searchSettings = useAppStore((state) => state.searchSettings);
   const agentSettings = useAppStore((state) => state.agentSettings);
   const saveDefaultPreset = useAppStore((state) => state.saveDefaultPreset);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
+  const openSearchSettings = useAppStore((state) => state.openSearchSettings);
   const openAgentSettings = useAppStore((state) => state.openAgentSettings);
 
   const [preset, setPreset] = useState<SandboxMode>("workspace-write");
@@ -124,6 +126,49 @@ export function SettingsDialog() {
               size="sm"
               className="shrink-0"
               onClick={openLlmSettings}
+            >
+              配置
+            </Button>
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-foreground">联网搜索</h3>
+            <span
+              className={cn(
+                "rounded-full border px-1.5 py-px text-[9px]",
+                searchSettings?.configured
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-warning/30 bg-warning/10 text-warning",
+              )}
+            >
+              {searchSettings?.configured ? "已配置" : "未配置"}
+            </span>
+          </div>
+          <div className="mt-2 flex items-start gap-2.5 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+            <Globe className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              {searchSettings?.configured ? (
+                <>
+                  <p className="truncate text-xs font-medium text-foreground">
+                    {searchSettings.endpoint}
+                  </p>
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">
+                    独立搜索 Key：{searchSettings.hasApiKey ? "已保存" : "未设置"}
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  Agent 的 web_search 需要单独配置搜索 API；与聊天模型互不复用。
+                </p>
+              )}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={openSearchSettings}
             >
               配置
             </Button>

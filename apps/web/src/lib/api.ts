@@ -10,6 +10,10 @@ import type {
   LlmTestInput,
   LlmTestResult,
   SandboxMode,
+  SearchSettingsInput,
+  SearchSettingsPublic,
+  SearchTestInput,
+  SearchTestResult,
   Session,
   Settings,
   WorkspaceBrowseResponse,
@@ -147,6 +151,26 @@ export const api = {
 
   testLlm(input: LlmTestInput): Promise<LlmTestResult> {
     return request("/api/llm/test", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  getSearchSettings(): Promise<{ settings: SearchSettingsPublic }> {
+    return request("/api/search/settings");
+  },
+
+  updateSearchSettings(
+    input: SearchSettingsInput,
+  ): Promise<{ settings: SearchSettingsPublic }> {
+    return request("/api/search/settings", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  testSearch(input: SearchTestInput): Promise<SearchTestResult> {
+    return request("/api/search/test", {
       method: "POST",
       body: JSON.stringify(input),
     });

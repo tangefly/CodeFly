@@ -18,9 +18,10 @@
   每次重定向后重新校验，防止 DNS rebinding 绕过。
 - **看图**：`read_image` 读取 PNG/JPEG/GIF/WebP（≤ 4 MiB），解析尺寸后把图片作为
   带图的多模态 tool result 发给模型，UI 直接渲染缩略图。
-- **联网搜索**：`web_search` 使用 DeepSeek Search（`POST /v1/tools/search`）返回
-  标题、链接、摘要与可选网页正文，支持 `site:`、`lang:`、`after:` 等搜索语法；
-  复用当前 DeepSeek API Key，仅在 Base URL 属于 `deepseek.com` 时启用。
+- **联网搜索**：`web_search` 使用独立配置的搜索 API（兼容 DeepSeek Search 的
+  `POST /v1/tools/search`）返回标题、链接、摘要与可选网页正文，支持 `site:`、
+  `lang:`、`after:` 等搜索语法；搜索地址与 API Key 在「搜索 API」中单独配置，
+  与聊天模型互不复用。
 - **思考模式**：DeepSeek V4 默认开启，思维链流式展示在回复上方，可关闭或调整
   `low / high / max` 强度。
 - **权限与审批**：只读 / 工作区内修改 / 完全权限；越界操作可发起一次性提权审批。
@@ -64,8 +65,22 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
 旧的 `deepseek-chat` / `deepseek-reasoner` 配置会在启动时自动迁移为
 `deepseek-v4-flash` / `deepseek-v4-pro`。
 
-`web_search` 复用同一个 DeepSeek API Key 调用 DeepSeek Search，不会暴露给其他厂商
-（Base URL 不是 `deepseek.com` 时该工具不会出现在 Agent 的工具列表中）。
+`web_search` 现在使用独立配置的搜索 API，与模型 API 完全分离：模型可以继续使用
+Ollama、OpenAI 或其他厂商，搜索则单独指向 DeepSeek Search 或兼容网关。
+
+## 配置搜索 API
+
+顶栏齿轮 →「联网搜索」→「配置」（或 Agent 设置中的提示入口）：
+
+1. 填写搜索服务 Base URL，例如 `https://api.deepseek.com/v1`；服务端会自动拼接
+   `/tools/search`，也可以直接填写完整的 `/v1/tools/search` 地址。
+2. 填写该搜索服务的 API Key；本地兼容网关可以留空。
+3. 「测试搜索」会发送一次 `query=CodeFly` 的最小请求，通过后保存。
+
+搜索配置只保存在本机 `data/search.json`（权限 `0600`），不会返回前端，也不会传给
+执行 shell 的沙箱进程。未配置（Base URL 为空）时，`web_search` 不会出现在 Agent 的
+工具列表中；Base URL 留空保存会停用并清除已保存的搜索 Key。升级后搜索不再复用模型
+Key，需要在「搜索 API」中单独填写一次。
 
 ## 使用
 
@@ -99,6 +114,7 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
 数据文件：
 
 - `data/llm.json`：模型地址、模型名、API Key、思考设置。
+- `data/search.json`：搜索服务地址、搜索 API Key、请求超时。
 - `data/agent.json`：Agent 最大步数、命令超时、启用工具、system prompt。
 - `data/messages.json`：会话消息、思考内容、工具调用与结果。
 - `data/audit.jsonl`：审计事件。
@@ -108,8 +124,9 @@ shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设�
 - 服务默认只监听 `127.0.0.1`，所有 API 请求都需要 Bearer token；不要把
   `CODEFLY_HOST` 改成 `0.0.0.0`。
 - **读取、网络、PID 可见性不隔离**；Landlock 只限制文件写。命令可以读取本机任意
-  可读文件，包括 `data/llm.json` 中的 API Key。不要执行不受信任的命令。
-- 启用 `web_search` 时，搜索查询词与可选网页正文会发送到 DeepSeek Search 服务；
+  可读文件，包括 `data/llm.json` 与 `data/search.json` 中的 API Key。不要执行不受
+  信任的命令。
+- 启用 `web_search` 时，搜索查询词与可选网页正文会发送到「搜索 API」中配置的服务；
   启用 `web_fetch` 时，目标 URL 会从本机直接访问（只放行公网 http/https）。
 - `read_image` 会把图片以 base64 存入 `data/messages.json`，并把图片发送给模型
   提供商；不要读取含敏感信息的截图。
