@@ -153,7 +153,7 @@ Key，需要在「搜索 API」中单独填写一次。
 | `CODEFLY_PAPER_MAX_READ_CHARS` | `20000` | `paper_read` 单次返回字符上限 |
 | `CODEFLY_PAPER_HISTORY_BUDGET_CHARS` | `160000` | 论文会话送给模型的论文文本预算 |
 | `CODEFLY_PAPER_MAX_STEPS` | `80` | 论文助手单回合最大步数 |
-| `CODEFLY_PAPER_DOWNLOAD_TIMEOUT_MS` | `120000` | arXiv PDF 下载超时 |
+| `CODEFLY_PAPER_DOWNLOAD_TIMEOUT_MS` | `120000` | arXiv PDF 下载空闲超时：连续该时长未收到新数据才中断，慢速但持续的下载不会被打断 |
 
 数据文件：
 

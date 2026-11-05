@@ -80,6 +80,7 @@ export function PaperLibraryDrawer() {
   });
   const [saving, setSaving] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [openingPdf, setOpeningPdf] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -147,6 +148,8 @@ export function PaperLibraryDrawer() {
   };
 
   const openPdf = async (paper: PaperRecord): Promise<void> => {
+    if (openingPdf) return;
+    setOpeningPdf(true);
     try {
       const blob = await api.paperPdf(paper.id);
       const url = URL.createObjectURL(blob);
@@ -163,6 +166,8 @@ export function PaperLibraryDrawer() {
           "error",
           error instanceof Error ? error.message : "无法打开 PDF",
         );
+    } finally {
+      setOpeningPdf(false);
     }
   };
 
@@ -514,10 +519,15 @@ export function PaperLibraryDrawer() {
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={openingPdf}
                     onClick={() => void openPdf(selected)}
                   >
-                    <FileText className="h-3.5 w-3.5" />
-                    打开 PDF
+                    {openingPdf ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <FileText className="h-3.5 w-3.5" />
+                    )}
+                    {openingPdf ? "正在获取 PDF…" : "打开 PDF"}
                   </Button>
                   <Button
                     size="sm"

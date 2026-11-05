@@ -195,6 +195,7 @@ export class PaperTextStore {
       return stored;
     }
 
+    const previousStatus = paper.textStatus;
     await this.options.library.setTextState(paperId, { textStatus: "pending" });
 
     try {
@@ -251,7 +252,16 @@ export class PaperTextStore {
       });
       return next;
     } catch (error) {
-      if (!signal?.aborted) {
+      if (signal?.aborted) {
+        // A cancelled run must not leave the paper stuck on "pending" — the UI
+        // disables re-extraction in that state. Restore the previous status so
+        // the paper can be retried.
+        await this.options.library
+          .setTextState(paperId, {
+            textStatus: previousStatus === "pending" ? "none" : previousStatus,
+          })
+          .catch(() => undefined);
+      } else {
         const message = error instanceof Error ? error.message : String(error);
         await this.options.library
           .setTextState(paperId, { textStatus: "error", error: message })

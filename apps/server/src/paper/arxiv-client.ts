@@ -224,6 +224,7 @@ function parseFeed(xml: string): ArxivPaper[] {
 async function readCapped(
   response: Response,
   limit: number,
+  onProgress?: () => void,
 ): Promise<{ buffer: Buffer; truncated: boolean }> {
   const reader = response.body?.getReader();
   if (reader === undefined) {
@@ -233,6 +234,9 @@ async function readCapped(
   let total = 0;
   let truncated = false;
   for (;;) {
+    // Receiving data keeps the download alive; only a stalled connection
+    // trips the timeout.
+    onProgress?.();
     const { done, value } = await reader.read();
     if (done) break;
     if (value === undefined) continue;
@@ -418,9 +422,35 @@ export class ArxivClient {
     return paper;
   }
 
+  /** Maps an aborted transfer to a message the UI can act on. */
+  private downloadFailure(
+    cause: unknown,
+    stalled: boolean,
+    signal: AbortSignal | undefined,
+  ): Error {
+    if (signal?.aborted) {
+      return new ArxivError("ARXIV_ABORTED", "PDF 下载已取消。");
+    }
+    if (stalled) {
+      return new ArxivError(
+        "ARXIV_DOWNLOAD_TIMEOUT",
+        `PDF 下载超时：${Math.max(1, Math.round(this.downloadTimeoutMs / 1000))} 秒内没有收到新数据，请检查网络或稍后重试。`,
+      );
+    }
+    if (cause instanceof ArxivError) return cause;
+    return new ArxivError(
+      "ARXIV_DOWNLOAD_FAILED",
+      `下载 arXiv PDF 失败：${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+
   /**
    * Downloads the PDF into `pdfDir` and returns its local path. Existing files
    * are reused; the response is size-capped and checked for the PDF magic.
+   *
+   * The timeout is an inactivity timeout: it resets whenever body bytes
+   * arrive, so a slow but healthy transfer is not cut off at a fixed total
+   * duration.
    */
   async downloadPdf(
     paper: Pick<ArxivPaper, "arxivId" | "version"> & {
@@ -464,71 +494,99 @@ export class ArxivClient {
             `拒绝从非 arXiv 域名下载：${current.hostname}`,
           );
         }
-        const timeout = AbortSignal.timeout(this.downloadTimeoutMs);
-        const response = await this.fetchImpl(current, {
-          method: "GET",
-          redirect: "manual",
-          headers: {
-            "user-agent": this.userAgent,
-            accept: "application/pdf",
-          },
-          signal:
-            options.signal === undefined
-              ? timeout
-              : AbortSignal.any([options.signal, timeout]),
-        });
-        if (response.status >= 300 && response.status < 400) {
-          const location = response.headers.get("location");
-          await response.body?.cancel().catch(() => undefined);
-          if (location === null) {
+
+        const controller = new AbortController();
+        let stalled = false;
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        const armIdleTimer = (): void => {
+          if (idleTimer !== null) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            stalled = true;
+            controller.abort();
+          }, this.downloadTimeoutMs);
+          idleTimer.unref?.();
+        };
+        const onAbort = (): void => controller.abort();
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        armIdleTimer();
+        try {
+          let response: Response;
+          try {
+            response = await this.fetchImpl(current, {
+              method: "GET",
+              redirect: "manual",
+              headers: {
+                "user-agent": this.userAgent,
+                accept: "application/pdf",
+              },
+              signal: controller.signal,
+            });
+          } catch (error) {
+            throw this.downloadFailure(error, stalled, options.signal);
+          }
+          if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get("location");
+            await response.body?.cancel().catch(() => undefined);
+            if (location === null) {
+              throw new ArxivError(
+                "ARXIV_DOWNLOAD_FAILED",
+                "arXiv PDF 重定向缺少 Location 头。",
+              );
+            }
+            current = new URL(location, current);
+            continue;
+          }
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => undefined);
             throw new ArxivError(
               "ARXIV_DOWNLOAD_FAILED",
-              "arXiv PDF 重定向缺少 Location 头。",
+              `下载 arXiv PDF 失败（HTTP ${response.status}）。`,
             );
           }
-          current = new URL(location, current);
-          continue;
-        }
-        if (!response.ok) {
-          await response.body?.cancel().catch(() => undefined);
-          throw new ArxivError(
-            "ARXIV_DOWNLOAD_FAILED",
-            `下载 arXiv PDF 失败（HTTP ${response.status}）。`,
-          );
-        }
 
-        const { buffer, truncated } = await readCapped(
-          response,
-          this.maxPdfBytes + 1,
-        );
-        if (truncated || buffer.length > this.maxPdfBytes) {
-          throw new ArxivError(
-            "ARXIV_PDF_TOO_LARGE",
-            `PDF 超过大小上限（${Math.round(this.maxPdfBytes / 1024 / 1024)} MB）。`,
-          );
-        }
-        if (
-          buffer.length < 5 ||
-          buffer.subarray(0, 5).toString("latin1") !== "%PDF-"
-        ) {
-          throw new ArxivError(
-            "ARXIV_NOT_PDF",
-            "下载内容不是有效的 PDF 文件。",
-          );
-        }
+          let buffer: Buffer;
+          let truncated: boolean;
+          try {
+            ({ buffer, truncated } = await readCapped(
+              response,
+              this.maxPdfBytes + 1,
+              armIdleTimer,
+            ));
+          } catch (error) {
+            throw this.downloadFailure(error, stalled, options.signal);
+          }
+          if (truncated || buffer.length > this.maxPdfBytes) {
+            throw new ArxivError(
+              "ARXIV_PDF_TOO_LARGE",
+              `PDF 超过大小上限（${Math.round(this.maxPdfBytes / 1024 / 1024)} MB）。`,
+            );
+          }
+          if (
+            buffer.length < 5 ||
+            buffer.subarray(0, 5).toString("latin1") !== "%PDF-"
+          ) {
+            throw new ArxivError(
+              "ARXIV_NOT_PDF",
+              "下载内容不是有效的 PDF 文件。",
+            );
+          }
 
-        const tmp = path.join(
-          pdfDir,
-          `.codefly-pdf-${process.pid}-${randomUUID()}`,
-        );
-        await writeFile(tmp, buffer, { mode: 0o600 });
-        try {
-          await rename(tmp, target);
-        } catch (error) {
-          await unlink(tmp).catch(() => undefined);
-          throw error;
+          const tmp = path.join(
+            pdfDir,
+            `.codefly-pdf-${process.pid}-${randomUUID()}`,
+          );
+          await writeFile(tmp, buffer, { mode: 0o600 });
+          try {
+            await rename(tmp, target);
+          } catch (error) {
+            await unlink(tmp).catch(() => undefined);
+            throw error;
+          }
+          return target;
+        } finally {
+          if (idleTimer !== null) clearTimeout(idleTimer);
+          options.signal?.removeEventListener("abort", onAbort);
         }
-        return target;
       }
       throw new ArxivError(
         "ARXIV_DOWNLOAD_FAILED",

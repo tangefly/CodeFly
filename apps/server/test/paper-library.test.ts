@@ -116,6 +116,19 @@ describe("PaperLibraryStore", () => {
     expect(record?.arxivId).toBe("2501.01234");
   });
 
+  it("resets stale pending text states on load", async () => {
+    const { paper } = await store.upsertArxiv(arxivPaper);
+    await store.setTextState(paper.id, {
+      textStatus: "pending",
+      error: "leftover",
+    });
+
+    const reloaded = new PaperLibraryStore(file);
+    await reloaded.init();
+    expect(reloaded.get(paper.id)?.textStatus).toBe("none");
+    expect(reloaded.get(paper.id)?.extractionError).toBeNull();
+  });
+
   it("deduplicates uploads by file hash", async () => {
     const uploaded = await store.createUpload({
       title: "Local Paper",

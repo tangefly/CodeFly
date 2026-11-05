@@ -235,7 +235,21 @@ export class PaperLibraryStore {
       }
     } catch {
       console.error("[papers] ignoring corrupt library.json");
+      return;
     }
+
+    // No extraction can be in flight before the store is loaded, so any
+    // "pending" entry is left over from a cancelled run or a stopped process.
+    // Leaving it pending disables re-extraction in the UI forever.
+    let repaired = false;
+    for (const record of this.papers.values()) {
+      if (record.textStatus === "pending") {
+        record.textStatus = "none";
+        record.extractionError = null;
+        repaired = true;
+      }
+    }
+    if (repaired) await this.persist();
   }
 
   list(query: PaperQuery = {}): { papers: PaperRecord[]; total: number } {

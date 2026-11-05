@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ArxivClient,
   buildArxivQuery,
@@ -165,5 +168,127 @@ describe("ArxivClient", () => {
     await expect(client.search({ query: " " })).rejects.toMatchObject({
       code: "ARXIV_QUERY_EMPTY",
     });
+  });
+});
+
+const PDF = Buffer.concat([
+  Buffer.from("%PDF-1.4\n"),
+  Buffer.from("x".repeat(2048)),
+  Buffer.from("\n%%EOF\n"),
+]);
+
+function streamFetch(
+  chunkDelayMs: number,
+  chunkCount: number,
+): typeof fetch {
+  return (async () => {
+    const chunkSize = Math.ceil(PDF.length / chunkCount);
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= PDF.length) {
+          controller.close();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+        controller.enqueue(
+          new Uint8Array(PDF.subarray(sent, sent + chunkSize)),
+        );
+        sent += chunkSize;
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/pdf" },
+    });
+  }) as typeof fetch;
+}
+
+function stallingFetch(): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const signal = init?.signal ?? undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal?.addEventListener(
+          "abort",
+          () => controller.error(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/pdf" },
+    });
+  }) as typeof fetch;
+}
+
+describe("ArxivClient.downloadPdf", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "codefly-arxiv-download-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("allows a slow transfer to outlive the inactivity timeout", async () => {
+    const client = new ArxivClient({
+      minIntervalMs: 0,
+      // 6 chunks × 30 ms ≈ 180 ms total, longer than the 150 ms idle window.
+      downloadTimeoutMs: 150,
+      fetchImpl: streamFetch(30, 6),
+    });
+    const target = await client.downloadPdf(
+      {
+        arxivId: "2501.01234",
+        version: 1,
+        pdfUrl: "https://arxiv.org/pdf/2501.01234v1",
+      },
+      dir,
+    );
+    const saved = await readFile(target);
+    expect(saved.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(saved.length).toBe(PDF.length);
+  });
+
+  it("aborts a stalled transfer with a timeout error", async () => {
+    const client = new ArxivClient({
+      minIntervalMs: 0,
+      downloadTimeoutMs: 60,
+      fetchImpl: stallingFetch(),
+    });
+    await expect(
+      client.downloadPdf(
+        {
+          arxivId: "2501.01234",
+          version: 1,
+          pdfUrl: "https://arxiv.org/pdf/2501.01234v1",
+        },
+        dir,
+      ),
+    ).rejects.toMatchObject({ code: "ARXIV_DOWNLOAD_TIMEOUT" });
+  });
+
+  it("reports user cancellation separately from a timeout", async () => {
+    const client = new ArxivClient({
+      minIntervalMs: 0,
+      downloadTimeoutMs: 10_000,
+      fetchImpl: stallingFetch(),
+    });
+    const controller = new AbortController();
+    const pending = client.downloadPdf(
+      {
+        arxivId: "2501.01234",
+        version: 1,
+        pdfUrl: "https://arxiv.org/pdf/2501.01234v1",
+      },
+      dir,
+      { signal: controller.signal },
+    );
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "ARXIV_ABORTED" });
   });
 });
