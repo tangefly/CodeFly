@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   AGENT_TOOL_NAMES,
   type AgentEvent,
+  type AgentSession,
   type AgentToolName,
   type AuditEvent,
-  type Session,
 } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
@@ -235,9 +235,10 @@ const audit = (events: AuditEvent[]): AuditLog =>
     recent: async () => [],
   }) as unknown as AuditLog;
 
-function makeSession(): Session {
+function makeSession(): AgentSession {
   return {
     id: "s_agent",
+    kind: "agent",
     title: "agent",
     workspaceRoot: "/tmp",
     mode: "workspace-write",
@@ -257,7 +258,7 @@ describe("AgentService", () => {
   let lock: SessionRunLock;
   let auditEvents: AuditEvent[];
   let service: AgentService;
-  let session: Session;
+  let session: AgentSession;
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), "codefly-agent-"));

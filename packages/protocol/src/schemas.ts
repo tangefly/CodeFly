@@ -11,10 +11,23 @@ export const sandboxModeSchema = z.enum(SANDBOX_MODES);
 
 export const approvalPolicySchema = z.enum(APPROVAL_POLICIES);
 
-export const createSessionSchema = z.object({
-  workspaceRoot: z.string().min(1).max(4096),
-  title: z.string().trim().min(1).max(120).optional(),
-});
+export const sessionKindSchema = z.enum(["chat", "agent"]);
+
+export const createSessionSchema = z
+  .object({
+    /** Defaults to `agent` so older clients keep their previous behavior. */
+    kind: sessionKindSchema.optional(),
+    workspaceRoot: z.string().trim().min(1).max(4096).optional(),
+    title: z.string().trim().min(1).max(120).optional(),
+  })
+  .refine((value) => (value.kind ?? "agent") === "chat" || value.workspaceRoot !== undefined, {
+    path: ["workspaceRoot"],
+    message: "workspaceRoot is required for agent sessions",
+  })
+  .refine((value) => (value.kind ?? "agent") === "agent" || value.workspaceRoot === undefined, {
+    path: ["workspaceRoot"],
+    message: "chat sessions do not take a workspaceRoot",
+  });
 
 export const permissionsSchema = z.object({
   mode: sandboxModeSchema,

@@ -2,14 +2,15 @@ import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Session } from "@codefly/protocol";
+import type { AgentSession } from "@codefly/protocol";
 import { canonicalizeForWrite, isUnder } from "../src/fs/canonicalize.js";
 import { assertWritable } from "../src/fs/fence.js";
 import { escalationTargets, isStrictlyWider } from "../src/policy/modes.js";
 
-function makeSession(workspaceRoot: string, mode: Session["mode"]): Session {
+function makeSession(workspaceRoot: string, mode: AgentSession["mode"]): AgentSession {
   return {
     id: `s_${mode}`,
+    kind: "agent",
     title: mode,
     workspaceRoot,
     mode,

@@ -1,17 +1,63 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ApprovalPolicy, SandboxMode, Session } from "@codefly/protocol";
+import type {
+  AgentSession,
+  ApprovalPolicy,
+  ChatSession,
+  DenialRecord,
+  SandboxMode,
+  Session,
+  SessionKind,
+} from "@codefly/protocol";
 import { AppError, isNotFound } from "../http/errors.js";
 import { canonicalizeExisting } from "../fs/canonicalize.js";
 import { presetForMode } from "../policy/presets.js";
 
-interface SessionFile {
-  sessions: Session[];
+interface StoredSession {
+  id?: unknown;
+  title?: unknown;
+  titleSource?: unknown;
+  kind?: unknown;
+  workspaceRoot?: unknown;
+  mode?: unknown;
+  approvalPolicy?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  lastDenial?: unknown;
 }
+
+interface SessionFile {
+  sessions?: StoredSession[];
+}
+
+const CHAT_DEFAULT_TITLE = "新对话";
 
 function isMode(value: unknown): value is SandboxMode {
   return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
+}
+
+function isTitleSource(
+  value: unknown,
+): value is "default" | "user" | "auto" {
+  return value === "default" || value === "user" || value === "auto";
+}
+
+function asIso(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asDenial(value: unknown): DenialRecord | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Partial<DenialRecord>;
+  if (
+    typeof record.command !== "string" ||
+    !isMode(record.mode) ||
+    typeof record.at !== "string"
+  ) {
+    return null;
+  }
+  return { command: record.command, mode: record.mode, at: record.at };
 }
 
 export class SessionStore {
@@ -30,37 +76,71 @@ export class SessionStore {
       throw error;
     }
 
+    const now = new Date().toISOString();
     try {
       const parsed = JSON.parse(raw) as SessionFile;
       for (const session of parsed.sessions ?? []) {
-        if (
-          typeof session.id === "string" &&
-          typeof session.workspaceRoot === "string" &&
-          isMode(session.mode)
-        ) {
-          // Older records have no titleSource: treat a title equal to the
-          // folder name as the untouched default so it can be auto-titled.
-          const folderName = path.basename(session.workspaceRoot);
+        if (typeof session.id !== "string") continue;
+        // Sessions written before the chat/agent split always have a
+        // workspace and are treated as agent sessions.
+        const kind = session.kind === "chat" ? "chat" : "agent";
+        const approvalPolicy =
+          session.approvalPolicy === "never" ? "never" : "ask";
+        const mode = isMode(session.mode) ? session.mode : "workspace-write";
+        const createdAt = asIso(session.createdAt, now);
+        const updatedAt = asIso(session.updatedAt, now);
+
+        if (kind === "chat") {
           const title =
             typeof session.title === "string" && session.title.trim() !== ""
               ? session.title
-              : folderName || session.workspaceRoot;
-          const titleSource =
-            session.titleSource === "user" ||
-            session.titleSource === "auto" ||
-            session.titleSource === "default"
-              ? session.titleSource
-              : title === folderName
-                ? "default"
-                : "user";
+              : CHAT_DEFAULT_TITLE;
+          const titleSource = isTitleSource(session.titleSource)
+            ? session.titleSource
+            : title === CHAT_DEFAULT_TITLE
+              ? "default"
+              : "user";
           this.sessions.set(session.id, {
-            ...session,
+            id: session.id,
+            kind: "chat",
             title,
             titleSource,
-            approvalPolicy: session.approvalPolicy === "never" ? "never" : "ask",
-            lastDenial: session.lastDenial ?? null,
+            workspaceRoot: null,
+            mode,
+            approvalPolicy,
+            createdAt,
+            updatedAt,
+            lastDenial: null,
           });
+          continue;
         }
+
+        if (typeof session.workspaceRoot !== "string") continue;
+        const workspaceRoot = session.workspaceRoot;
+        // Older records have no titleSource: treat a title equal to the
+        // folder name as the untouched default so it can be auto-titled.
+        const folderName = path.basename(workspaceRoot);
+        const title =
+          typeof session.title === "string" && session.title.trim() !== ""
+            ? session.title
+            : folderName || workspaceRoot;
+        const titleSource = isTitleSource(session.titleSource)
+          ? session.titleSource
+          : title === folderName
+            ? "default"
+            : "user";
+        this.sessions.set(session.id, {
+          id: session.id,
+          kind: "agent",
+          title,
+          titleSource,
+          workspaceRoot,
+          mode,
+          approvalPolicy,
+          createdAt,
+          updatedAt,
+          lastDenial: asDenial(session.lastDenial),
+        });
       }
     } catch (error) {
       console.error("[sessions] ignoring corrupt sessions.json", error);
@@ -81,11 +161,72 @@ export class SessionStore {
     return session;
   }
 
+  getAgentOrThrow(id: string): AgentSession {
+    const session = this.getOrThrow(id);
+    if (session.kind !== "agent") {
+      throw new AppError(
+        "WRONG_SESSION_KIND",
+        "该会话是对话会话，不能执行 Agent 操作。",
+        400,
+      );
+    }
+    return session;
+  }
+
+  getChatOrThrow(id: string): ChatSession {
+    const session = this.getOrThrow(id);
+    if (session.kind !== "chat") {
+      throw new AppError(
+        "WRONG_SESSION_KIND",
+        "该会话是 Agent 会话，不能用于普通对话。",
+        400,
+      );
+    }
+    return session;
+  }
+
+  /**
+   * Creates a chat session (no workspace) or an agent session (a workspace
+   * directory is required and canonicalized).
+   */
   async create(
-    workspaceRootInput: string,
+    workspaceRootInput: string | undefined,
     title: string | undefined,
     defaultMode: SandboxMode,
+    kind: SessionKind = "agent",
   ): Promise<Session> {
+    const preset = presetForMode(defaultMode);
+    const now = new Date().toISOString();
+    const customTitle = title?.trim() ?? "";
+
+    if (kind === "chat") {
+      const session: ChatSession = {
+        id: `s_${randomUUID()}`,
+        kind: "chat",
+        title: customTitle !== "" ? customTitle : CHAT_DEFAULT_TITLE,
+        titleSource: customTitle !== "" ? "user" : "default",
+        workspaceRoot: null,
+        mode: preset.mode,
+        approvalPolicy: preset.approvalPolicy,
+        createdAt: now,
+        updatedAt: now,
+        lastDenial: null,
+      };
+      this.sessions.set(session.id, session);
+      await this.persist();
+      return session;
+    }
+
+    if (
+      workspaceRootInput === undefined ||
+      workspaceRootInput.trim() === ""
+    ) {
+      throw new AppError(
+        "INVALID_WORKSPACE",
+        "agent sessions require a workspace directory",
+        400,
+      );
+    }
     if (!path.isAbsolute(workspaceRootInput)) {
       throw new AppError("INVALID_WORKSPACE", "workspaceRoot must be an absolute path", 400);
     }
@@ -113,11 +254,9 @@ export class SessionStore {
       );
     }
 
-    const preset = presetForMode(defaultMode);
-    const now = new Date().toISOString();
-    const customTitle = title?.trim() ?? "";
-    const session: Session = {
+    const session: AgentSession = {
       id: `s_${randomUUID()}`,
+      kind: "agent",
       title:
         customTitle !== ""
           ? customTitle

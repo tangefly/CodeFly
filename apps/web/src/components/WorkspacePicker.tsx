@@ -64,6 +64,7 @@ export function WorkspacePicker({
     const seen = new Set<string>();
     const paths: string[] = [];
     for (const session of sessions) {
+      if (session.kind !== "agent") continue;
       if (seen.has(session.workspaceRoot)) continue;
       seen.add(session.workspaceRoot);
       paths.push(session.workspaceRoot);

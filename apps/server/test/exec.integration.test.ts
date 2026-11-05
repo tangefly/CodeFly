@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { ExecEvent, Session } from "@codefly/protocol";
+import type { AgentSession, ExecEvent } from "@codefly/protocol";
 import { ApprovalService } from "../src/approval/service.js";
 import { AuditLog } from "../src/audit/log.js";
 import { ExecService } from "../src/exec/service.js";
@@ -76,17 +76,17 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-async function newSession(mode: Session["mode"]): Promise<Session> {
+async function newSession(mode: AgentSession["mode"]): Promise<AgentSession> {
   const created = await sessions.create(workspace, `test-${mode}`, "workspace-write");
   createdSessionIds.add(created.id);
   if (mode !== "workspace-write") {
-    return sessions.updatePermissions(
+    await sessions.updatePermissions(
       created.id,
       mode,
       mode === "danger-full-access" ? "never" : "ask",
     );
   }
-  return sessions.getOrThrow(created.id);
+  return sessions.getAgentOrThrow(created.id);
 }
 
 interface Collector {
@@ -136,7 +136,7 @@ function collect(record: ReturnType<ExecService["getRecord"]>): Collector {
 }
 
 async function run(
-  session: Session,
+  session: AgentSession,
   input: Parameters<ExecService["create"]>[1],
 ): Promise<Collector> {
   const record = await exec.create(session, input);
@@ -227,7 +227,7 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     await run(session, { command });
     await waitForDenial(session.id);
 
-    const fresh = sessions.getOrThrow(session.id);
+    const fresh = sessions.getAgentOrThrow(session.id);
     const record = await exec.create(fresh, {
       command,
       sandboxPermissions: "danger-full-access",
@@ -250,7 +250,7 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
 
     // A second escalation requires a fresh denial.
     await expect(
-      exec.create(sessions.getOrThrow(session.id), {
+      exec.create(sessions.getAgentOrThrow(session.id), {
         command,
         sandboxPermissions: "danger-full-access",
         justification: "again",
@@ -267,7 +267,7 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     await run(session, { command });
     await waitForDenial(session.id);
 
-    const record = await exec.create(sessions.getOrThrow(session.id), {
+    const record = await exec.create(sessions.getAgentOrThrow(session.id), {
       command,
       sandboxPermissions: "danger-full-access",
       justification: "should be rejected",
@@ -294,7 +294,7 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     await run(session, { command });
     await waitForDenial(session.id);
 
-    const record = await exec.create(sessions.getOrThrow(session.id), {
+    const record = await exec.create(sessions.getAgentOrThrow(session.id), {
       command,
       sandboxPermissions: "danger-full-access",
       justification: "will time out",

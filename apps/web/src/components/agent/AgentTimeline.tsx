@@ -9,17 +9,17 @@ import {
 } from "react";
 import { Plus, Sparkles, Terminal, Zap } from "lucide-react";
 import {
+  selectCurrentAgentSession,
   selectCurrentMessages,
-  selectCurrentSession,
   useAppStore,
   type AssistantMessage,
   type ChatMessage,
   type UserMessage,
-} from "../lib/store.js";
-import { cn } from "../lib/utils.js";
-import { MessageBubble } from "./MessageBubble.js";
-import { TurnActivity } from "./TurnActivity.js";
-import { Button } from "./ui.js";
+} from "../../lib/store.js";
+import { cn } from "../../lib/utils.js";
+import { MessageBubble } from "../MessageBubble.js";
+import { TurnActivity } from "../TurnActivity.js";
+import { Button } from "../ui.js";
 
 const EMPTY: ChatMessage[] = [];
 
@@ -95,13 +95,13 @@ function buildTimeline(messages: ChatMessage[]): TimelineItem[] {
 const STICK_THRESHOLD_PX = 48;
 const TOUCH_DETACH_PX = 6;
 
-export function ChatTimeline() {
-  const session = useAppStore(selectCurrentSession);
+export function AgentTimeline() {
+  const session = useAppStore(selectCurrentAgentSession);
   const messages = useAppStore(selectCurrentMessages) ?? EMPTY;
   const openNewSession = useAppStore((state) => state.openNewSession);
-  const sendChat = useAppStore((state) => state.sendChat);
   const sendAgent = useAppStore((state) => state.sendAgent);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
+  const setMode = useAppStore((state) => state.setMode);
   const llmSettings = useAppStore((state) => state.llmSettings);
   const agentBusy = useAppStore(
     (state) =>
@@ -304,9 +304,9 @@ export function ChatTimeline() {
             <Terminal className="h-6 w-6" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold">还没有会话</h2>
+            <h2 className="text-lg font-semibold">还没有 Agent 会话</h2>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              创建会话并绑定一个本机工作区目录。聊天与 Agent 工具都通过本机服务运行。
+              创建会话并绑定一个本机工作区目录。Agent 工具都通过本机服务在沙箱内运行。
             </p>
           </div>
           <Button variant="primary" onClick={openNewSession}>
@@ -356,19 +356,13 @@ export function ChatTimeline() {
             />
             <SuggestionCard
               icon={<Sparkles className="h-4 w-4" />}
-              title="和模型聊天"
+              title="切换到对话模式"
               hint={
                 llmSettings?.configured
                   ? `模型：${llmSettings.model}`
                   : "需要先配置模型 API"
               }
-              onClick={() => {
-                if (llmSettings?.configured) {
-                  void sendChat("你好，请简单介绍一下你自己。");
-                } else {
-                  openLlmSettings();
-                }
-              }}
+              onClick={() => setMode("chat")}
             />
           </div>
           <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">

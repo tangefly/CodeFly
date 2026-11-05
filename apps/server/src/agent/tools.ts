@@ -5,11 +5,11 @@ import path from "node:path";
 import { z } from "zod";
 import type {
   AgentEvent,
+  AgentSession,
   AgentToolMeta,
   AgentToolName,
   ExecEvent,
   SandboxMode,
-  Session,
 } from "@codefly/protocol";
 import { SANDBOX_MODES } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
@@ -27,7 +27,7 @@ export interface ToolResult {
 }
 
 export interface ToolExecutionContext {
-  session: Session;
+  session: AgentSession;
   dataDir: string;
   maxReadBytes: number;
   maxWriteBytes: number;
@@ -605,14 +605,14 @@ function formatStreamForModel(text: string): string {
   return `${text.slice(0, MAX_MODEL_STREAM_CHARS)}\n[... ${text.length - MAX_MODEL_STREAM_CHARS} more characters omitted]`;
 }
 
-function resolveReadPath(session: Session, input: string | undefined): string {
+function resolveReadPath(session: AgentSession, input: string | undefined): string {
   if (input === undefined || input === "") return session.workspaceRoot;
   return path.isAbsolute(input)
     ? path.resolve(input)
     : path.resolve(session.workspaceRoot, input);
 }
 
-function resolveWritePath(session: Session, input: string): string {
+function resolveWritePath(session: AgentSession, input: string): string {
   const resolved = path.resolve(
     path.isAbsolute(input) ? input : path.join(session.workspaceRoot, input),
   );
@@ -626,7 +626,7 @@ function resolveWritePath(session: Session, input: string): string {
   return resolved;
 }
 
-function fileErrorResult(error: unknown, session: Session): ToolResult {
+function fileErrorResult(error: unknown, session: AgentSession): ToolResult {
   const appError = error instanceof AppError ? error : null;
   let message =
     appError?.message ??
@@ -653,7 +653,7 @@ function splitLines(text: string): string[] {
 }
 
 async function readFileResult(
-  session: Session,
+  session: AgentSession,
   input: { path: string; offset?: number; limit?: number },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
@@ -754,7 +754,7 @@ async function readFileResult(
 }
 
 async function listFilesResult(
-  session: Session,
+  session: AgentSession,
   input: string | undefined,
 ): Promise<ToolResult> {
   const target = resolveReadPath(session, input);
@@ -1217,7 +1217,7 @@ async function globResult(
 }
 
 async function writeFileResult(
-  session: Session,
+  session: AgentSession,
   input: { path: string; content: string },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
@@ -1269,7 +1269,7 @@ async function writeFileResult(
 }
 
 async function editFileResult(
-  session: Session,
+  session: AgentSession,
   input: {
     path: string;
     edits?: Array<{
@@ -2251,7 +2251,7 @@ export function imageDimensions(
 }
 
 async function readImageResult(
-  session: Session,
+  session: AgentSession,
   input: { path: string },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {

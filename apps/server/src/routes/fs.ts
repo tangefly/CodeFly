@@ -6,7 +6,7 @@ import {
   fsEditSchema,
   fsPathQuerySchema,
   fsWriteSchema,
-  type Session,
+  type AgentSession,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
 import { AppError, isNotFound } from "../http/errors.js";
@@ -23,7 +23,7 @@ export interface FsRouteDeps {
   maxWriteBytes: number;
 }
 
-function resolvePath(session: Session, input: string | undefined): string {
+function resolvePath(session: AgentSession, input: string | undefined): string {
   if (input === undefined || input === "") return session.workspaceRoot;
   return path.isAbsolute(input)
     ? path.resolve(input)
@@ -35,7 +35,7 @@ function resolvePath(session: Session, input: string | undefined): string {
  * into another writable root such as /tmp. Absolute paths are fenced by the
  * mode's writable roots instead.
  */
-function resolveWritePath(session: Session, input: string): string {
+function resolveWritePath(session: AgentSession, input: string): string {
   const resolved = resolvePath(session, input);
   if (!path.isAbsolute(input) && !isUnder(resolved, session.workspaceRoot)) {
     throw new AppError(
@@ -114,7 +114,7 @@ export function registerFsRoutes(app: FastifyInstance, deps: FsRouteDeps): void 
 
   app.get("/api/sessions/:id/fs/list", async (request) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const query = fsPathQuerySchema.parse(request.query);
     const target = resolvePath(session, query.path);
 
@@ -168,7 +168,7 @@ export function registerFsRoutes(app: FastifyInstance, deps: FsRouteDeps): void 
 
   app.get("/api/sessions/:id/fs/read", async (request) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const query = fsPathQuerySchema.parse(request.query);
     const target = resolvePath(session, query.path);
 
@@ -207,7 +207,7 @@ export function registerFsRoutes(app: FastifyInstance, deps: FsRouteDeps): void 
 
   app.post("/api/sessions/:id/fs/write", async (request) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const body = fsWriteSchema.parse(request.body);
     const size = byteLength(body.content);
     if (size > deps.maxWriteBytes) {
@@ -243,7 +243,7 @@ export function registerFsRoutes(app: FastifyInstance, deps: FsRouteDeps): void 
 
   app.post("/api/sessions/:id/fs/edit", async (request) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const body = fsEditSchema.parse(request.body);
 
     const target = resolveWritePath(session, body.path);

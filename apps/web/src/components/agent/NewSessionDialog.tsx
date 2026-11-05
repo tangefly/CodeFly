@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { ShieldCheck } from "lucide-react";
-import { useAppStore } from "../lib/store.js";
-import { Button, Modal } from "./ui.js";
-import { WorkspacePicker } from "./WorkspacePicker.js";
+import { useAppStore } from "../../lib/store.js";
+import { Button, Modal } from "../ui.js";
+import { WorkspacePicker } from "../WorkspacePicker.js";
 
 export function NewSessionDialog() {
   const open = useAppStore((state) => state.ui.newSessionOpen);
@@ -37,8 +37,8 @@ export function NewSessionDialog() {
     <Modal
       open={open}
       onClose={pending ? undefined : close}
-      title="新建会话"
-      description="绑定一个已存在的本机工作区目录。工作区路径在创建后不可变。"
+      title="新建 Agent 会话"
+      description="Agent 会话需要绑定一个已存在的本机工作区目录。工作区路径在创建后不可变。"
       footer={
         <>
           <Button variant="outline" size="sm" disabled={pending} onClick={close}>
@@ -50,7 +50,7 @@ export function NewSessionDialog() {
             disabled={pending || !workspaceRoot.trim()}
             onClick={() => void submit()}
           >
-            {pending ? "创建中…" : "创建会话"}
+            {pending ? "创建中…" : "创建 Agent 会话"}
           </Button>
         </>
       }

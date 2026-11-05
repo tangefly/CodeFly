@@ -28,15 +28,18 @@ export function registerSessionRoutes(
 ): void {
   app.post("/api/sessions", async (request, reply) => {
     const body = createSessionSchema.parse(request.body);
+    const kind = body.kind ?? "agent";
     const session = await deps.sessions.create(
-      body.workspaceRoot,
+      kind === "agent" ? body.workspaceRoot : undefined,
       body.title,
       deps.settings.get().defaultPreset,
+      kind,
     );
 
     await deps.audit.append({
       type: "session.created",
       sessionId: session.id,
+      kind: session.kind,
       workspaceRoot: session.workspaceRoot,
       mode: session.mode,
       approvalPolicy: session.approvalPolicy,
@@ -68,7 +71,6 @@ export function registerSessionRoutes(
   app.delete("/api/sessions/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const session = deps.sessions.getOrThrow(id);
-
     if (deps.lock.isBusy(id)) {
       throw new AppError(
         "SESSION_BUSY",
@@ -94,7 +96,7 @@ export function registerSessionRoutes(
   app.patch("/api/sessions/:id/permissions", async (request) => {
     const { id } = request.params as { id: string };
     const body = permissionsSchema.parse(request.body);
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
 
     if (body.mode === "danger-full-access" && body.confirmRisk !== true) {
       throw new AppError(

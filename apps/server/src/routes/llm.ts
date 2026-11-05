@@ -64,7 +64,7 @@ export function registerLlmRoutes(app: FastifyInstance, deps: LlmRouteDeps): voi
 
   app.post("/api/sessions/:id/chat", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getChatOrThrow(id);
     const body = chatSchema.parse(request.body);
     // Fail before hijacking so configuration/lock errors still use the
     // normal JSON error shape.

@@ -91,7 +91,7 @@ export function SettingsDialog() {
       <div className="space-y-5">
         <section>
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold text-foreground">聊天模型</h3>
+            <h3 className="text-xs font-semibold text-foreground">模型 API</h3>
             <span
               className={cn(
                 "rounded-full border px-1.5 py-px text-[9px]",
@@ -117,7 +117,7 @@ export function SettingsDialog() {
                 </>
               ) : (
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  聊天模式需要配置 OpenAI-compatible 模型 API。
+                  对话与 Agent 都需要配置 OpenAI-compatible 模型 API。
                 </p>
               )}
             </div>

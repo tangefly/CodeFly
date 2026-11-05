@@ -22,7 +22,7 @@ export function registerExecRoutes(
   app.post("/api/sessions/:id/exec", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = execSchema.parse(request.body);
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const record = await deps.exec.create(session, body);
 
     reply.code(202);

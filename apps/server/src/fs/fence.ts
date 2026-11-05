@@ -1,4 +1,5 @@
-import type { SandboxMode, Session } from "@codefly/protocol";import { AppError } from "../http/errors.js";
+import type { AgentSession, SandboxMode } from "@codefly/protocol";
+import { AppError } from "../http/errors.js";
 import { assertNotProtected } from "../policy/protected-paths.js";
 import { writableRoots } from "../policy/writable-roots.js";
 import { canonicalizeForWrite, isUnder } from "./canonicalize.js";
@@ -20,7 +21,7 @@ export interface FenceResult {
  * fenced (matching the plan's local-agent threat model).
  */
 export async function assertWritable(
-  session: Session,
+  session: AgentSession,
   target: string,
   dataDir: string,
 ): Promise<FenceResult> {

@@ -100,6 +100,7 @@ class FakeClient implements LlmClientLike {
 function makeSession(id = "s_test"): Session {
   return {
     id,
+    kind: "agent",
     title: "test",
     workspaceRoot: "/tmp",
     mode: "workspace-write",

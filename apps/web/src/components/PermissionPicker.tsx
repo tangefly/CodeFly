@@ -8,7 +8,7 @@ import {
   ShieldOff,
 } from "lucide-react";
 import type { SandboxMode } from "@codefly/protocol";
-import { selectCurrentSession, useAppStore } from "../lib/store.js";
+import { selectCurrentAgentSession, useAppStore } from "../lib/store.js";
 import { MODE_LABEL, cn } from "../lib/utils.js";
 import { Button, Modal } from "./ui.js";
 
@@ -55,7 +55,7 @@ export function PermissionPicker({
   /** Which edge the menu aligns to. */
   align?: "start" | "end";
 }) {
-  const session = useAppStore(selectCurrentSession);
+  const session = useAppStore(selectCurrentAgentSession);
   const updatePermissions = useAppStore((state) => state.updatePermissions);
   const [open, setOpen] = useState(false);
   const [confirmDanger, setConfirmDanger] = useState(false);

@@ -5,12 +5,12 @@ import { mkdir, realpath, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
+  AgentSession,
   Enforcement,
   ExecEvent,
   ExecInput,
   RunnerName,
   SandboxMode,
-  Session,
 } from "@codefly/protocol";
 import type { ApprovalService } from "../approval/service.js";
 import type { AuditLog } from "../audit/log.js";
@@ -43,7 +43,7 @@ interface ExecRecord {
   cwd: string;
   timeoutMs: number;
   standingMode: SandboxMode;
-  approvalPolicy: Session["approvalPolicy"];
+  approvalPolicy: AgentSession["approvalPolicy"];
   requestedMode: SandboxMode | null;
   effectiveMode: SandboxMode;
   justification: string | null;
@@ -108,8 +108,8 @@ export class ExecService {
     this.deps = deps;
   }
 
-  async create(session: Session, input: ExecInput): Promise<ExecRecord> {
-    const snapshot: Session = { ...session };
+  async create(session: AgentSession, input: ExecInput): Promise<ExecRecord> {
+    const snapshot: AgentSession = { ...session };
     const cwd = await this.resolveCwd(snapshot, input.cwd);
     const timeoutMs = Math.min(
       input.timeoutMs ?? this.deps.options.defaultTimeoutMs,
@@ -787,7 +787,7 @@ export class ExecService {
     }
   }
 
-  private async resolveCwd(session: Session, input: string | undefined): Promise<string> {
+  private async resolveCwd(session: AgentSession, input: string | undefined): Promise<string> {
     const target =
       input === undefined || input === ""
         ? session.workspaceRoot

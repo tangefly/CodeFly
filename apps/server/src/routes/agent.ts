@@ -45,7 +45,7 @@ export function registerAgentRoutes(
 
   app.post("/api/sessions/:id/agent", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const session = deps.sessions.getOrThrow(id);
+    const session = deps.sessions.getAgentOrThrow(id);
     const body = chatSchema.parse(request.body);
     deps.agent.assertReady(id);
 

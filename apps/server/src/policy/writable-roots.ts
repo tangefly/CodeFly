@@ -1,13 +1,13 @@
 import os from "node:os";
 import path from "node:path";
-import type { Session } from "@codefly/protocol";
+import type { AgentSession } from "@codefly/protocol";
 import { canonicalizeExisting } from "../fs/canonicalize.js";
 
 /**
  * Roots the *file tools* may write under the session's current mode.
  * `read-only` and `danger-full-access` are handled before this is consulted.
  */
-export async function writableRoots(session: Session): Promise<string[]> {
+export async function writableRoots(session: AgentSession): Promise<string[]> {
   if (session.mode !== "workspace-write") return [];
   const candidates = [session.workspaceRoot, "/tmp", os.tmpdir()];
   const roots = new Set<string>();

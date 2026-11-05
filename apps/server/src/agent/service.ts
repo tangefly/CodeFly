@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentEvent,
+  AgentSession,
   AgentToolCall,
   AgentToolMeta,
   AgentToolName,
   ChatMessageRecord,
   ChatUsage,
-  Session,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
 import { AppError } from "../http/errors.js";
@@ -45,7 +45,7 @@ const READ_ONLY_TOOL_NAMES = new Set<string>([
 ]);
 
 interface ToolRunOptions {
-  session: Session;
+  session: AgentSession;
   settings: AgentInternalSettings;
   signal: AbortSignal;
   emit: (event: AgentEvent) => void;
@@ -100,7 +100,7 @@ export class AgentService {
   }
 
   async run(
-    session: Session,
+    session: AgentSession,
     content: string,
     clientSignal: AbortSignal,
     emit: (event: AgentEvent) => void,
@@ -573,7 +573,7 @@ export class AgentService {
 
 function buildSystemPrompt(
   settings: AgentInternalSettings,
-  session: Session,
+  session: AgentSession,
   availableTools: string[],
 ): string {
   const base = settings.systemPrompt.trim() || DEFAULT_AGENT_PROMPT;

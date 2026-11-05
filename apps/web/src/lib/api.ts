@@ -15,6 +15,7 @@ import type {
   SearchTestInput,
   SearchTestResult,
   Session,
+  SessionKind,
   Settings,
   WorkspaceBrowseResponse,
 } from "@codefly/protocol";
@@ -92,10 +93,14 @@ export const api = {
     return request("/api/sessions");
   },
 
-  createSession(workspaceRoot: string, title?: string): Promise<{ session: Session }> {
+  createSession(input: {
+    kind?: SessionKind;
+    workspaceRoot?: string;
+    title?: string;
+  }): Promise<{ session: Session }> {
     return request("/api/sessions", {
       method: "POST",
-      body: JSON.stringify({ workspaceRoot, title }),
+      body: JSON.stringify(input),
     });
   },
 

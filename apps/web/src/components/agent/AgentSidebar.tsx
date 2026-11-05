@@ -6,13 +6,13 @@ import {
   Settings,
   ShieldCheck,
   ShieldX,
-  Terminal,
   Trash2,
 } from "lucide-react";
-import type { SandboxMode, Session } from "@codefly/protocol";
-import { useAppStore } from "../lib/store.js";
-import { MODE_SHORT_LABEL, basename, cn, relativeTime } from "../lib/utils.js";
-import { Button, Modal, StatusDot } from "./ui.js";
+import type { AgentSession, SandboxMode } from "@codefly/protocol";
+import { useAppStore } from "../../lib/store.js";
+import { MODE_SHORT_LABEL, basename, cn, relativeTime } from "../../lib/utils.js";
+import { SidebarHeader } from "../SidebarHeader.js";
+import { Button, Modal, StatusDot } from "../ui.js";
 
 const MODE_DOT: Record<SandboxMode, string> = {
   "read-only": "bg-sky-400",
@@ -22,11 +22,11 @@ const MODE_DOT: Record<SandboxMode, string> = {
 
 interface SessionGroup {
   root: string;
-  sessions: Session[];
+  sessions: AgentSession[];
 }
 
 /** Groups sessions by workspace while preserving the store's recency order. */
-function groupSessions(sessions: Session[]): SessionGroup[] {
+function groupSessions(sessions: AgentSession[]): SessionGroup[] {
   const groups = new Map<string, SessionGroup>();
   for (const session of sessions) {
     const existing = groups.get(session.workspaceRoot);
@@ -40,8 +40,15 @@ function groupSessions(sessions: Session[]): SessionGroup[] {
   return [...groups.values()];
 }
 
-export function Sidebar() {
-  const sessions = useAppStore((state) => state.sessions);
+export function AgentSidebar() {
+  const allSessions = useAppStore((state) => state.sessions);
+  const sessions = useMemo(
+    () =>
+      allSessions.filter(
+        (session): session is AgentSession => session.kind === "agent",
+      ),
+    [allSessions],
+  );
   const currentId = useAppStore((state) => state.currentSessionId);
   const selectSession = useAppStore((state) => state.selectSession);
   const openNewSession = useAppStore((state) => state.openNewSession);
@@ -52,7 +59,7 @@ export function Sidebar() {
   const deleteSession = useAppStore((state) => state.deleteSession);
   const chatBusy = useAppStore((state) => state.chatBusy);
   const agentBusy = useAppStore((state) => state.agentBusy);
-  const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<AgentSession | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     new Set(),
@@ -112,20 +119,7 @@ export function Sidebar() {
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="flex items-center gap-2.5 px-4 pb-3 pt-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-primary/25 bg-gradient-to-br from-primary/20 to-primary/5 text-primary shadow-[0_0_30px_-10px_var(--primary)]">
-            <Terminal className="h-4.5 w-4.5" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-sm font-semibold tracking-tight">CodeFly</span>
-              <span className="rounded border border-border px-1 py-px font-mono text-[9px] text-muted-foreground/70">
-                v0.1
-              </span>
-            </div>
-            <p className="text-[10px] text-muted-foreground/70">local agent console</p>
-          </div>
-        </div>
+        <SidebarHeader subtitle="local agent console" />
 
         <div className="px-3 pb-2">
           <Button
@@ -135,13 +129,13 @@ export function Sidebar() {
             onClick={openNewSession}
           >
             <Plus className="h-4 w-4" />
-            新建会话
+            新建 Agent 会话
           </Button>
         </div>
 
         <div className="flex items-center justify-between px-4 pb-1 pt-2">
           <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/60">
-            会话
+            Agent 会话
           </span>
           <span className="font-mono text-[10px] text-muted-foreground/50">
             {sessions.length}
@@ -151,7 +145,7 @@ export function Sidebar() {
         <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {sessions.length === 0 ? (
             <p className="px-2 py-6 text-center text-[11px] leading-5 text-muted-foreground/60">
-              还没有会话。
+              还没有 Agent 会话。
               <br />
               创建一个并绑定工作区目录。
             </p>

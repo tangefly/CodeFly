@@ -18,16 +18,20 @@ export type RunnerName = "bwrap" | "landlock";
 
 export type SandboxProbe = "full" | "partial" | "unusable";
 
-export interface Session {
+/**
+ * Chat sessions are plain model conversations and have no workspace; agent
+ * sessions are bound to a workspace and can run tools inside it.
+ */
+export type SessionKind = "chat" | "agent";
+
+interface SessionBase {
   id: string;
   title: string;
   /**
-   * How the title was chosen. `default` titles (the folder name) are replaced
-   * with an auto-generated summary once the first exchange exists.
+   * How the title was chosen. `default` titles are replaced with an
+   * auto-generated summary once the first exchange exists.
    */
   titleSource?: "default" | "user" | "auto";
-  /** Canonical absolute path. Immutable after creation. */
-  workspaceRoot: string;
   mode: SandboxMode;
   approvalPolicy: ApprovalPolicy;
   createdAt: string;
@@ -35,6 +39,20 @@ export interface Session {
   /** The most recent command whose stderr looked like a sandbox denial. */
   lastDenial: DenialRecord | null;
 }
+
+export interface ChatSession extends SessionBase {
+  kind: "chat";
+  /** Chat sessions never bind a workspace. */
+  workspaceRoot: null;
+}
+
+export interface AgentSession extends SessionBase {
+  kind: "agent";
+  /** Canonical absolute path. Immutable after creation. */
+  workspaceRoot: string;
+}
+
+export type Session = ChatSession | AgentSession;
 
 export interface DenialRecord {
   command: string;

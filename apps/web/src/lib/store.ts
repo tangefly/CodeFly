@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   AgentEvent,
+  AgentSession,
   AgentSettingsInput,
   AgentSettingsPublic,
   AgentToolCall,
@@ -10,6 +11,7 @@ import type {
   AuditEvent,
   ChatEvent,
   ChatMessageRecord,
+  ChatSession,
   ChatUsage,
   LlmSettingsInput,
   LlmSettingsPublic,
@@ -22,6 +24,7 @@ import type {
   SearchTestInput,
   SearchTestResult,
   Session,
+  SessionKind,
   Settings,
 } from "@codefly/protocol";
 import { api, asApiError, clearToken, getToken, saveToken } from "./api.js";
@@ -94,6 +97,8 @@ interface Notification {
 
 export interface AppState {
   phase: AppPhase;
+  /** Which of the two independent UIs is active. */
+  mode: SessionKind;
   error: string | null;
   notification: Notification | null;
   sessions: Session[];
@@ -111,13 +116,17 @@ export interface AppState {
   chatBusy: Record<string, boolean>;
   /** Per-session agent run in flight. */
   agentBusy: Record<string, boolean>;
+  /** A chat session creation request is in flight. */
+  chatCreating: boolean;
   ui: UiState;
 
   init(): Promise<void>;
   setToken(token: string): Promise<void>;
+  setMode(mode: SessionKind): void;
   selectSession(id: string): void;
   ensureMessagesLoaded(sessionId: string): Promise<void>;
   createSession(workspaceRoot: string, title?: string): Promise<boolean>;
+  createChatSession(title?: string): Promise<boolean>;
   deleteSession(sessionId: string): Promise<boolean>;
   updatePermissions(mode: SandboxMode, confirmRisk?: boolean): Promise<boolean>;
   decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
@@ -150,11 +159,71 @@ export interface AppState {
   closeAudit(): void;
 }
 
-const CURRENT_SESSION_KEY = "codefly.currentSession";
+const MODE_KEY = "codefly.mode";
+const CURRENT_SESSION_KEYS: Record<SessionKind, string> = {
+  chat: "codefly.currentSession.chat",
+  agent: "codefly.currentSession.agent",
+};
+/** Key written before chat and agent were split; still read for agent mode. */
+const LEGACY_CURRENT_SESSION_KEY = "codefly.currentSession";
 
 const chatAborters = new Map<string, AbortController>();
 const agentAborters = new Map<string, AbortController>();
 const loadedSessionIds = new Set<string>();
+
+function readStoredSessionId(kind: SessionKind): string | null {
+  try {
+    const stored = localStorage.getItem(CURRENT_SESSION_KEYS[kind]);
+    if (stored !== null) return stored;
+    if (kind === "agent") {
+      return localStorage.getItem(LEGACY_CURRENT_SESSION_KEY);
+    }
+  } catch {
+    // localStorage can be unavailable; selection still works in memory.
+  }
+  return null;
+}
+
+function storeCurrentSessionId(kind: SessionKind, id: string | null): void {
+  try {
+    if (id === null) localStorage.removeItem(CURRENT_SESSION_KEYS[kind]);
+    else localStorage.setItem(CURRENT_SESSION_KEYS[kind], id);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readStoredMode(): SessionKind {
+  if (typeof window !== "undefined") {
+    const hash = window.location.hash.replace(/^#\/?/, "");
+    if (hash === "chat" || hash === "agent") return hash;
+  }
+  try {
+    const stored = localStorage.getItem(MODE_KEY);
+    if (stored === "chat" || stored === "agent") return stored;
+  } catch {
+    // Ignore storage failures.
+  }
+  return "agent";
+}
+
+function writeStoredMode(mode: SessionKind): void {
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    // Ignore storage failures.
+  }
+  if (typeof window === "undefined") return;
+  const next = `${window.location.pathname}${window.location.search}#/${mode}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next !== current) {
+    window.history.replaceState(null, "", next);
+  }
+}
+
+function sessionMatchesMode(session: Session, mode: SessionKind): boolean {
+  return session.kind === mode;
+}
 
 type Setter = (updater: (state: AppState) => Partial<AppState>) => void;
 type Getter = () => AppState;
@@ -315,6 +384,7 @@ function upsertStoredMessage(
 
 export const useAppStore = create<AppState>()((set, get) => ({
   phase: "loading",
+  mode: readStoredMode(),
   error: null,
   notification: null,
   sessions: [],
@@ -330,6 +400,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   audit: [],
   chatBusy: {},
   agentBusy: {},
+  chatCreating: false,
   ui: {
     sidebarOpen: false,
     newSessionOpen: false,
@@ -365,18 +436,24 @@ export const useAppStore = create<AppState>()((set, get) => ({
       ]);
 
       const sessions = sessionsResponse.sessions;
-      const remembered =
-        typeof localStorage === "undefined"
-          ? null
-          : localStorage.getItem(CURRENT_SESSION_KEY);
+      const mode = readStoredMode();
+      const remembered = readStoredSessionId(mode);
+      const candidates = sessions.filter((session) =>
+        sessionMatchesMode(session, mode),
+      );
       const current =
-        sessions.find((session) => session.id === get().currentSessionId)?.id ??
-        sessions.find((session) => session.id === remembered)?.id ??
-        sessions[0]?.id ??
+        sessions.find(
+          (session) =>
+            session.id === get().currentSessionId &&
+            sessionMatchesMode(session, mode),
+        )?.id ??
+        candidates.find((session) => session.id === remembered)?.id ??
+        candidates[0]?.id ??
         null;
 
       set({
         phase: "ready",
+        mode,
         error: null,
         sessions,
         currentSessionId: current,
@@ -387,8 +464,12 @@ export const useAppStore = create<AppState>()((set, get) => ({
         sandbox: health.sandbox,
         dev: health.dev,
       });
+      writeStoredMode(mode);
 
-      if (current) void get().ensureMessagesLoaded(current);
+      if (current) {
+        storeCurrentSessionId(mode, current);
+        void get().ensureMessagesLoaded(current);
+      }
     } catch (error) {
       const apiError = asApiError(error);
       if (apiError.status === 401) {
@@ -405,13 +486,42 @@ export const useAppStore = create<AppState>()((set, get) => ({
     await get().init();
   },
 
-  selectSession: (id: string) => {
-    if (!get().sessions.some((session) => session.id === id)) return;
-    try {
-      localStorage.setItem(CURRENT_SESSION_KEY, id);
-    } catch {
-      // localStorage can be unavailable; selection still works in memory.
+  setMode: (mode: SessionKind) => {
+    const state = get();
+    if (state.mode === mode) {
+      set({ ui: { ...state.ui, sidebarOpen: false } });
+      return;
     }
+
+    writeStoredMode(mode);
+    const candidates = state.sessions.filter((session) =>
+      sessionMatchesMode(session, mode),
+    );
+    const remembered = readStoredSessionId(mode);
+    const current =
+      candidates.find((session) => session.id === remembered)?.id ??
+      candidates[0]?.id ??
+      null;
+
+    set({
+      mode,
+      currentSessionId: current,
+      ui: {
+        ...state.ui,
+        sidebarOpen: false,
+        newSessionOpen: false,
+      },
+    });
+    if (current) {
+      storeCurrentSessionId(mode, current);
+      void get().ensureMessagesLoaded(current);
+    }
+  },
+
+  selectSession: (id: string) => {
+    const session = get().sessions.find((candidate) => candidate.id === id);
+    if (!session || session.kind !== get().mode) return;
+    storeCurrentSessionId(session.kind, id);
     set({ currentSessionId: id, ui: { ...get().ui, sidebarOpen: false } });
     void get().ensureMessagesLoaded(id);
   },
@@ -445,7 +555,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
 
   createSession: async (workspaceRoot: string, title?: string) => {
     try {
-      const { session } = await api.createSession(workspaceRoot, title);
+      const { session } = await api.createSession({
+        kind: "agent",
+        workspaceRoot,
+        title,
+      });
       loadedSessionIds.add(session.id);
       set((state) => ({
         sessions: [session, ...state.sessions],
@@ -453,16 +567,12 @@ export const useAppStore = create<AppState>()((set, get) => ({
         messages: {
           ...state.messages,
           [session.id]: [
-            systemMessage(`会话已创建，工作区：${session.workspaceRoot}`),
+            systemMessage(`会话已创建，工作区：${session.workspaceRoot ?? ""}`),
           ],
         },
         ui: { ...state.ui, newSessionOpen: false, sidebarOpen: false },
       }));
-      try {
-        localStorage.setItem(CURRENT_SESSION_KEY, session.id);
-      } catch {
-        // Ignore storage failures.
-      }
+      storeCurrentSessionId("agent", session.id);
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
@@ -470,8 +580,32 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  createChatSession: async (title?: string) => {
+    if (get().chatCreating) return false;
+    set({ chatCreating: true });
+    try {
+      const { session } = await api.createSession({ kind: "chat", title });
+      loadedSessionIds.add(session.id);
+      set((state) => ({
+        sessions: [session, ...state.sessions],
+        currentSessionId: session.id,
+        chatCreating: false,
+        messages: { ...state.messages, [session.id]: [] },
+        ui: { ...state.ui, newSessionOpen: false, sidebarOpen: false },
+      }));
+      storeCurrentSessionId("chat", session.id);
+      return true;
+    } catch (error) {
+      set({ chatCreating: false });
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
   deleteSession: async (sessionId: string) => {
     const state = get();
+    const target = state.sessions.find((session) => session.id === sessionId);
+    if (!target) return false;
     if (
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
@@ -493,7 +627,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const remaining = get().sessions.filter((session) => session.id !== sessionId);
     const wasCurrent = get().currentSessionId === sessionId;
     const nextId = wasCurrent
-      ? (remaining[0]?.id ?? null)
+      ? (remaining.find((session) => session.kind === target.kind)?.id ?? null)
       : get().currentSessionId;
 
     set((current) => {
@@ -515,12 +649,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
       };
     });
 
-    try {
-      if (nextId) localStorage.setItem(CURRENT_SESSION_KEY, nextId);
-      else localStorage.removeItem(CURRENT_SESSION_KEY);
-    } catch {
-      // Ignore storage failures.
-    }
+    if (wasCurrent) storeCurrentSessionId(target.kind, nextId);
 
     if (nextId) void get().ensureMessagesLoaded(nextId);
     get().notify("info", "会话已删除");
@@ -528,20 +657,23 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
 
   updatePermissions: async (mode: SandboxMode, confirmRisk?: boolean) => {
-    const sessionId = get().currentSessionId;
-    if (!sessionId) return false;
+    const state = get();
+    const session = state.sessions.find(
+      (candidate) => candidate.id === state.currentSessionId,
+    );
+    if (!session || session.kind !== "agent") return false;
     try {
-      const { session } = await api.updatePermissions(sessionId, {
+      const { session: updated } = await api.updatePermissions(session.id, {
         mode,
         confirmRisk: confirmRisk === true ? true : undefined,
       });
-      set((state) => ({
-        sessions: state.sessions.map((candidate) =>
-          candidate.id === session.id ? session : candidate,
+      set((current) => ({
+        sessions: current.sessions.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
         ),
-        ...withMessages(state, session.id, (list) => [
+        ...withMessages(current, updated.id, (list) => [
           ...list,
-          systemMessage(`权限已切换为「${MODE_LABEL[session.mode]}」`),
+          systemMessage(`权限已切换为「${MODE_LABEL[updated.mode]}」`),
         ]),
       }));
       return true;
@@ -574,6 +706,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const state = get();
     const sessionId = state.currentSessionId;
     if (!sessionId) return;
+    const session = state.sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.kind !== "chat") return;
     const content = text.trim();
     if (!content) return;
 
@@ -734,6 +868,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const state = get();
     const sessionId = state.currentSessionId;
     if (!sessionId) return;
+    const session = state.sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.kind !== "agent") return;
     const content = text.trim();
     if (!content) return;
 
@@ -1023,6 +1159,16 @@ export function selectCurrentSession(state: AppState): Session | null {
     state.sessions.find((session) => session.id === state.currentSessionId) ??
     null
   );
+}
+
+export function selectCurrentAgentSession(state: AppState): AgentSession | null {
+  const session = selectCurrentSession(state);
+  return session?.kind === "agent" ? session : null;
+}
+
+export function selectCurrentChatSession(state: AppState): ChatSession | null {
+  const session = selectCurrentSession(state);
+  return session?.kind === "chat" ? session : null;
 }
 
 export function selectCurrentMessages(state: AppState): ChatMessage[] | undefined {

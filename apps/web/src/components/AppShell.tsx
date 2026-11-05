@@ -2,16 +2,8 @@ import { AlertTriangle, CheckCircle2, X } from "lucide-react";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { ApprovalDialog } from "./ApprovalDialog.js";
-import { AuditDrawer } from "./AuditDrawer.js";
-import { ChatTimeline } from "./ChatTimeline.js";
-import { Composer } from "./Composer.js";
-import { AgentSettingsDialog } from "./AgentSettingsDialog.js";
-import { LlmSettingsDialog } from "./LlmSettingsDialog.js";
-import { NewSessionDialog } from "./NewSessionDialog.js";
-import { SearchSettingsDialog } from "./SearchSettingsDialog.js";
-import { SettingsDialog } from "./SettingsDialog.js";
-import { Sidebar } from "./Sidebar.js";
-import { TopBar } from "./TopBar.js";
+import { AgentShell } from "./agent/AgentShell.js";
+import { ChatShell } from "./chat/ChatShell.js";
 
 function NotificationToast() {
   const notification = useAppStore((state) => state.notification);
@@ -53,24 +45,15 @@ function NotificationToast() {
 }
 
 export function AppShell() {
+  const mode = useAppStore((state) => state.mode);
+
   return (
     <div className="flex h-dvh overflow-hidden bg-background text-foreground">
-      <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
-        <main className="min-h-0 flex-1">
-          <ChatTimeline />
-        </main>
-        <Composer />
-      </div>
-
+      {mode === "chat" ? <ChatShell /> : <AgentShell />}
+      {/* Approvals belong to agent runs, but a run keeps going (or waits) when
+          the user switches to chat; surfacing the dialog globally avoids
+          silently blocking a background run until it times out. */}
       <ApprovalDialog />
-      <NewSessionDialog />
-      <SettingsDialog />
-      <LlmSettingsDialog />
-      <SearchSettingsDialog />
-      <AgentSettingsDialog />
-      <AuditDrawer />
       <NotificationToast />
     </div>
   );

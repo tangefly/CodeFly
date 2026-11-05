@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuditEvent, Session } from "@codefly/protocol";
+import type { AgentSession, AuditEvent } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
 import {
@@ -14,7 +14,7 @@ describe("AgentToolExecutor tools", () => {
   let base: string;
   let workspace: string;
   let dataDir: string;
-  let session: Session;
+  let session: AgentSession;
   let audits: AuditEvent[];
   let executor: AgentToolExecutor;
 
@@ -26,6 +26,7 @@ describe("AgentToolExecutor tools", () => {
     await mkdir(dataDir, { recursive: true });
     session = {
       id: "s_tools",
+      kind: "agent",
       title: "tools",
       workspaceRoot: workspace,
       mode: "workspace-write",

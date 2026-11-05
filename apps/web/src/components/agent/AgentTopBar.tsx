@@ -1,10 +1,10 @@
 import { Activity, FolderOpen, Menu, Settings } from "lucide-react";
-import { selectCurrentSession, useAppStore } from "../lib/store.js";
-import { PermissionPicker } from "./PermissionPicker.js";
-import { Button } from "./ui.js";
+import { selectCurrentAgentSession, useAppStore } from "../../lib/store.js";
+import { PermissionPicker } from "../PermissionPicker.js";
+import { Button } from "../ui.js";
 
-export function TopBar() {
-  const session = useAppStore(selectCurrentSession);
+export function AgentTopBar() {
+  const session = useAppStore(selectCurrentAgentSession);
   const toggleSidebar = useAppStore((state) => state.toggleSidebar);
   const openAudit = useAppStore((state) => state.openAudit);
   const openSettings = useAppStore((state) => state.openSettings);

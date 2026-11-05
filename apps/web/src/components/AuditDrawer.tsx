@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Activity, RefreshCw, X } from "lucide-react";
 import type { AuditEvent } from "@codefly/protocol";
-import { selectCurrentSession, useAppStore } from "../lib/store.js";
+import { selectCurrentAgentSession, useAppStore } from "../lib/store.js";
 import { MODE_LABEL, cn } from "../lib/utils.js";
 import { Button } from "./ui.js";
 
@@ -112,7 +112,7 @@ export function AuditDrawer() {
   const close = useAppStore((state) => state.closeAudit);
   const refreshAudit = useAppStore((state) => state.refreshAudit);
   const audit = useAppStore((state) => state.audit);
-  const session = useAppStore(selectCurrentSession);
+  const session = useAppStore(selectCurrentAgentSession);
   const [refreshing, setRefreshing] = useState(false);
 
   const refresh = async (): Promise<void> => {
