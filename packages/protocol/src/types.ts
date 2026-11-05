@@ -20,9 +20,10 @@ export type SandboxProbe = "full" | "partial" | "unusable";
 
 /**
  * Chat sessions are plain model conversations and have no workspace; agent
- * sessions are bound to a workspace and can run tools inside it.
+ * sessions are bound to a workspace and can run tools inside it; paper
+ * sessions are bound to the global paper library and can search/read papers.
  */
-export type SessionKind = "chat" | "agent";
+export type SessionKind = "chat" | "agent" | "paper";
 
 interface SessionBase {
   id: string;
@@ -52,7 +53,15 @@ export interface AgentSession extends SessionBase {
   workspaceRoot: string;
 }
 
-export type Session = ChatSession | AgentSession;
+export interface PaperSession extends SessionBase {
+  kind: "paper";
+  /** Paper sessions never bind a filesystem workspace. */
+  workspaceRoot: null;
+  /** Papers pinned to this conversation's working context. */
+  paperIds: string[];
+}
+
+export type Session = ChatSession | AgentSession | PaperSession;
 
 export interface DenialRecord {
   command: string;
@@ -124,6 +133,9 @@ export interface AgentToolMeta {
     | "search"
     | "fetch"
     | "image"
+    | "arxiv"
+    | "paper"
+    | "library"
     | "error";
   command?: string;
   cwd?: string;
@@ -153,6 +165,19 @@ export interface AgentToolMeta {
   width?: number;
   height?: number;
   imageDataUrl?: string;
+  /** Paper tools: paper/arXiv identifiers and reading metadata. */
+  paperId?: string;
+  arxivId?: string;
+  paperTitle?: string;
+  authors?: string[];
+  publishedAt?: string | null;
+  pageCount?: number;
+  pageRange?: string;
+  charCount?: number;
+  tags?: string[];
+  libraryStatus?: PaperReadStatus;
+  /** Paper tools: structured result for UI cards (never sent to the model). */
+  data?: unknown;
   truncated?: boolean;
   denied?: boolean;
   spillPaths?: string[];
@@ -209,6 +234,162 @@ export const AGENT_MAX_STEPS_LIMIT = 500;
 export const DEFAULT_AGENT_MAX_STEPS = 500;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
+
+/** Tools available to paper sessions. Kept separate from AGENT_TOOL_NAMES. */
+export const PAPER_TOOL_NAMES = [
+  "arxiv_search",
+  "arxiv_get",
+  "paper_outline",
+  "paper_read",
+  "paper_search",
+  "library_add",
+  "library_search",
+  "library_update",
+  "library_export",
+] as const;
+
+export type PaperToolName = (typeof PAPER_TOOL_NAMES)[number];
+
+export const PAPER_SOURCES = ["arxiv", "upload"] as const;
+export type PaperSource = (typeof PAPER_SOURCES)[number];
+
+export const PAPER_READ_STATUSES = ["unread", "reading", "read"] as const;
+export type PaperReadStatus = (typeof PAPER_READ_STATUSES)[number];
+
+export const PAPER_TEXT_STATUSES = [
+  "none",
+  "pending",
+  "ready",
+  "error",
+] as const;
+export type PaperTextStatus = (typeof PAPER_TEXT_STATUSES)[number];
+
+/** Normalized arXiv metadata shared by the arxiv tools and the library. */
+export interface ArxivPaper {
+  arxivId: string;
+  version: number | null;
+  title: string;
+  authors: string[];
+  abstract: string;
+  categories: string[];
+  primaryCategory: string | null;
+  publishedAt: string;
+  updatedAt: string;
+  pdfUrl: string;
+  absUrl: string;
+  comment: string | null;
+  journalRef: string | null;
+  doi: string | null;
+}
+
+/** One detected section of an extracted PDF. Pages are 1-based and inclusive. */
+export interface PaperSection {
+  title: string;
+  startPage: number;
+  endPage: number;
+}
+
+/** A paper stored in the global library. */
+export interface PaperRecord {
+  id: string;
+  source: PaperSource;
+  arxivId: string | null;
+  version: number | null;
+  title: string;
+  authors: string[];
+  abstract: string;
+  categories: string[];
+  primaryCategory: string | null;
+  publishedAt: string | null;
+  /** Last revision date reported by arXiv (distinct from modifiedAt). */
+  arxivUpdatedAt: string | null;
+  journalRef: string | null;
+  doi: string | null;
+  comment: string | null;
+  pdfUrl: string | null;
+  absUrl: string | null;
+  addedAt: string;
+  modifiedAt: string;
+  lastReadAt: string | null;
+  status: PaperReadStatus;
+  starred: boolean;
+  tags: string[];
+  /** Reserved for a future collections UI. */
+  collections: string[];
+  /** User-authored notes. */
+  notes: string;
+  /** Model-authored structured notes. */
+  summary: string;
+  citationKey: string | null;
+  textStatus: PaperTextStatus;
+  pageCount: number | null;
+  charCount: number | null;
+  extractionError: string | null;
+  /** SHA-256 of the PDF file, used to deduplicate uploads. */
+  fileHash: string | null;
+  fileName: string | null;
+}
+
+export interface PaperListResponse {
+  papers: PaperRecord[];
+  total: number;
+}
+
+export interface PaperQuery {
+  query?: string;
+  tags?: string[];
+  status?: PaperReadStatus;
+  starred?: boolean;
+  collection?: string;
+  arxivId?: string;
+  sort?: "added" | "published" | "title" | "lastRead";
+  limit?: number;
+  offset?: number;
+}
+
+export interface PaperCreateInput {
+  arxivId?: string;
+  /** arXiv abs/pdf/html URL; the service extracts the identifier. */
+  url?: string;
+  tags?: string[];
+  collections?: string[];
+  status?: PaperReadStatus;
+}
+
+export interface PaperUpdateInput {
+  title?: string;
+  authors?: string[];
+  abstract?: string;
+  tags?: string[];
+  collections?: string[];
+  status?: PaperReadStatus;
+  starred?: boolean;
+  notes?: string;
+  summary?: string;
+  citationKey?: string | null;
+}
+
+export interface PaperUploadInput {
+  title?: string;
+  authors?: string[];
+  tags?: string[];
+  collections?: string[];
+  status?: PaperReadStatus;
+}
+
+export interface PaperContextInput {
+  add?: string[];
+  remove?: string[];
+  paperIds?: string[];
+}
+
+/** Structured outline returned by paper_outline. */
+export interface PaperOutline {
+  paperId: string;
+  pageCount: number;
+  charCount: number;
+  sections: PaperSection[];
+}
 
 export interface AgentSettingsPublic {
   maxSteps: number;
@@ -347,7 +528,13 @@ export type AuditType =
   | "search.config.changed"
   | "llm.chat"
   | "agent.run"
-  | "agent.tool";
+  | "agent.tool"
+  | "paper.run"
+  | "paper.added"
+  | "paper.updated"
+  | "paper.deleted"
+  | "paper.extracted"
+  | "paper.context.changed";
 
 export interface AuditEvent {
   ts: string;

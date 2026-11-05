@@ -11,6 +11,9 @@ function isApiPath(url: string): boolean {
 
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
 
+/** Multipart is only accepted by the paper upload endpoint. */
+const MULTIPART_PATHS = new Set(["/api/papers/upload"]);
+
 /**
  * Local-only service hardening: bearer token, localhost Origin allow-list,
  * JSON Content-Type enforcement, and conservative response headers.
@@ -38,12 +41,17 @@ export function registerSecurity(app: FastifyInstance, token: string): void {
       }
     }
 
+    const path = request.url.split("?")[0] ?? "";
     if (!isApiPath(request.url)) return;
-    if (request.url.split("?")[0] === "/api/health") return;
+    if (path === "/api/health") return;
 
     if (BODY_METHODS.has(request.method)) {
       const contentType = String(request.headers["content-type"] ?? "").toLowerCase();
-      if (!contentType.startsWith("application/json")) {
+      const isJson = contentType.startsWith("application/json");
+      const isUpload =
+        MULTIPART_PATHS.has(path) &&
+        contentType.startsWith("multipart/form-data");
+      if (!isJson && !isUpload) {
         throw new AppError(
           "UNSUPPORTED_MEDIA_TYPE",
           "Content-Type must be application/json",

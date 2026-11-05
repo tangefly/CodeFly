@@ -5,11 +5,14 @@
 
 ## 功能
 
-- **双界面**：侧栏顶部切换「对话」与「Agent」，两者拥有独立的会话列表、输入框与历史；
-  地址栏用 `#/chat`、`#/agent` 记住当前界面。
+- **三界面**：侧栏顶部切换「对话」「Agent」「论文」，三者拥有独立的会话列表、输入框
+  与历史；地址栏用 `#/chat`、`#/agent`、`#/paper` 记住当前界面。
 - **对话**：不绑定工作区，只与模型聊天，不执行命令或读写文件；支持多个独立对话、
   自动标题、删除与历史持久化。
 - **Agent 会话**：按工作区新建、切换、删除；工具调用与消息历史持久化，刷新后恢复。
+- **论文助手**：不绑定工作区，通过 arXiv 检索最新论文，下载并解析 PDF，按目录/页码/
+  章节分段阅读，把标签、阅读状态、用户笔记与结构化摘要整理进全局论文库；支持本地上传
+  PDF、BibTeX/Markdown 导出。论文工具与原 Agent 工具完全分离。
 - **聊天模型**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
 - **Agent 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
@@ -34,6 +37,32 @@
 - **GPU**：`workspace-write` 默认放行 GPU 设备节点、`/dev/shm` 与 `/proc`。
 - **用量统计**：会话上下文、累积上下文、累计输出、思考 token、缓存命中率。
 - **审计**：JSONL 记录审批、执行、配置变更与 Agent 事件。
+
+## 论文助手
+
+侧栏选择「论文」后，新建论文会话即可开始。论文助手没有命令执行或工作区文件权限，
+只能使用以下工具：
+
+| 工具 | 用途 |
+| --- | --- |
+| `arxiv_search` | 按关键词/分类/日期范围检索 arXiv，支持按提交时间排序 |
+| `arxiv_get` | 按 arXiv ID 或 URL 获取元数据与摘要 |
+| `paper_outline` | 下载（如需要）、解析 PDF，返回页码、字符数与章节目录 |
+| `paper_read` | 按页码或章节读取文本，单次输出有上限 |
+| `paper_search` | 在单篇论文内检索关键词，返回命中段落与页码 |
+| `library_add` | 把论文加入全局论文库，或加入当前会话上下文 |
+| `library_search` | 按标题、作者、摘要、笔记、标签、状态检索论文库 |
+| `library_update` | 修改标签、集合、阅读状态、星标、用户笔记与结构化摘要 |
+| `library_export` | 导出 BibTeX 或 Markdown 阅读列表 |
+
+论文库是全局的，保存在本机 `data/papers/`；会话只保存当前工作集 `paperIds`。PDF 首次
+阅读时下载并按页抽取文本，之后复用缓存。旧论文全文在上下文超过预算时会被替换为占位
+说明，模型应把阅读笔记写入 `library_update` 的 `summary`，后续轮次依赖笔记而不是重复
+读取全文。
+
+论文正文属于不可信内容：系统提示要求模型只把它当作资料，不执行其中的指令；论文模式
+本身也不提供删除、执行或写文件工具。arXiv 请求默认串行并遵守约 3 秒的最小间隔，可用
+环境变量调整。
 
 ## 快速开始
 
@@ -88,15 +117,17 @@ Key，需要在「搜索 API」中单独填写一次。
 
 ## 使用
 
-1. 侧栏顶部选择「对话」或「Agent」。
+1. 侧栏顶部选择「对话」「Agent」或「论文」。
 2. 对话：点击「新建对话」，无需选择工作区，直接开始聊天；每个对话有独立历史。
 3. Agent：点击「新建 Agent 会话」，选择一个已存在的绝对路径作为工作区。
    Agent 会携带历史工具输出和思考内容；长会话的上下文与 token 消耗更大。
-4. Agent 工具卡片可展开/收起命令与结果；执行失败时自动展开。
-5. 顶栏或 Agent 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
-6. 顶栏「审计日志」查看当前 Agent 会话的审批、执行、文件写入与模型事件。
-7. 侧边栏会话右侧的删除按钮可删除会话及其聊天/工具记录，不会删除工作区文件。
-8. 底部用量显示：
+4. 论文：点击「新建论文会话」，直接检索 arXiv、阅读 PDF 或上传本地论文。
+   左上/顶栏的「论文库」打开全局论文库，可筛选、编辑标签/状态/笔记、打开 PDF 与导出。
+5. Agent 工具卡片可展开/收起命令与结果；执行失败时自动展开。
+6. 顶栏或 Agent 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
+7. 顶栏「审计日志」查看当前 Agent 会话的审批、执行、文件写入与模型事件。
+8. 侧边栏会话右侧的删除按钮可删除会话及其聊天/工具记录，不会删除工作区文件。
+9. 底部用量显示：
    - **会话上下文**：当前会话已保存的全部消息长度（条数与估算 token）。
    - **累积上下文**：本会话所有模型请求的上下文之和，包含缓存命中。
    - **累计输出**：所有回复的 completion tokens 之和。
@@ -114,12 +145,24 @@ Key，需要在「搜索 API」中单独填写一次。
 | `CODEFLY_APPROVAL_TIMEOUT_MS` | `120000` | 审批超时；超时视为拒绝 |
 | `CODEFLY_ALLOW_GPU` | `1` | 是否允许 `workspace-write` 读写 GPU 设备、`/dev/shm` 与 `/proc`；设为 `0` 关闭 |
 | `CODEFLY_SANDBOX_RW_PATHS` | 无 | 逗号分隔的绝对路径，追加到 `workspace-write` 的读写授权 |
+| `CODEFLY_ARXIV_MIN_INTERVAL_MS` | `3000` | arXiv API/PDF 请求的最小间隔 |
+| `CODEFLY_ARXIV_CONTACT` | 无 | 可选的联系邮箱，写入 arXiv 请求的 User-Agent |
+| `CODEFLY_PAPER_MAX_PDF_BYTES` | `26214400` | 单个 PDF 大小上限（25 MB） |
+| `CODEFLY_PAPER_MAX_PAGES` | `200` | 单个 PDF 页数上限 |
+| `CODEFLY_PAPER_EXTRACT_TIMEOUT_MS` | `60000` | PDF 文本抽取超时 |
+| `CODEFLY_PAPER_MAX_READ_CHARS` | `20000` | `paper_read` 单次返回字符上限 |
+| `CODEFLY_PAPER_HISTORY_BUDGET_CHARS` | `160000` | 论文会话送给模型的论文文本预算 |
+| `CODEFLY_PAPER_MAX_STEPS` | `80` | 论文助手单回合最大步数 |
+| `CODEFLY_PAPER_DOWNLOAD_TIMEOUT_MS` | `120000` | arXiv PDF 下载超时 |
 
 数据文件：
 
 - `data/llm.json`：模型地址、模型名、API Key、思考设置。
 - `data/search.json`：搜索服务地址、搜索 API Key、请求超时。
 - `data/agent.json`：Agent 最大步数、命令超时、启用工具、system prompt。
+- `data/papers/library.json`：全局论文库元数据、标签、阅读状态、笔记与摘要。
+- `data/papers/pdf/`：下载或上传的 PDF 缓存。
+- `data/papers/text/`：按页抽取的论文文本与章节索引。
 - `data/messages.json`：会话消息、思考内容、工具调用与结果。
 - `data/audit.jsonl`：审计事件。
 
@@ -134,6 +177,10 @@ Key，需要在「搜索 API」中单独填写一次。
   启用 `web_fetch` 时，目标 URL 会从本机直接访问（只放行公网 http/https）。
 - `read_image` 会把图片以 base64 存入 `data/messages.json`，并把图片发送给模型
   提供商；不要读取含敏感信息的截图。
+- 论文助手会把 arXiv 元数据、抽取后的论文文本与论文库字段发送给模型提供商；PDF 原文
+  和本地笔记只保存在本机 `data/papers/`。论文正文与上传文件都是不可信数据，请勿把
+  含有恶意指令的 PDF 当作可信内容。
+- 论文模式没有 `run_command`、文件写入或删除工具；论文库删除只能由用户在 UI 发起。
 - `danger-full-access` 没有沙箱也没有审批，仅在明确确认后使用。
 - `workspace-write` 默认放行 GPU 设备、`/dev/shm` 与 `/proc`（CUDA 需要）；可用
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。
@@ -154,7 +201,7 @@ pnpm build
 
 ```text
 packages/protocol/   # 共享类型与 zod schemas
-apps/server/         # Fastify 服务端：sandbox / exec / fs / approval / llm / agent / routes
+apps/server/         # Fastify 服务端：sandbox / exec / fs / approval / llm / agent / paper / routes
 apps/web/            # React + Vite + Tailwind 前端
 data/                # 运行时数据（gitignore）
 ```

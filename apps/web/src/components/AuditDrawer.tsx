@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Activity, RefreshCw, X } from "lucide-react";
 import type { AuditEvent } from "@codefly/protocol";
-import { selectCurrentAgentSession, useAppStore } from "../lib/store.js";
+import { selectCurrentSession, useAppStore } from "../lib/store.js";
 import { MODE_LABEL, cn } from "../lib/utils.js";
 import { Button } from "./ui.js";
 
@@ -27,9 +27,33 @@ function toneFor(event: AuditEvent): string {
 function summarize(event: AuditEvent): string {
   switch (event.type) {
     case "session.created":
+      if (event.kind === "paper") return "论文会话";
+      if (event.kind === "chat") return "对话会话";
       return `工作区 ${String(event.workspaceRoot ?? "")}`;
     case "session.deleted":
       return "会话已删除";
+    case "paper.added":
+      return `${String(event.title ?? event.arxivId ?? "")} · ${String(
+        event.source ?? "arxiv",
+      )}`;
+    case "paper.updated":
+      return `字段 ${Array.isArray(event.fields) ? event.fields.join(", ") : ""}`;
+    case "paper.deleted":
+      return String(event.title ?? event.paperId ?? "");
+    case "paper.extracted":
+      return `${String(event.pageCount ?? "?")} 页 · ${String(
+        event.charCount ?? "?",
+      )} 字符`;
+    case "paper.context.changed":
+      return `+${String((event.add as string[] | undefined)?.length ?? 0)} / -${String(
+        (event.remove as string[] | undefined)?.length ?? 0,
+      )}`;
+    case "paper.run":
+      return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
+    case "agent.run":
+      return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
+    case "agent.tool":
+      return `${String(event.toolName ?? "")} · ${String(event.status ?? "")}`;
     case "permission.changed": {
       const from = event.from as { mode?: string } | undefined;
       const to = event.to as { mode?: string } | undefined;
@@ -112,7 +136,7 @@ export function AuditDrawer() {
   const close = useAppStore((state) => state.closeAudit);
   const refreshAudit = useAppStore((state) => state.refreshAudit);
   const audit = useAppStore((state) => state.audit);
-  const session = useAppStore(selectCurrentAgentSession);
+  const session = useAppStore(selectCurrentSession);
   const [refreshing, setRefreshing] = useState(false);
 
   const refresh = async (): Promise<void> => {

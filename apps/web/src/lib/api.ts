@@ -9,6 +9,11 @@ import type {
   LlmSettingsPublic,
   LlmTestInput,
   LlmTestResult,
+  PaperContextInput,
+  PaperListResponse,
+  PaperOutline,
+  PaperRecord,
+  PaperUpdateInput,
   SandboxMode,
   SearchSettingsInput,
   SearchSettingsPublic,
@@ -64,7 +69,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body !== undefined && !headers.has("Content-Type")) {
+  if (
+    init.body !== undefined &&
+    !(init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -188,6 +197,125 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     });
+  },
+
+  listPapers(query: {
+    query?: string;
+    tags?: string[];
+    status?: string;
+    starred?: boolean;
+    collection?: string;
+    sort?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<PaperListResponse> {
+    const params = new URLSearchParams();
+    if (query.query) params.set("query", query.query);
+    if (query.tags && query.tags.length > 0) {
+      params.set("tags", query.tags.join(","));
+    }
+    if (query.status) params.set("status", query.status);
+    if (query.starred !== undefined) {
+      params.set("starred", query.starred ? "true" : "false");
+    }
+    if (query.collection) params.set("collection", query.collection);
+    if (query.sort) params.set("sort", query.sort);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    if (query.offset !== undefined) params.set("offset", String(query.offset));
+    const suffix = params.toString() === "" ? "" : `?${params.toString()}`;
+    return request(`/api/papers${suffix}`);
+  },
+
+  getPaper(paperId: string): Promise<{ paper: PaperRecord }> {
+    return request(`/api/papers/${paperId}`);
+  },
+
+  paperTags(): Promise<{ tags: string[]; collections: string[] }> {
+    return request("/api/papers/tags");
+  },
+
+  addPaper(input: {
+    arxivId?: string;
+    url?: string;
+    tags?: string[];
+    collections?: string[];
+    status?: string;
+  }): Promise<{ paper: PaperRecord; created: boolean }> {
+    return request("/api/papers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updatePaper(
+    paperId: string,
+    input: PaperUpdateInput,
+  ): Promise<{ paper: PaperRecord }> {
+    return request(`/api/papers/${paperId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deletePaper(paperId: string): Promise<void> {
+    return request(`/api/papers/${paperId}`, { method: "DELETE" });
+  },
+
+  uploadPaper(form: FormData): Promise<{ paper: PaperRecord; created: boolean }> {
+    return request("/api/papers/upload", {
+      method: "POST",
+      body: form,
+    });
+  },
+
+  extractPaper(
+    paperId: string,
+  ): Promise<{ paper: PaperRecord; outline: PaperOutline }> {
+    return request(`/api/papers/${paperId}/extract`, {
+      method: "POST",
+      body: "{}",
+    });
+  },
+
+  exportPapers(input: {
+    format: "bibtex" | "markdown";
+    ids?: string[];
+    collection?: string;
+  }): Promise<{ format: string; count: number; content: string }> {
+    const params = new URLSearchParams({ format: input.format });
+    if (input.ids && input.ids.length > 0) {
+      params.set("ids", input.ids.join(","));
+    }
+    if (input.collection) params.set("collection", input.collection);
+    return request(`/api/papers/export?${params.toString()}`);
+  },
+
+  updatePaperContext(
+    sessionId: string,
+    input: PaperContextInput,
+  ): Promise<{ session: Session }> {
+    return request(`/api/sessions/${sessionId}/paper-context`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async paperPdf(paperId: string): Promise<Blob> {
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(`/api/papers/${paperId}/pdf`, { headers });
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: { code?: string; message?: string } }
+        | null;
+      throw new ApiError(
+        response.status,
+        payload?.error?.code ?? "HTTP_ERROR",
+        payload?.error?.message ?? response.statusText,
+      );
+    }
+    return response.blob();
   },
 
   getAgentSettings(): Promise<{ settings: AgentSettingsPublic }> {

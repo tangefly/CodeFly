@@ -6,6 +6,7 @@ import type {
   ApprovalPolicy,
   ChatSession,
   DenialRecord,
+  PaperSession,
   SandboxMode,
   Session,
   SessionKind,
@@ -20,6 +21,7 @@ interface StoredSession {
   titleSource?: unknown;
   kind?: unknown;
   workspaceRoot?: unknown;
+  paperIds?: unknown;
   mode?: unknown;
   approvalPolicy?: unknown;
   createdAt?: unknown;
@@ -32,6 +34,18 @@ interface SessionFile {
 }
 
 const CHAT_DEFAULT_TITLE = "新对话";
+const PAPER_DEFAULT_TITLE = "新论文会话";
+
+function asPaperIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter(
+        (item): item is string => typeof item === "string" && item.trim() !== "",
+      ),
+    ),
+  ];
+}
 
 function isMode(value: unknown): value is SandboxMode {
   return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
@@ -83,7 +97,12 @@ export class SessionStore {
         if (typeof session.id !== "string") continue;
         // Sessions written before the chat/agent split always have a
         // workspace and are treated as agent sessions.
-        const kind = session.kind === "chat" ? "chat" : "agent";
+        const kind =
+          session.kind === "chat"
+            ? "chat"
+            : session.kind === "paper"
+              ? "paper"
+              : "agent";
         const approvalPolicy =
           session.approvalPolicy === "never" ? "never" : "ask";
         const mode = isMode(session.mode) ? session.mode : "workspace-write";
@@ -108,6 +127,32 @@ export class SessionStore {
             workspaceRoot: null,
             mode,
             approvalPolicy,
+            createdAt,
+            updatedAt,
+            lastDenial: null,
+          });
+          continue;
+        }
+
+        if (kind === "paper") {
+          const title =
+            typeof session.title === "string" && session.title.trim() !== ""
+              ? session.title
+              : PAPER_DEFAULT_TITLE;
+          const titleSource = isTitleSource(session.titleSource)
+            ? session.titleSource
+            : title === PAPER_DEFAULT_TITLE
+              ? "default"
+              : "user";
+          this.sessions.set(session.id, {
+            id: session.id,
+            kind: "paper",
+            title,
+            titleSource,
+            workspaceRoot: null,
+            paperIds: asPaperIds(session.paperIds),
+            mode: "read-only",
+            approvalPolicy: "never",
             createdAt,
             updatedAt,
             lastDenial: null,
@@ -166,7 +211,7 @@ export class SessionStore {
     if (session.kind !== "agent") {
       throw new AppError(
         "WRONG_SESSION_KIND",
-        "该会话是对话会话，不能执行 Agent 操作。",
+        "该会话不是 Agent 会话，不能执行 Agent 操作。",
         400,
       );
     }
@@ -178,7 +223,19 @@ export class SessionStore {
     if (session.kind !== "chat") {
       throw new AppError(
         "WRONG_SESSION_KIND",
-        "该会话是 Agent 会话，不能用于普通对话。",
+        "该会话不是普通对话会话。",
+        400,
+      );
+    }
+    return session;
+  }
+
+  getPaperOrThrow(id: string): PaperSession {
+    const session = this.getOrThrow(id);
+    if (session.kind !== "paper") {
+      throw new AppError(
+        "WRONG_SESSION_KIND",
+        "该会话不是论文助手会话。",
         400,
       );
     }
@@ -198,6 +255,25 @@ export class SessionStore {
     const preset = presetForMode(defaultMode);
     const now = new Date().toISOString();
     const customTitle = title?.trim() ?? "";
+
+    if (kind === "paper") {
+      const session: PaperSession = {
+        id: `s_${randomUUID()}`,
+        kind: "paper",
+        title: customTitle !== "" ? customTitle : PAPER_DEFAULT_TITLE,
+        titleSource: customTitle !== "" ? "user" : "default",
+        workspaceRoot: null,
+        paperIds: [],
+        mode: "read-only",
+        approvalPolicy: "never",
+        createdAt: now,
+        updatedAt: now,
+        lastDenial: null,
+      };
+      this.sessions.set(session.id, session);
+      await this.persist();
+      return session;
+    }
 
     if (kind === "chat") {
       const session: ChatSession = {
@@ -290,6 +366,29 @@ export class SessionStore {
   async delete(id: string): Promise<void> {
     if (!this.sessions.delete(id)) return;
     await this.persist();
+  }
+
+  /**
+   * Appends one paper id synchronously before persisting, so concurrent
+   * read-only tool calls cannot lose each other's additions.
+   */
+  async addPaperToContext(id: string, paperId: string): Promise<PaperSession> {
+    const session = this.getPaperOrThrow(id);
+    if (!session.paperIds.includes(paperId)) {
+      session.paperIds = [...session.paperIds, paperId];
+      session.updatedAt = new Date().toISOString();
+      await this.persist();
+    }
+    return session;
+  }
+
+  /** Replaces the paper working set of a paper session. */
+  async updatePaperContext(id: string, paperIds: string[]): Promise<PaperSession> {
+    const session = this.getPaperOrThrow(id);
+    session.paperIds = asPaperIds(paperIds);
+    session.updatedAt = new Date().toISOString();
+    await this.persist();
+    return session;
   }
 
   async updatePermissions(

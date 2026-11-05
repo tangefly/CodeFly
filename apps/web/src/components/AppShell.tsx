@@ -4,6 +4,7 @@ import { cn } from "../lib/utils.js";
 import { ApprovalDialog } from "./ApprovalDialog.js";
 import { AgentShell } from "./agent/AgentShell.js";
 import { ChatShell } from "./chat/ChatShell.js";
+import { PaperShell } from "./paper/PaperShell.js";
 
 function NotificationToast() {
   const notification = useAppStore((state) => state.notification);
@@ -49,7 +50,13 @@ export function AppShell() {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-background text-foreground">
-      {mode === "chat" ? <ChatShell /> : <AgentShell />}
+      {mode === "chat" ? (
+        <ChatShell />
+      ) : mode === "agent" ? (
+        <AgentShell />
+      ) : (
+        <PaperShell />
+      )}
       {/* Approvals belong to agent runs, but a run keeps going (or waits) when
           the user switches to chat; surfacing the dialog globally avoids
           silently blocking a background run until it times out. */}

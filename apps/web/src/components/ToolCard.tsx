@@ -13,10 +13,13 @@ import {
   Terminal,
 } from "lucide-react";
 import type { ToolMessage } from "../lib/store.js";
+import { PAPER_TOOL_LABEL, isPaperTool } from "../lib/tool-labels.js";
 import { cn, formatDuration } from "../lib/utils.js";
+import { PaperToolCard } from "./paper/PaperToolCard.js";
 import { Button } from "./ui.js";
 
 export const TOOL_LABEL: Record<string, string> = {
+  ...PAPER_TOOL_LABEL,
   run_command: "运行命令",
   read_file: "读取文件",
   write_file: "写入文件",
@@ -69,6 +72,13 @@ function statusMeta(message: ToolMessage): {
 }
 
 export function ToolCard({ message }: { message: ToolMessage }) {
+  if (isPaperTool(message.toolName)) {
+    return <PaperToolCard message={message} />;
+  }
+  return <StandardToolCard message={message} />;
+}
+
+function StandardToolCard({ message }: { message: ToolMessage }) {
   const [copied, setCopied] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [outputOpen, setOutputOpen] = useState(message.status === "error");

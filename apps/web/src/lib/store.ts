@@ -17,6 +17,10 @@ import type {
   LlmSettingsPublic,
   LlmTestInput,
   LlmTestResult,
+  PaperReadStatus,
+  PaperRecord,
+  PaperSession,
+  PaperUpdateInput,
   SandboxMode,
   SandboxStatus,
   SearchSettingsInput,
@@ -63,6 +67,8 @@ export interface ToolMessage extends BaseMessage {
   arguments: string;
   content: string;
   status: "running" | "complete" | "error" | "cancelled";
+  /** Transient progress text from SSE; not persisted. */
+  progress?: string;
   meta?: AgentToolMeta;
 }
 
@@ -87,6 +93,7 @@ interface UiState {
   llmSettingsOpen: boolean;
   agentSettingsOpen: boolean;
   searchSettingsOpen: boolean;
+  paperLibraryOpen: boolean;
 }
 
 interface Notification {
@@ -116,8 +123,29 @@ export interface AppState {
   chatBusy: Record<string, boolean>;
   /** Per-session agent run in flight. */
   agentBusy: Record<string, boolean>;
+  /** Per-session paper run in flight. */
+  paperBusy: Record<string, boolean>;
   /** A chat session creation request is in flight. */
   chatCreating: boolean;
+  /** A paper session creation request is in flight. */
+  paperCreating: boolean;
+  /** Filtered library view used by the drawer. */
+  papers: PaperRecord[];
+  /** Every paper seen so far, regardless of the active library filter. */
+  paperIndex: Record<string, PaperRecord>;
+  paperTotal: number;
+  paperTags: string[];
+  paperCollections: string[];
+  paperLoading: boolean;
+  paperUploading: boolean;
+  paperDetailId: string | null;
+  paperQuery: {
+    query: string;
+    status: PaperReadStatus | "";
+    tag: string;
+    collection: string;
+    sort: "added" | "published" | "title" | "lastRead";
+  };
   ui: UiState;
 
   init(): Promise<void>;
@@ -127,6 +155,7 @@ export interface AppState {
   ensureMessagesLoaded(sessionId: string): Promise<void>;
   createSession(workspaceRoot: string, title?: string): Promise<boolean>;
   createChatSession(title?: string): Promise<boolean>;
+  createPaperSession(title?: string): Promise<boolean>;
   deleteSession(sessionId: string): Promise<boolean>;
   updatePermissions(mode: SandboxMode, confirmRisk?: boolean): Promise<boolean>;
   decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
@@ -134,6 +163,21 @@ export interface AppState {
   cancelChat(): void;
   sendAgent(text: string): Promise<void>;
   cancelAgent(): void;
+  sendPaper(text: string): Promise<void>;
+  cancelPaper(): void;
+  loadPapers(): Promise<void>;
+  addPaperByArxiv(ref: string): Promise<PaperRecord | null>;
+  updatePaper(paperId: string, patch: PaperUpdateInput): Promise<boolean>;
+  deletePaper(paperId: string): Promise<boolean>;
+  uploadPaper(file: File): Promise<boolean>;
+  extractPaper(paperId: string): Promise<boolean>;
+  addPaperToContext(paperId: string): Promise<boolean>;
+  removePaperFromContext(paperId: string): Promise<boolean>;
+  openPaperDetail(paperId: string): void;
+  closePaperDetail(): void;
+  openPaperLibrary(): void;
+  closePaperLibrary(): void;
+  setPaperQuery(patch: Partial<AppState["paperQuery"]>): void;
   saveLlmSettings(input: LlmSettingsInput): Promise<boolean>;
   testLlm(input: LlmTestInput): Promise<LlmTestResult>;
   saveSearchSettings(input: SearchSettingsInput): Promise<boolean>;
@@ -163,12 +207,14 @@ const MODE_KEY = "codefly.mode";
 const CURRENT_SESSION_KEYS: Record<SessionKind, string> = {
   chat: "codefly.currentSession.chat",
   agent: "codefly.currentSession.agent",
+  paper: "codefly.currentSession.paper",
 };
 /** Key written before chat and agent were split; still read for agent mode. */
 const LEGACY_CURRENT_SESSION_KEY = "codefly.currentSession";
 
 const chatAborters = new Map<string, AbortController>();
 const agentAborters = new Map<string, AbortController>();
+const paperAborters = new Map<string, AbortController>();
 const loadedSessionIds = new Set<string>();
 
 function readStoredSessionId(kind: SessionKind): string | null {
@@ -196,11 +242,13 @@ function storeCurrentSessionId(kind: SessionKind, id: string | null): void {
 function readStoredMode(): SessionKind {
   if (typeof window !== "undefined") {
     const hash = window.location.hash.replace(/^#\/?/, "");
-    if (hash === "chat" || hash === "agent") return hash;
+    if (hash === "chat" || hash === "agent" || hash === "paper") return hash;
   }
   try {
     const stored = localStorage.getItem(MODE_KEY);
-    if (stored === "chat" || stored === "agent") return stored;
+    if (stored === "chat" || stored === "agent" || stored === "paper") {
+      return stored;
+    }
   } catch {
     // Ignore storage failures.
   }
@@ -254,6 +302,14 @@ function patchAssistant(
         : message,
     ),
   );
+}
+
+function upsertPaper(list: PaperRecord[], paper: PaperRecord): PaperRecord[] {
+  const index = list.findIndex((candidate) => candidate.id === paper.id);
+  if (index < 0) return [paper, ...list];
+  const next = [...list];
+  next[index] = paper;
+  return next;
 }
 
 function systemMessage(text: string): SystemMessage {
@@ -382,7 +438,223 @@ function upsertStoredMessage(
   });
 }
 
-export const useAppStore = create<AppState>()((set, get) => ({
+export const useAppStore = create<AppState>()((set, get) => {
+  /**
+   * Shared streaming loop for Agent and paper sessions. Their SSE event
+   * contract is identical; only the endpoint and busy bookkeeping differ.
+   */
+  const streamToolRun = async (
+    kind: "agent" | "paper",
+    text: string,
+  ): Promise<void> => {
+    const state = get();
+    const sessionId = state.currentSessionId;
+    if (!sessionId) return;
+    const session = state.sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.kind !== kind) return;
+    const content = text.trim();
+    if (!content) return;
+
+    if (!state.llmSettings?.configured) {
+      get().notify(
+        "info",
+        kind === "paper" ? "论文助手需要先配置模型 API" : "Agent 需要先配置模型 API",
+      );
+      get().openLlmSettings();
+      return;
+    }
+    if (
+      state.chatBusy[sessionId] ||
+      state.agentBusy[sessionId] ||
+      state.paperBusy[sessionId] ||
+      chatAborters.has(sessionId) ||
+      agentAborters.has(sessionId) ||
+      paperAborters.has(sessionId)
+    ) {
+      get().notify("info", "当前会话正在执行回合，请等待结束或先停止");
+      return;
+    }
+
+    const controller = new AbortController();
+    const aborters = kind === "agent" ? agentAborters : paperAborters;
+    aborters.set(sessionId, controller);
+    if (kind === "agent") {
+      set((current) => ({
+        agentBusy: { ...current.agentBusy, [sessionId]: true },
+      }));
+    } else {
+      set((current) => ({
+        paperBusy: { ...current.paperBusy, [sessionId]: true },
+      }));
+    }
+
+    let finished = false;
+    const approvalsAdded = new Set<string>();
+    try {
+      await streamSse<AgentEvent>({
+        url: `/api/sessions/${sessionId}/${kind}`,
+        method: "POST",
+        body: { message: content },
+        signal: controller.signal,
+        onEvent: (event) => {
+          switch (event.type) {
+            case "agent.started":
+              set((current) =>
+                upsertStoredMessage(current, sessionId, event.userMessage),
+              );
+              break;
+            case "agent.step":
+              set((current) =>
+                upsertStoredMessage(current, sessionId, event.message, true),
+              );
+              break;
+            case "agent.delta":
+              set((current) =>
+                patchAssistant(current, sessionId, event.messageId, (message) => ({
+                  ...message,
+                  text: message.text + event.data,
+                })),
+              );
+              break;
+            case "agent.reasoning":
+              set((current) =>
+                patchAssistant(current, sessionId, event.messageId, (message) => ({
+                  ...message,
+                  reasoning: (message.reasoning ?? "") + event.data,
+                })),
+              );
+              break;
+            case "agent.message":
+              set((current) =>
+                upsertStoredMessage(current, sessionId, event.message),
+              );
+              break;
+            case "agent.tool.started":
+            case "agent.tool.finished":
+              set((current) =>
+                upsertStoredMessage(current, sessionId, event.message),
+              );
+              break;
+            case "agent.tool.progress":
+              set((current) =>
+                withMessages(current, sessionId, (list) =>
+                  list.map((message) =>
+                    message.kind === "tool" && message.id === event.messageId
+                      ? { ...message, progress: event.data }
+                      : message,
+                  ),
+                ),
+              );
+              break;
+            case "agent.approval_required": {
+              const approval: ApprovalRequest = {
+                id: event.approvalId,
+                kind: "exec",
+                toolName: "run_command",
+                sessionId,
+                execId: event.execId,
+                currentMode: event.currentMode,
+                requestedMode: event.requestedMode,
+                command: event.command,
+                justification: event.justification,
+                createdAt: new Date().toISOString(),
+                expiresAt: event.expiresAt,
+              };
+              approvalsAdded.add(approval.id);
+              set((current) => ({
+                approvals: [
+                  ...current.approvals.filter(
+                    (candidate) => candidate.id !== approval.id,
+                  ),
+                  approval,
+                ].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+              }));
+              break;
+            }
+            case "agent.approval_decided":
+              set((current) => ({
+                approvals: current.approvals.filter(
+                  (candidate) => candidate.id !== event.approvalId,
+                ),
+              }));
+              break;
+            case "agent.done":
+              finished = true;
+              set((current) =>
+                upsertStoredMessage(current, sessionId, event.message),
+              );
+              break;
+            case "agent.error": {
+              finished = true;
+              const messageId = event.messageId;
+              if (messageId) {
+                set((current) =>
+                  patchAssistant(
+                    current,
+                    sessionId,
+                    messageId,
+                    (message) => ({
+                      ...message,
+                      streaming: false,
+                      error: event.message,
+                    }),
+                  ),
+                );
+              } else {
+                get().notify("error", event.message);
+              }
+              break;
+            }
+            case "session.updated":
+              set((current) => ({
+                sessions: current.sessions.map((candidate) =>
+                  candidate.id === event.session.id ? event.session : candidate,
+                ),
+              }));
+              break;
+          }
+        },
+      });
+
+      if (!finished) {
+        set((current) =>
+          settleAgentStreaming(current, sessionId, { cancelled: true }),
+        );
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        set((current) =>
+          settleAgentStreaming(current, sessionId, { cancelled: true }),
+        );
+      } else {
+        const message = asApiError(error).message;
+        set((current) =>
+          settleAgentStreaming(current, sessionId, { error: message }),
+        );
+        get().notify("error", message);
+      }
+    } finally {
+      aborters.delete(sessionId);
+      if (kind === "agent") {
+        set((current) => ({
+          agentBusy: { ...current.agentBusy, [sessionId]: false },
+          ...(approvalsAdded.size > 0
+            ? {
+                approvals: current.approvals.filter(
+                  (approval) => !approvalsAdded.has(approval.id),
+                ),
+              }
+            : {}),
+        }));
+      } else {
+        set((current) => ({
+          paperBusy: { ...current.paperBusy, [sessionId]: false },
+        }));
+      }
+    }
+  };
+
+  return {
   phase: "loading",
   mode: readStoredMode(),
   error: null,
@@ -400,7 +672,24 @@ export const useAppStore = create<AppState>()((set, get) => ({
   audit: [],
   chatBusy: {},
   agentBusy: {},
+  paperBusy: {},
   chatCreating: false,
+  paperCreating: false,
+  papers: [],
+  paperIndex: {},
+  paperTotal: 0,
+  paperTags: [],
+  paperCollections: [],
+  paperLoading: false,
+  paperUploading: false,
+  paperDetailId: null,
+  paperQuery: {
+    query: "",
+    status: "",
+    tag: "",
+    collection: "",
+    sort: "added",
+  },
   ui: {
     sidebarOpen: false,
     newSessionOpen: false,
@@ -409,6 +698,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     llmSettingsOpen: false,
     agentSettingsOpen: false,
     searchSettingsOpen: false,
+    paperLibraryOpen: false,
   },
 
   init: async () => {
@@ -426,6 +716,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
         llmResponse,
         searchResponse,
         agentResponse,
+        paperResponse,
+        paperTagResponse,
       ] = await Promise.all([
         api.health(),
         api.listSessions(),
@@ -433,6 +725,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
         api.getLlmSettings(),
         api.getSearchSettings(),
         api.getAgentSettings(),
+        api.listPapers({ limit: 200 }),
+        api.paperTags(),
       ]);
 
       const sessions = sessionsResponse.sessions;
@@ -461,6 +755,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
         llmSettings: llmResponse.settings,
         searchSettings: searchResponse.settings,
         agentSettings: agentResponse.settings,
+        papers: paperResponse.papers,
+        paperIndex: Object.fromEntries(
+          paperResponse.papers.map((paper) => [paper.id, paper]),
+        ),
+        paperTotal: paperResponse.total,
+        paperTags: paperTagResponse.tags,
+        paperCollections: paperTagResponse.collections,
         sandbox: health.sandbox,
         dev: health.dev,
       });
@@ -602,6 +903,28 @@ export const useAppStore = create<AppState>()((set, get) => ({
     }
   },
 
+  createPaperSession: async (title?: string) => {
+    if (get().paperCreating) return false;
+    set({ paperCreating: true });
+    try {
+      const { session } = await api.createSession({ kind: "paper", title });
+      loadedSessionIds.add(session.id);
+      set((state) => ({
+        sessions: [session, ...state.sessions],
+        currentSessionId: session.id,
+        paperCreating: false,
+        messages: { ...state.messages, [session.id]: [] },
+        ui: { ...state.ui, newSessionOpen: false, sidebarOpen: false },
+      }));
+      storeCurrentSessionId("paper", session.id);
+      return true;
+    } catch (error) {
+      set({ paperCreating: false });
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
   deleteSession: async (sessionId: string) => {
     const state = get();
     const target = state.sessions.find((session) => session.id === sessionId);
@@ -609,8 +932,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
     if (
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
+      state.paperBusy[sessionId] ||
       chatAborters.has(sessionId) ||
-      agentAborters.has(sessionId)
+      agentAborters.has(sessionId) ||
+      paperAborters.has(sessionId)
     ) {
       get().notify("info", "当前会话正在执行回合，请先停止后再删除");
       return false;
@@ -637,12 +962,15 @@ export const useAppStore = create<AppState>()((set, get) => ({
       delete chatBusy[sessionId];
       const agentBusy = { ...current.agentBusy };
       delete agentBusy[sessionId];
+      const paperBusy = { ...current.paperBusy };
+      delete paperBusy[sessionId];
       return {
         sessions: remaining,
         currentSessionId: nextId,
         messages,
         chatBusy,
         agentBusy,
+        paperBusy,
         approvals: current.approvals.filter(
           (approval) => approval.sessionId !== sessionId,
         ),
@@ -719,8 +1047,10 @@ export const useAppStore = create<AppState>()((set, get) => ({
     if (
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
+      state.paperBusy[sessionId] ||
       chatAborters.has(sessionId) ||
-      agentAborters.has(sessionId)
+      agentAborters.has(sessionId) ||
+      paperAborters.has(sessionId)
     ) {
       get().notify("info", "当前会话正在执行回合，请等待结束或先停止");
       return;
@@ -864,184 +1194,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
     return api.testSearch(input);
   },
 
-  sendAgent: async (text: string) => {
-    const state = get();
-    const sessionId = state.currentSessionId;
-    if (!sessionId) return;
-    const session = state.sessions.find((candidate) => candidate.id === sessionId);
-    if (!session || session.kind !== "agent") return;
-    const content = text.trim();
-    if (!content) return;
-
-    if (!state.llmSettings?.configured) {
-      get().notify("info", "Agent 需要先配置模型 API");
-      get().openLlmSettings();
-      return;
-    }
-    if (
-      state.chatBusy[sessionId] ||
-      state.agentBusy[sessionId] ||
-      chatAborters.has(sessionId) ||
-      agentAborters.has(sessionId)
-    ) {
-      get().notify("info", "当前会话正在执行回合，请等待结束或先停止");
-      return;
-    }
-
-    const controller = new AbortController();
-    agentAborters.set(sessionId, controller);
-    set((current) => ({
-      agentBusy: { ...current.agentBusy, [sessionId]: true },
-    }));
-
-    let finished = false;
-    const approvalsAdded = new Set<string>();
-    try {
-      await streamSse<AgentEvent>({
-        url: `/api/sessions/${sessionId}/agent`,
-        method: "POST",
-        body: { message: content },
-        signal: controller.signal,
-        onEvent: (event) => {
-          switch (event.type) {
-            case "agent.started":
-              set((current) =>
-                upsertStoredMessage(current, sessionId, event.userMessage),
-              );
-              break;
-            case "agent.step":
-              set((current) =>
-                upsertStoredMessage(current, sessionId, event.message, true),
-              );
-              break;
-            case "agent.delta":
-              set((current) =>
-                patchAssistant(current, sessionId, event.messageId, (message) => ({
-                  ...message,
-                  text: message.text + event.data,
-                })),
-              );
-              break;
-            case "agent.reasoning":
-              set((current) =>
-                patchAssistant(current, sessionId, event.messageId, (message) => ({
-                  ...message,
-                  reasoning: (message.reasoning ?? "") + event.data,
-                })),
-              );
-              break;
-            case "agent.message":
-              set((current) =>
-                upsertStoredMessage(current, sessionId, event.message),
-              );
-              break;
-            case "agent.tool.started":
-            case "agent.tool.finished":
-              set((current) =>
-                upsertStoredMessage(current, sessionId, event.message),
-              );
-              break;
-            case "agent.approval_required": {
-              const approval: ApprovalRequest = {
-                id: event.approvalId,
-                kind: "exec",
-                toolName: "run_command",
-                sessionId,
-                execId: event.execId,
-                currentMode: event.currentMode,
-                requestedMode: event.requestedMode,
-                command: event.command,
-                justification: event.justification,
-                createdAt: new Date().toISOString(),
-                expiresAt: event.expiresAt,
-              };
-              approvalsAdded.add(approval.id);
-              set((current) => ({
-                approvals: [
-                  ...current.approvals.filter(
-                    (candidate) => candidate.id !== approval.id,
-                  ),
-                  approval,
-                ].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-              }));
-              break;
-            }
-            case "agent.approval_decided":
-              set((current) => ({
-                approvals: current.approvals.filter(
-                  (candidate) => candidate.id !== event.approvalId,
-                ),
-              }));
-              break;
-            case "agent.done":
-              finished = true;
-              set((current) =>
-                upsertStoredMessage(current, sessionId, event.message),
-              );
-              break;
-            case "agent.error": {
-              finished = true;
-              const messageId = event.messageId;
-              if (messageId) {
-                set((current) =>
-                  patchAssistant(
-                    current,
-                    sessionId,
-                    messageId,
-                    (message) => ({
-                      ...message,
-                      streaming: false,
-                      error: event.message,
-                    }),
-                  ),
-                );
-              } else {
-                get().notify("error", event.message);
-              }
-              break;
-            }
-            case "session.updated":
-              set((current) => ({
-                sessions: current.sessions.map((session) =>
-                  session.id === event.session.id ? event.session : session,
-                ),
-              }));
-              break;
-          }
-        },
-      });
-
-      if (!finished) {
-        set((current) =>
-          settleAgentStreaming(current, sessionId, { cancelled: true }),
-        );
-      }
-    } catch (error) {
-      if (isAbortError(error)) {
-        set((current) =>
-          settleAgentStreaming(current, sessionId, { cancelled: true }),
-        );
-      } else {
-        const message = asApiError(error).message;
-        set((current) =>
-          settleAgentStreaming(current, sessionId, { error: message }),
-        );
-        get().notify("error", message);
-      }
-    } finally {
-      agentAborters.delete(sessionId);
-      set((current) => ({
-        agentBusy: { ...current.agentBusy, [sessionId]: false },
-        ...(approvalsAdded.size > 0
-          ? {
-              approvals: current.approvals.filter(
-                (approval) => !approvalsAdded.has(approval.id),
-              ),
-            }
-          : {}),
-      }));
-    }
-  },
+  sendAgent: (text: string) => streamToolRun("agent", text),
 
   cancelAgent: () => {
     const sessionId = get().currentSessionId;
@@ -1051,6 +1204,220 @@ export const useAppStore = create<AppState>()((set, get) => ({
     void api.cancelRun(sessionId).catch(() => undefined);
     agentAborters.get(sessionId)?.abort();
   },
+
+  sendPaper: (text: string) => streamToolRun("paper", text),
+
+  cancelPaper: () => {
+    const sessionId = get().currentSessionId;
+    if (!sessionId) return;
+    void api.cancelRun(sessionId).catch(() => undefined);
+    paperAborters.get(sessionId)?.abort();
+  },
+
+  loadPapers: async () => {
+    const query = get().paperQuery;
+    set({ paperLoading: true });
+    try {
+      const [response, tagResponse, allResponse] = await Promise.all([
+        api.listPapers({
+          query: query.query.trim() || undefined,
+          status: query.status || undefined,
+          tags: query.tag ? [query.tag] : undefined,
+          collection: query.collection || undefined,
+          sort: query.sort,
+          limit: 200,
+        }),
+        api.paperTags(),
+        api.listPapers({ limit: 200 }),
+      ]);
+      set((state) => {
+        const index = { ...state.paperIndex };
+        for (const paper of allResponse.papers) index[paper.id] = paper;
+        for (const paper of response.papers) index[paper.id] = paper;
+        return {
+          papers: response.papers,
+          paperIndex: index,
+          paperTotal: allResponse.total,
+          paperTags: tagResponse.tags,
+          paperCollections: tagResponse.collections,
+          paperLoading: false,
+        };
+      });
+    } catch (error) {
+      set({ paperLoading: false });
+      get().notify("error", asApiError(error).message);
+    }
+  },
+
+  setPaperQuery: (patch) => {
+    set((state) => ({ paperQuery: { ...state.paperQuery, ...patch } }));
+    void get().loadPapers();
+  },
+
+  addPaperByArxiv: async (ref: string) => {
+    try {
+      const { paper, created } = await api.addPaper({ arxivId: ref });
+      set((state) => ({
+        papers: upsertPaper(state.papers, paper),
+        paperIndex: { ...state.paperIndex, [paper.id]: paper },
+        paperTotal: state.paperIndex[paper.id]
+          ? state.paperTotal
+          : state.paperTotal + 1,
+      }));
+      get().notify("info", created ? "论文已加入论文库" : "论文已在论文库中");
+      void get().loadPapers();
+      return paper;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return null;
+    }
+  },
+
+  updatePaper: async (paperId: string, patch: PaperUpdateInput) => {
+    try {
+      const { paper } = await api.updatePaper(paperId, patch);
+      set((state) => ({
+        papers: upsertPaper(state.papers, paper),
+        paperIndex: { ...state.paperIndex, [paper.id]: paper },
+      }));
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  deletePaper: async (paperId: string) => {
+    try {
+      await api.deletePaper(paperId);
+      set((state) => {
+        const paperIndex = { ...state.paperIndex };
+        delete paperIndex[paperId];
+        return {
+          papers: state.papers.filter((paper) => paper.id !== paperId),
+          paperIndex,
+          paperTotal: Math.max(0, state.paperTotal - 1),
+          paperDetailId:
+            state.paperDetailId === paperId ? null : state.paperDetailId,
+          sessions: state.sessions.map((session) =>
+            session.kind === "paper" && session.paperIds.includes(paperId)
+              ? {
+                  ...session,
+                  paperIds: session.paperIds.filter((id) => id !== paperId),
+                }
+              : session,
+          ),
+        };
+      });
+      get().notify("info", "论文已从论文库删除");
+      void get().loadPapers();
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  uploadPaper: async (file: File) => {
+    set({ paperUploading: true });
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const { paper } = await api.uploadPaper(form);
+      set((state) => ({
+        papers: upsertPaper(state.papers, paper),
+        paperIndex: { ...state.paperIndex, [paper.id]: paper },
+        paperTotal: state.paperIndex[paper.id]
+          ? state.paperTotal
+          : state.paperTotal + 1,
+        paperUploading: false,
+      }));
+      get().notify("info", "PDF 已上传并加入论文库");
+      void get().loadPapers();
+      return true;
+    } catch (error) {
+      set({ paperUploading: false });
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  extractPaper: async (paperId: string) => {
+    try {
+      const { paper } = await api.extractPaper(paperId);
+      set((state) => ({
+        papers: upsertPaper(state.papers, paper),
+        paperIndex: { ...state.paperIndex, [paper.id]: paper },
+      }));
+      get().notify("info", "PDF 文本解析完成");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  addPaperToContext: async (paperId: string) => {
+    const session = get().sessions.find(
+      (candidate) => candidate.id === get().currentSessionId,
+    );
+    if (!session || session.kind !== "paper") {
+      get().notify("info", "请先选择或创建一个论文会话");
+      return false;
+    }
+    try {
+      const { session: updated } = await api.updatePaperContext(session.id, {
+        add: [paperId],
+      });
+      set((state) => ({
+        sessions: state.sessions.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
+        ),
+      }));
+      get().notify("info", "已加入当前论文上下文");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  removePaperFromContext: async (paperId: string) => {
+    const session = get().sessions.find(
+      (candidate) => candidate.id === get().currentSessionId,
+    );
+    if (!session || session.kind !== "paper") return false;
+    try {
+      const { session: updated } = await api.updatePaperContext(session.id, {
+        remove: [paperId],
+      });
+      set((state) => ({
+        sessions: state.sessions.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
+        ),
+      }));
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  openPaperDetail: (paperId: string) => {
+    set({ paperDetailId: paperId });
+  },
+
+  closePaperDetail: () => set({ paperDetailId: null }),
+
+  openPaperLibrary: () => {
+    set((state) => ({
+      ui: { ...state.ui, paperLibraryOpen: true },
+    }));
+    void get().loadPapers();
+  },
+
+  closePaperLibrary: () =>
+    set((state) => ({ ui: { ...state.ui, paperLibraryOpen: false } })),
 
   saveAgentSettings: async (input: AgentSettingsInput) => {
     try {
@@ -1152,7 +1519,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
     void get().refreshAudit();
   },
   closeAudit: () => set((state) => ({ ui: { ...state.ui, auditOpen: false } })),
-}));
+  };
+});
 
 export function selectCurrentSession(state: AppState): Session | null {
   return (
@@ -1169,6 +1537,11 @@ export function selectCurrentAgentSession(state: AppState): AgentSession | null 
 export function selectCurrentChatSession(state: AppState): ChatSession | null {
   const session = selectCurrentSession(state);
   return session?.kind === "chat" ? session : null;
+}
+
+export function selectCurrentPaperSession(state: AppState): PaperSession | null {
+  const session = selectCurrentSession(state);
+  return session?.kind === "paper" ? session : null;
 }
 
 export function selectCurrentMessages(state: AppState): ChatMessage[] | undefined {

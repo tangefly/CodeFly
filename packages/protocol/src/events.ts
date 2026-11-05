@@ -92,6 +92,8 @@ export type AgentEvent =
   | { type: "agent.reasoning"; messageId: string; data: string }
   | { type: "agent.message"; message: ChatMessageRecord; usage?: ChatUsage }
   | { type: "agent.tool.started"; message: ChatMessageRecord; toolCall: AgentToolCall }
+  /** Transient progress text for a long-running tool (not persisted). */
+  | { type: "agent.tool.progress"; messageId: string; data: string }
   | { type: "agent.tool.finished"; message: ChatMessageRecord }
   | {
       type: "agent.approval_required";

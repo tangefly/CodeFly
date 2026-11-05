@@ -52,6 +52,27 @@ export const config = {
     maxTimeoutMs: 600_000,
     testMaxTokens: 32,
   },
+  papers: {
+    arxivMinIntervalMs: num(process.env.CODEFLY_ARXIV_MIN_INTERVAL_MS, 3000),
+    arxivContact: process.env.CODEFLY_ARXIV_CONTACT?.trim() ?? "",
+    maxPdfBytes: num(process.env.CODEFLY_PAPER_MAX_PDF_BYTES, 25 * 1024 * 1024),
+    maxPdfPages: num(process.env.CODEFLY_PAPER_MAX_PAGES, 200),
+    extractionTimeoutMs: num(
+      process.env.CODEFLY_PAPER_EXTRACT_TIMEOUT_MS,
+      60_000,
+    ),
+    maxReadChars: num(process.env.CODEFLY_PAPER_MAX_READ_CHARS, 20_000),
+    /** Characters of paper text kept in the model context per request. */
+    historyBudgetChars: num(
+      process.env.CODEFLY_PAPER_HISTORY_BUDGET_CHARS,
+      160_000,
+    ),
+    maxSteps: num(process.env.CODEFLY_PAPER_MAX_STEPS, 80),
+    downloadTimeoutMs: num(
+      process.env.CODEFLY_PAPER_DOWNLOAD_TIMEOUT_MS,
+      120_000,
+    ),
+  },
 } as const;
 
 export const paths = {
@@ -62,6 +83,10 @@ export const paths = {
   llm: path.join(config.dataDir, "llm.json"),
   search: path.join(config.dataDir, "search.json"),
   agent: path.join(config.dataDir, "agent.json"),
+  papersDir: path.join(config.dataDir, "papers"),
+  papers: path.join(config.dataDir, "papers", "library.json"),
+  paperPdfs: path.join(config.dataDir, "papers", "pdf"),
+  paperTexts: path.join(config.dataDir, "papers", "text"),
   spills: path.join(config.dataDir, "spills"),
   webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)),
 } as const;

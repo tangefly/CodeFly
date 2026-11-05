@@ -7,10 +7,11 @@ import {
   type TouchEvent as ReactTouchEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { Plus, Sparkles, Terminal, Zap } from "lucide-react";
+import { BookOpen, Plus, Sparkles, Terminal, Zap } from "lucide-react";
+import type { AgentSession, PaperSession } from "@codefly/protocol";
 import {
-  selectCurrentAgentSession,
   selectCurrentMessages,
+  selectCurrentSession,
   useAppStore,
   type AssistantMessage,
   type ChatMessage,
@@ -95,19 +96,38 @@ function buildTimeline(messages: ChatMessage[]): TimelineItem[] {
 const STICK_THRESHOLD_PX = 48;
 const TOUCH_DETACH_PX = 6;
 
-export function AgentTimeline() {
-  const session = useAppStore(selectCurrentAgentSession);
+export function AgentTimeline({
+  mode = "agent",
+}: {
+  mode?: "agent" | "paper";
+} = {}) {
+  const session = useAppStore(
+    (state): AgentSession | PaperSession | null => {
+      const current = selectCurrentSession(state);
+      return current !== null && current.kind === mode ? current : null;
+    },
+  );
   const messages = useAppStore(selectCurrentMessages) ?? EMPTY;
   const openNewSession = useAppStore((state) => state.openNewSession);
+  const createPaperSession = useAppStore((state) => state.createPaperSession);
   const sendAgent = useAppStore((state) => state.sendAgent);
+  const sendPaper = useAppStore((state) => state.sendPaper);
+  const openPaperLibrary = useAppStore((state) => state.openPaperLibrary);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
   const setMode = useAppStore((state) => state.setMode);
   const llmSettings = useAppStore((state) => state.llmSettings);
-  const agentBusy = useAppStore(
+  const busy = useAppStore(
     (state) =>
       state.currentSessionId !== null &&
-      state.agentBusy[state.currentSessionId] === true,
+      (mode === "agent"
+        ? state.agentBusy[state.currentSessionId]
+        : state.paperBusy[state.currentSessionId]) === true,
   );
+  const send = mode === "agent" ? sendAgent : sendPaper;
+  const newSession =
+    mode === "agent"
+      ? openNewSession
+      : () => void createPaperSession();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -301,15 +321,23 @@ export function AgentTimeline() {
       {!session ? (
         <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center gap-4 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary">
-            <Terminal className="h-6 w-6" />
+            {mode === "agent" ? (
+              <Terminal className="h-6 w-6" />
+            ) : (
+              <BookOpen className="h-6 w-6" />
+            )}
           </div>
           <div>
-            <h2 className="text-lg font-semibold">还没有 Agent 会话</h2>
+            <h2 className="text-lg font-semibold">
+              {mode === "agent" ? "还没有 Agent 会话" : "还没有论文会话"}
+            </h2>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              创建会话并绑定一个本机工作区目录。Agent 工具都通过本机服务在沙箱内运行。
+              {mode === "agent"
+                ? "创建会话并绑定一个本机工作区目录。Agent 工具都通过本机服务在沙箱内运行。"
+                : "创建一个论文会话，开始检索 arXiv、阅读 PDF 并整理论文库。"}
             </p>
           </div>
-          <Button variant="primary" onClick={openNewSession}>
+          <Button variant="primary" onClick={newSession}>
             <Plus className="h-4 w-4" />
             新建会话
           </Button>
@@ -317,60 +345,126 @@ export function AgentTimeline() {
       ) : messages.length === 0 ? (
         <div className="mx-auto flex max-w-2xl flex-col items-center justify-center gap-6 py-14 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary shadow-[0_0_40px_-12px_var(--primary)]">
-            <Zap className="h-6 w-6" />
+            {mode === "agent" ? (
+              <Zap className="h-6 w-6" />
+            ) : (
+              <BookOpen className="h-6 w-6" />
+            )}
           </div>
           <div className="space-y-1.5">
-            <h2 className="text-lg font-semibold">本地安全执行，从这里开始</h2>
+            <h2 className="text-lg font-semibold">
+              {mode === "agent"
+                ? "本地安全执行，从这里开始"
+                : "从 arXiv 到结构化笔记"}
+            </h2>
             <p className="mx-auto max-w-md text-sm leading-6 text-muted-foreground">
-              Agent 会在 Landlock 沙箱内运行命令与文件工具，写操作被限制在工作区与{" "}
-              <code className="rounded bg-muted/60 px-1 py-0.5 font-mono text-[11px]">/tmp</code>
-              。默认权限为「工作区内修改」，越界命令需要一次性审批。
+              {mode === "agent" ? (
+                <>
+                  Agent 会在 Landlock 沙箱内运行命令与文件工具，写操作被限制在工作区与{" "}
+                  <code className="rounded bg-muted/60 px-1 py-0.5 font-mono text-[11px]">
+                    /tmp
+                  </code>
+                  。默认权限为「工作区内修改」，越界命令需要一次性审批。
+                </>
+              ) : (
+                "论文助手会检索 arXiv、下载并解析 PDF、把阅读笔记和标签整理进全局论文库。它不会执行命令，也不会读写工作区文件。"
+              )}
             </p>
           </div>
           <div className="grid w-full gap-2 sm:grid-cols-3">
-            <SuggestionCard
-              icon={<Terminal className="h-4 w-4" />}
-              title="让 Agent 看看工作区"
-              hint="列出内容并总结"
-              onClick={() => {
-                if (llmSettings?.configured) {
-                  void sendAgent("请列出当前工作区的内容，并简要总结项目结构。");
-                } else {
-                  openLlmSettings();
-                }
-              }}
-            />
-            <SuggestionCard
-              icon={<Zap className="h-4 w-4" />}
-              title="运行 Node 检查"
-              hint='node -e "console.log(2 ** 100)"'
-              onClick={() => {
-                if (llmSettings?.configured) {
-                  void sendAgent(
-                    '运行 node -e "console.log(2 ** 100)" 并告诉我结果。',
-                  );
-                } else {
-                  openLlmSettings();
-                }
-              }}
-            />
-            <SuggestionCard
-              icon={<Sparkles className="h-4 w-4" />}
-              title="切换到对话模式"
-              hint={
-                llmSettings?.configured
-                  ? `模型：${llmSettings.model}`
-                  : "需要先配置模型 API"
-              }
-              onClick={() => setMode("chat")}
-            />
+            {mode === "agent" ? (
+              <>
+                <SuggestionCard
+                  icon={<Terminal className="h-4 w-4" />}
+                  title="让 Agent 看看工作区"
+                  hint="列出内容并总结"
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send("请列出当前工作区的内容，并简要总结项目结构。");
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+                <SuggestionCard
+                  icon={<Zap className="h-4 w-4" />}
+                  title="运行 Node 检查"
+                  hint='node -e "console.log(2 ** 100)"'
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send(
+                        '运行 node -e "console.log(2 ** 100)" 并告诉我结果。',
+                      );
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+                <SuggestionCard
+                  icon={<Sparkles className="h-4 w-4" />}
+                  title="切换到对话模式"
+                  hint={
+                    llmSettings?.configured
+                      ? `模型：${llmSettings.model}`
+                      : "需要先配置模型 API"
+                  }
+                  onClick={() => setMode("chat")}
+                />
+              </>
+            ) : (
+              <>
+                <SuggestionCard
+                  icon={<BookOpen className="h-4 w-4" />}
+                  title="找最新论文"
+                  hint="最近一周 cs.CL 的 RAG 论文"
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send(
+                        "帮我搜索最近一周 cs.CL 中关于 RAG 的论文，按提交时间排序，并挑 3 篇值得读的列出理由。",
+                      );
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+                <SuggestionCard
+                  icon={<BookOpen className="h-4 w-4" />}
+                  title="打开论文库"
+                  hint="标签、阅读状态与笔记"
+                  onClick={openPaperLibrary}
+                />
+                <SuggestionCard
+                  icon={<Sparkles className="h-4 w-4" />}
+                  title="读一篇论文"
+                  hint="先目录，再分节总结"
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send(
+                        "找一篇最近高相关的 arXiv 论文，先给我目录，然后分节阅读并写出结构化笔记。",
+                      );
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+              </>
+            )}
           </div>
-          <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
-            当前会话工作区：
-            <span className="ml-1 break-all font-mono text-foreground/70">
-              {session.workspaceRoot}
-            </span>
-          </p>
+          {mode === "agent" ? (
+            <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
+              当前会话工作区：
+              <span className="ml-1 break-all font-mono text-foreground/70">
+                {session.kind === "agent" ? session.workspaceRoot : ""}
+              </span>
+            </p>
+          ) : (
+            <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
+              当前上下文：
+              {session.kind === "paper" && session.paperIds.length > 0
+                ? `${session.paperIds.length} 篇论文`
+                : "尚未添加论文，可以让我先检索 arXiv"}
+            </p>
+          )}
         </div>
       ) : (
         <div className="mx-auto flex max-w-5xl flex-col gap-5 pb-2">
@@ -382,7 +476,7 @@ export function AgentTimeline() {
                 <TurnActivity
                   messages={item.activity}
                   final={item.answer}
-                  busy={agentBusy && index === timeline.length - 1}
+                  busy={busy && index === timeline.length - 1}
                 />
                 {item.answer ? (
                   <MessageBubble message={item.answer} />

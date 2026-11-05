@@ -1,4 +1,4 @@
-import { Bot, MessageSquare } from "lucide-react";
+import { BookOpen, Bot, MessageSquare } from "lucide-react";
 import type { SessionKind } from "@codefly/protocol";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
@@ -10,9 +10,10 @@ const MODES: Array<{
 }> = [
   { id: "chat", label: "对话", icon: MessageSquare },
   { id: "agent", label: "Agent", icon: Bot },
+  { id: "paper", label: "论文", icon: BookOpen },
 ];
 
-/** Switches between the two independent UIs (chat and agent). */
+/** Switches between the independent UIs (chat, agent and paper assistant). */
 export function ModeSwitcher() {
   const mode = useAppStore((state) => state.mode);
   const setMode = useAppStore((state) => state.setMode);
@@ -21,7 +22,7 @@ export function ModeSwitcher() {
     <div
       role="tablist"
       aria-label="工作模式"
-      className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-card/50 p-1"
+      className="grid grid-cols-3 gap-1 rounded-xl border border-border bg-card/50 p-1"
     >
       {MODES.map(({ id, label, icon: Icon }) => {
         const active = mode === id;

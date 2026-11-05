@@ -117,7 +117,7 @@ export function SettingsDialog() {
                 </>
               ) : (
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  对话与 Agent 都需要配置 OpenAI-compatible 模型 API。
+                  对话、Agent 与论文助手都需要配置 OpenAI-compatible 模型 API。
                 </p>
               )}
             </div>

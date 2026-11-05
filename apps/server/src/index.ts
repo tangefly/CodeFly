@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
+import fastifyMultipart from "@fastify/multipart";
 import { ZodError } from "zod";
 import { config, paths } from "./config.js";
 import { registerSecurity } from "./auth.js";
@@ -22,6 +23,8 @@ import { registerMockChatRoutes } from "./routes/mock-chat.js";
 import { registerLlmRoutes } from "./routes/llm.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerAgentRoutes } from "./routes/agent.js";
+import { registerPaperRoutes } from "./routes/papers.js";
+import { registerPaperRunRoutes } from "./routes/paper.js";
 import { LlmConfigStore } from "./llm/config-store.js";
 import { SearchConfigStore } from "./search/config-store.js";
 import { MessageStore } from "./llm/messages.js";
@@ -32,6 +35,12 @@ import { SessionRunLock } from "./llm/run-lock.js";
 import { AgentConfigStore } from "./agent/config-store.js";
 import { AgentToolExecutor } from "./agent/tools.js";
 import { AgentService } from "./agent/service.js";
+import { PaperLibraryStore } from "./paper/library-store.js";
+import { ArxivClient } from "./paper/arxiv-client.js";
+import { PdfExtractor } from "./paper/pdf-extractor.js";
+import { PaperTextStore } from "./paper/text-store.js";
+import { PaperToolExecutor } from "./paper/tools.js";
+import { PaperService } from "./paper/service.js";
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -64,6 +73,28 @@ async function main(): Promise<void> {
 
   const agentConfig = new AgentConfigStore(paths.agent);
   await agentConfig.init();
+
+  const paperLibrary = new PaperLibraryStore(paths.papers);
+  await paperLibrary.init();
+  const arxiv = new ArxivClient({
+    minIntervalMs: config.papers.arxivMinIntervalMs,
+    contactEmail: config.papers.arxivContact,
+    maxPdfBytes: config.papers.maxPdfBytes,
+    downloadTimeoutMs: config.papers.downloadTimeoutMs,
+  });
+  const pdfExtractor = new PdfExtractor({
+    maxPages: config.papers.maxPdfPages,
+    timeoutMs: config.papers.extractionTimeoutMs,
+  });
+  const paperText = new PaperTextStore({
+    pdfDir: paths.paperPdfs,
+    textDir: paths.paperTexts,
+    library: paperLibrary,
+    arxiv,
+    extractor: pdfExtractor,
+    maxPdfBytes: config.papers.maxPdfBytes,
+    maxReadChars: config.papers.maxReadChars,
+  });
 
   const messageStore = new MessageStore(
     paths.messages,
@@ -137,6 +168,27 @@ async function main(): Promise<void> {
     maxWriteBytes: config.fs.maxWriteBytes,
   });
 
+  const paperTools = new PaperToolExecutor({
+    library: paperLibrary,
+    text: paperText,
+    arxiv,
+  });
+  const paper = new PaperService({
+    messages: messageStore,
+    llmConfig,
+    audit,
+    client: new LlmClient(),
+    lock: runLock,
+    sessions,
+    library: paperLibrary,
+    text: paperText,
+    arxiv,
+    tools: paperTools,
+    maxSteps: config.papers.maxSteps,
+    maxReadChars: config.papers.maxReadChars,
+    historyBudgetChars: config.papers.historyBudgetChars,
+  });
+
   const app = Fastify({
     logger: false,
     bodyLimit: 16 * 1024 * 1024,
@@ -202,6 +254,14 @@ async function main(): Promise<void> {
       .send({ error: { code: "INTERNAL", message: "internal server error" } });
   });
 
+  await app.register(fastifyMultipart, {
+    limits: {
+      fileSize: config.papers.maxPdfBytes,
+      files: 1,
+      fields: 20,
+    },
+  });
+
   registerSecurity(app, config.token);
 
   registerHealthRoute(app, {
@@ -240,6 +300,20 @@ async function main(): Promise<void> {
     sessions,
     agentConfig,
     agent,
+    titler,
+    audit,
+  });
+  registerPaperRoutes(app, {
+    sessions,
+    library: paperLibrary,
+    text: paperText,
+    arxiv,
+    audit,
+    maxPdfBytes: config.papers.maxPdfBytes,
+  });
+  registerPaperRunRoutes(app, {
+    sessions,
+    paper,
     titler,
     audit,
   });
@@ -304,6 +378,9 @@ async function main(): Promise<void> {
         ? (searchStatus.endpoint ?? "configured")
         : "not configured (web_search disabled)"
     }`,
+  );
+  console.log(
+    `  papers  : ${paperLibrary.list({ limit: 1 }).total} in library · ${paths.papersDir}`,
   );
   console.log(`  data    : ${config.dataDir}`);
   console.log(`  open    : ${url}`);

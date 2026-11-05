@@ -34,7 +34,7 @@ describe("SessionStore session kinds", () => {
     expect(session.titleSource).toBe("default");
     expect(store.getChatOrThrow(session.id).id).toBe(session.id);
     expect(() => store.getAgentOrThrow(session.id)).toThrowError(
-      /对话会话/,
+      /不是 Agent 会话/,
     );
 
     const reloaded = new SessionStore(file);
@@ -51,6 +51,44 @@ describe("SessionStore session kinds", () => {
     await expect(
       store.create(undefined, "no workspace", "workspace-write"),
     ).rejects.toMatchObject({ code: "INVALID_WORKSPACE" });
+  });
+
+  it("creates a paper session without a workspace", async () => {
+    const store = new SessionStore(file);
+    await store.init();
+
+    const session = await store.create(
+      undefined,
+      undefined,
+      "workspace-write",
+      "paper",
+    );
+
+    expect(session.kind).toBe("paper");
+    expect(session.workspaceRoot).toBeNull();
+    expect(session.title).toBe("新论文会话");
+    expect(session.mode).toBe("read-only");
+    expect(session.approvalPolicy).toBe("never");
+    expect(session.kind === "paper" ? session.paperIds : null).toEqual([]);
+    expect(store.getPaperOrThrow(session.id).id).toBe(session.id);
+    expect(() => store.getAgentOrThrow(session.id)).toThrowError(
+      /不是 Agent 会话/,
+    );
+
+    await Promise.all([
+      store.addPaperToContext(session.id, "p_1"),
+      store.addPaperToContext(session.id, "p_2"),
+    ]);
+    expect(store.getPaperOrThrow(session.id).paperIds).toEqual([
+      "p_1",
+      "p_2",
+    ]);
+
+    const reloaded = new SessionStore(file);
+    await reloaded.init();
+    const persisted = reloaded.getPaperOrThrow(session.id);
+    expect(persisted.paperIds).toEqual(["p_1", "p_2"]);
+    expect(persisted.mode).toBe("read-only");
   });
 
   it("treats legacy workspace sessions as agent sessions", async () => {

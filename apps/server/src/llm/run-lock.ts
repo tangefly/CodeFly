@@ -1,6 +1,6 @@
 import { AppError } from "../http/errors.js";
 
-export type RunKind = "chat" | "agent";
+export type RunKind = "chat" | "agent" | "paper";
 
 interface ActiveRun {
   kind: RunKind;
@@ -25,7 +25,13 @@ export class SessionRunLock {
     if (current !== undefined) {
       throw new AppError(
         "SESSION_BUSY",
-        `当前会话正在执行 ${current.kind === "chat" ? "聊天" : "Agent"} 回合，请等待结束或先停止。`,
+        `当前会话正在执行 ${
+          current.kind === "chat"
+            ? "聊天"
+            : current.kind === "paper"
+              ? "论文助手"
+              : "Agent"
+        } 回合，请等待结束或先停止。`,
         409,
       );
     }
