@@ -7,6 +7,7 @@ import type {
   Enforcement,
   RunnerName,
   SandboxMode,
+  Session,
 } from "./types.js";
 
 /** The event union pushed over the exec SSE stream. */
@@ -76,7 +77,9 @@ export type ChatEvent =
   | { type: "chat.delta"; messageId: string; data: string }
   | { type: "chat.reasoning"; messageId: string; data: string }
   | { type: "chat.done"; message: ChatMessageRecord; usage?: ChatUsage }
-  | { type: "chat.error"; messageId: string; code: string; message: string };
+  | { type: "chat.error"; messageId: string; code: string; message: string }
+  /** The session was retitled (first-exchange summary); emitted when ready. */
+  | { type: "session.updated"; session: Session };
 
 /**
  * Agent mode events. Each model step gets an assistant message; tool calls
@@ -108,7 +111,9 @@ export type AgentEvent =
       reason: string;
     }
   | { type: "agent.done"; message: ChatMessageRecord }
-  | { type: "agent.error"; code: string; message: string; messageId?: string };
+  | { type: "agent.error"; code: string; message: string; messageId?: string }
+  /** The session was retitled (first-exchange summary); emitted when ready. */
+  | { type: "session.updated"; session: Session };
 
 /** Mock chat only exists to exercise the streaming markdown renderer. */
 export type MockChatEvent =

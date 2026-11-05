@@ -48,7 +48,6 @@ export const config = {
   },
   llm: {
     maxHistoryMessages: 500,
-    contextBudgetChars: 120_000,
     defaultTimeoutMs: 120_000,
     maxTimeoutMs: 600_000,
     testMaxTokens: 32,

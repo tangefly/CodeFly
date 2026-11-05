@@ -199,4 +199,21 @@ describe("LlmConfigStore", () => {
     expect(config.systemPrompt).toBe("custom prompt");
     expect(config.timeoutMs).toBe(5000);
   });
+
+  it("accepts 0 as an unlimited inactivity timeout", async () => {
+    const store = new LlmConfigStore(file);
+    await store.init();
+    await store.update({
+      baseUrl: "https://api.example.com/v1",
+      model: "unlimited",
+      apiKey: "key",
+      timeoutMs: 0,
+    });
+
+    expect(store.getInternal().timeoutMs).toBe(0);
+
+    const reloaded = new LlmConfigStore(file);
+    await reloaded.init();
+    expect(reloaded.getInternal().timeoutMs).toBe(0);
+  });
 });

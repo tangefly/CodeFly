@@ -366,6 +366,32 @@ describe("LlmClient", () => {
     expect(body.max_tokens).toBe(16);
   });
 
+  it("forwards chat template kwargs on non-streaming requests", async () => {
+    let receivedBody = "";
+    const baseUrl = await startServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        receivedBody = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "OK" } }] }));
+      });
+    });
+
+    await new LlmClient().complete(
+      makeConfig(baseUrl),
+      messages,
+      AbortSignal.timeout(5000),
+      16,
+      { chatTemplateKwargs: { enable_thinking: false } },
+    );
+
+    const body = JSON.parse(receivedBody) as {
+      chat_template_kwargs?: Record<string, unknown>;
+    };
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
+
   it("accumulates streamed tool calls and forwards tool definitions", async () => {
     let receivedBody = "";
     let requestUrl = "";
@@ -467,6 +493,32 @@ describe("LlmClient", () => {
     expect(body.stream).toBe(true);
     expect(body.tools).toHaveLength(1);
     expect(body.tool_choice).toBe("auto");
+  });
+
+  it("reports activity for response headers and streamed chunks", async () => {
+    const baseUrl = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+      res.write('data: {"choices":[{"delta":{"content":"b"}}]}\n\n');
+      res.end("data: [DONE]\n\n");
+    });
+
+    let activity = 0;
+    const result = await new LlmClient().streamChat(
+      makeConfig(baseUrl),
+      messages,
+      () => undefined,
+      new AbortController().signal,
+      {
+        onActivity: () => {
+          activity += 1;
+        },
+      },
+    );
+
+    expect(result.content).toBe("ab");
+    // At least the response headers plus the body bytes.
+    expect(activity).toBeGreaterThanOrEqual(2);
   });
 
   it("aborts an in-flight stream", async () => {

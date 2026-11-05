@@ -656,6 +656,12 @@ export const useAppStore = create<AppState>()((set, get) => ({
                 })),
               );
             }
+          } else if (event.type === "session.updated") {
+            set((current) => ({
+              sessions: current.sessions.map((session) =>
+                session.id === event.session.id ? event.session : session,
+              ),
+            }));
           }
         },
       });
@@ -686,6 +692,9 @@ export const useAppStore = create<AppState>()((set, get) => ({
   cancelChat: () => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return;
+    // Ask the server to abort the upstream model request as well; closing the
+    // SSE connection is not always observed by every proxy hop.
+    void api.cancelRun(sessionId).catch(() => undefined);
     chatAborters.get(sessionId)?.abort();
   },
 
@@ -855,6 +864,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
               }
               break;
             }
+            case "session.updated":
+              set((current) => ({
+                sessions: current.sessions.map((session) =>
+                  session.id === event.session.id ? event.session : session,
+                ),
+              }));
+              break;
           }
         },
       });
@@ -894,6 +910,9 @@ export const useAppStore = create<AppState>()((set, get) => ({
   cancelAgent: () => {
     const sessionId = get().currentSessionId;
     if (!sessionId) return;
+    // Same as chat: stop the server-side run even if the stream close is
+    // swallowed, so the model request and any running tool are cancelled.
+    void api.cancelRun(sessionId).catch(() => undefined);
     agentAborters.get(sessionId)?.abort();
   },
 

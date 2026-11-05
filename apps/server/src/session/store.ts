@@ -38,8 +38,25 @@ export class SessionStore {
           typeof session.workspaceRoot === "string" &&
           isMode(session.mode)
         ) {
+          // Older records have no titleSource: treat a title equal to the
+          // folder name as the untouched default so it can be auto-titled.
+          const folderName = path.basename(session.workspaceRoot);
+          const title =
+            typeof session.title === "string" && session.title.trim() !== ""
+              ? session.title
+              : folderName || session.workspaceRoot;
+          const titleSource =
+            session.titleSource === "user" ||
+            session.titleSource === "auto" ||
+            session.titleSource === "default"
+              ? session.titleSource
+              : title === folderName
+                ? "default"
+                : "user";
           this.sessions.set(session.id, {
             ...session,
+            title,
+            titleSource,
             approvalPolicy: session.approvalPolicy === "never" ? "never" : "ask",
             lastDenial: session.lastDenial ?? null,
           });
@@ -98,9 +115,14 @@ export class SessionStore {
 
     const preset = presetForMode(defaultMode);
     const now = new Date().toISOString();
+    const customTitle = title?.trim() ?? "";
     const session: Session = {
       id: `s_${randomUUID()}`,
-      title: title?.trim() || path.basename(workspaceRoot) || workspaceRoot,
+      title:
+        customTitle !== ""
+          ? customTitle
+          : path.basename(workspaceRoot) || workspaceRoot,
+      titleSource: customTitle !== "" ? "user" : "default",
       workspaceRoot,
       mode: preset.mode,
       approvalPolicy: preset.approvalPolicy,
@@ -110,6 +132,18 @@ export class SessionStore {
     };
 
     this.sessions.set(session.id, session);
+    await this.persist();
+    return session;
+  }
+
+  /** Replaces the title (auto-generated from the first exchange). */
+  async updateTitle(id: string, title: string): Promise<Session> {
+    const session = this.getOrThrow(id);
+    const trimmed = title.trim();
+    if (trimmed === "") return session;
+    session.title = trimmed.slice(0, 120);
+    session.titleSource = "auto";
+    session.updatedAt = new Date().toISOString();
     await this.persist();
     return session;
   }

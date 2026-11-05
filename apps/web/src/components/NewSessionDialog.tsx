@@ -83,7 +83,7 @@ export function NewSessionDialog() {
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            placeholder="默认使用目录名"
+            placeholder="留空则根据首次对话自动命名"
             maxLength={120}
             className="h-10 w-full rounded-lg border border-border bg-background px-3 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/20"
           />

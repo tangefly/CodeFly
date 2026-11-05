@@ -69,7 +69,6 @@ export interface AgentServiceDeps {
   dataDir: string;
   maxReadBytes: number;
   maxWriteBytes: number;
-  contextBudgetChars: number;
 }
 
 export class AgentService {
@@ -109,21 +108,24 @@ export class AgentService {
     this.assertReady(session.id);
     if (clientSignal.aborted) return;
 
-    this.deps.lock.acquire(session.id, "agent");
+    const runSignal = this.deps.lock.acquire(session.id, "agent");
+    // The run stops when the client disconnects or when it is cancelled
+    // explicitly through the session cancel endpoint.
+    const signal = AbortSignal.any([clientSignal, runSignal]);
     const startedAt = Date.now();
     const config = this.deps.llmConfig.getInternal();
     const settings = this.deps.agentConfig.getInternal();
     const toolDefinitions = this.deps.tools.definitions(settings.enabledTools);
     const prior = this.deps.messages.list(session.id);
-    const history = trimTurns(prior, this.deps.contextBudgetChars);
     const system = buildSystemPrompt(
       settings,
       session,
       toolDefinitions.map((definition) => definition.function.name),
     );
+    // The full history is sent; the model server enforces its context window.
     const conversation: LlmChatMessage[] = [
       { role: "system", content: system },
-      ...recordsToLlmMessages(history),
+      ...recordsToLlmMessages(prior),
     ];
 
     const now = new Date().toISOString();
@@ -149,7 +151,7 @@ export class AgentService {
 
       for (let step = 0; step < settings.maxSteps; step += 1) {
         steps = step + 1;
-        if (clientSignal.aborted) {
+        if (signal.aborted) {
           outcome = "cancelled";
           break;
         }
@@ -168,15 +170,25 @@ export class AgentService {
         await this.deps.messages.appendMany(session.id, [assistantMessage]);
         emit({ type: "agent.step", message: assistantMessage });
 
+        // Inactivity timeout, re-armed on every provider chunk.
         const timeoutController = new AbortController();
         let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
-          timeoutController.abort();
-        }, config.timeoutMs);
-        timer.unref?.();
+        let timer: NodeJS.Timeout | undefined;
+        const armTimeout = (): void => {
+          if (config.timeoutMs <= 0) return;
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            timedOut = true;
+            timeoutController.abort();
+          }, config.timeoutMs);
+          timer.unref?.();
+        };
+        armTimeout();
 
-        const signal = AbortSignal.any([clientSignal, timeoutController.signal]);
+        const streamSignal = AbortSignal.any([
+          signal,
+          timeoutController.signal,
+        ]);
         let contentSoFar = "";
         let reasoningSoFar = "";
         let result: LlmStreamResult;
@@ -193,7 +205,7 @@ export class AgentService {
                 data: delta,
               });
             },
-            signal,
+            streamSignal,
             {
               tools: toolDefinitions,
               toolChoice: toolDefinitions.length > 0 ? "auto" : "none",
@@ -205,11 +217,14 @@ export class AgentService {
                   data: delta,
                 });
               },
+              onActivity: armTimeout,
             },
           );
         } catch (error) {
           clearTimeout(timer);
-          const aborted = clientSignal.aborted;
+          // `!timedOut` keeps a timeout an error even though the combined
+          // signal is aborted in that case too.
+          const aborted = !timedOut && signal.aborted;
           const code = timedOut
             ? "LLM_TIMEOUT"
             : aborted
@@ -218,7 +233,7 @@ export class AgentService {
                 ? error.code
                 : "LLM_ERROR";
           const message = timedOut
-            ? `模型响应超时（${config.timeoutMs} ms）。`
+            ? `模型超过 ${config.timeoutMs} ms 没有输出，已停止。`
             : aborted
               ? "Agent 已取消。"
               : redactSecret(
@@ -323,7 +338,7 @@ export class AgentService {
         const toolOptions: ToolRunOptions = {
           session,
           settings,
-          signal: clientSignal,
+          signal,
           emit,
         };
         const canRunParallel = (call: AgentToolCall): boolean =>
@@ -332,7 +347,7 @@ export class AgentService {
 
         let toolIndex = 0;
         while (toolIndex < toolCalls.length) {
-          if (clientSignal.aborted) {
+          if (signal.aborted) {
             outcome = "cancelled";
             break;
           }
@@ -379,7 +394,7 @@ export class AgentService {
             }
           }
 
-          if (clientSignal.aborted) {
+          if (signal.aborted) {
             outcome = "cancelled";
             break;
           }
@@ -567,42 +582,6 @@ function buildSystemPrompt(
 工作区: ${session.workspaceRoot}
 当前权限: ${session.mode}
 可用工具: ${availableTools.length > 0 ? availableTools.join(", ") : "(无工具，仅可对话)"}`;
-}
-
-function groupTurns(records: ChatMessageRecord[]): ChatMessageRecord[][] {
-  const turns: ChatMessageRecord[][] = [];
-  for (const record of records) {
-    if (record.role === "system") continue;
-    if (record.role === "user") {
-      turns.push([record]);
-    } else if (turns.length > 0) {
-      turns[turns.length - 1]!.push(record);
-    }
-  }
-  return turns;
-}
-
-function trimTurns(records: ChatMessageRecord[], budgetChars: number): ChatMessageRecord[] {
-  const turns = groupTurns(records);
-  const selected: ChatMessageRecord[][] = [];
-  let used = 0;
-
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const turn = turns[index]!;
-    const chars = turn.reduce(
-      (total, record) =>
-        total +
-        record.content.length +
-        (record.toolArguments?.length ?? 0) +
-        (record.reasoning?.length ?? 0),
-      0,
-    );
-    if (selected.length > 0 && used + chars > budgetChars) break;
-    selected.unshift(turn);
-    used += chars;
-  }
-
-  return selected.flat();
 }
 
 /**

@@ -288,7 +288,6 @@ describe("AgentService", () => {
       dataDir: path.join(dir, "data"),
       maxReadBytes: 2 * 1024 * 1024,
       maxWriteBytes: 5 * 1024 * 1024,
-      contextBudgetChars: 5000,
     });
     session = makeSession();
   });
@@ -461,6 +460,29 @@ describe("AgentService", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     controller.abort();
+    await pending;
+
+    const records = messageStore.list(session.id);
+    expect(records[1]).toMatchObject({ status: "cancelled" });
+    expect(events.some((event) => event.type === "agent.error")).toBe(false);
+    expect(lock.isBusy(session.id)).toBe(false);
+  });
+
+  it("cancels when the run is cancelled server-side", async () => {
+    client.mode = "abort";
+    const events: AgentEvent[] = [];
+    const pending = service.run(
+      session,
+      "cancel",
+      new AbortController().signal,
+      (event) => events.push(event),
+    );
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (events.some((event) => event.type === "agent.delta")) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(lock.cancel(session.id)).toBe("agent");
     await pending;
 
     const records = messageStore.list(session.id);

@@ -26,7 +26,7 @@ const audit = {
 } as unknown as AuditLog;
 
 class FakeClient implements LlmClientLike {
-  mode: "ok" | "error" | "abort" = "ok";
+  mode: "ok" | "error" | "abort" | "slow" = "ok";
   reasoning = "";
   calls: Array<{ config: LlmInternalConfig; messages: LlmChatMessage[] }> = [];
 
@@ -57,6 +57,21 @@ class FakeClient implements LlmClientLike {
           { once: true },
         );
       });
+    }
+    if (this.mode === "slow") {
+      let content = "";
+      for (let index = 0; index < 6; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        options?.onActivity?.();
+        onDelta("tick");
+        content += "tick";
+      }
+      return {
+        content,
+        finishReason: "stop",
+        usage: { totalTokens: 6 },
+        toolCalls: [],
+      };
     }
     onDelta("Hello");
     onDelta(" world");
@@ -147,7 +162,7 @@ describe("ChatService", () => {
       audit,
       client,
       lock: new SessionRunLock(),
-      options: { contextBudgetChars: 5000, testMaxTokens: 16 },
+      options: { testMaxTokens: 16 },
     });
     session = makeSession();
   });
@@ -265,15 +280,81 @@ describe("ChatService", () => {
     expect(events.some((event) => event.type === "chat.error")).toBe(false);
   });
 
-  it("trims old context and drops a leading assistant turn", async () => {
-    const trimmedService = new ChatService({
+  it("cancels an in-flight request when the run is cancelled server-side", async () => {
+    client.mode = "abort";
+    const lock = new SessionRunLock();
+    const cancellable = new ChatService({
       messages: messageStore,
       llmConfig: configStore,
       audit,
       client,
-      lock: new SessionRunLock(),
-      options: { contextBudgetChars: 220, testMaxTokens: 16 },
+      lock,
+      options: { testMaxTokens: 16 },
     });
+    const events: ChatEvent[] = [];
+    const pending = cancellable.chat(
+      session,
+      "hi",
+      new AbortController().signal,
+      (event) => events.push(event),
+    );
+
+    await waitFor(() => events.some((event) => event.type === "chat.delta"));
+    expect(lock.cancel(session.id)).toBe("chat");
+    await pending;
+
+    const history = messageStore.list(session.id);
+    expect(history[1]).toMatchObject({ status: "cancelled", content: "partial" });
+    expect(events.some((event) => event.type === "chat.error")).toBe(false);
+    expect(lock.isBusy(session.id)).toBe(false);
+  });
+
+  it("re-arms the timeout while the model keeps streaming", async () => {
+    await configStore.update({
+      baseUrl: "https://api.example.com/v1",
+      model: "test-model",
+      timeoutMs: 1000,
+    });
+    client.mode = "slow";
+    const events: ChatEvent[] = [];
+    await service.chat(session, "hi", new AbortController().signal, (event) =>
+      events.push(event),
+    );
+
+    const history = messageStore.list(session.id);
+    expect(history[1]).toMatchObject({
+      status: "complete",
+      content: "ticktickticktickticktick",
+    });
+    expect(events.some((event) => event.type === "chat.error")).toBe(false);
+  });
+
+  it("times out when the provider stops producing output", async () => {
+    await configStore.update({
+      baseUrl: "https://api.example.com/v1",
+      model: "test-model",
+      timeoutMs: 1000,
+    });
+    client.mode = "abort";
+    const events: ChatEvent[] = [];
+    await service.chat(session, "hi", new AbortController().signal, (event) =>
+      events.push(event),
+    );
+
+    const history = messageStore.list(session.id);
+    expect(history[1]).toMatchObject({ status: "error", content: "partial" });
+    expect(history[1]!.error).toContain("没有输出");
+    expect(
+      events.some(
+        (event) => event.type === "chat.error" && event.code === "LLM_TIMEOUT",
+      ),
+    ).toBe(true);
+  });
+
+  it("sends the full history and drops a leading assistant turn", async () => {
+    await messageStore.appendMany(session.id, [
+      priorRecord(session.id, "assistant", "orphan answer", 99),
+    ]);
 
     let index = 0;
     for (let turn = 0; turn < 4; turn += 1) {
@@ -283,7 +364,7 @@ describe("ChatService", () => {
       ]);
     }
 
-    await trimmedService.chat(
+    await service.chat(
       session,
       "new question",
       new AbortController().signal,
@@ -291,13 +372,19 @@ describe("ChatService", () => {
     );
 
     const sent = client.calls[0]!;
-    expect(sent.messages[0]?.content).toContain("omitted");
-    expect(sent.messages[1]?.role).toBe("user");
+    // No local character budget: every prior turn is sent as-is.
+    expect(sent.messages).toHaveLength(10);
+    expect(sent.messages[1]).toMatchObject({
+      role: "user",
+      content: "u".repeat(100),
+    });
+    expect(sent.messages.some((message) => message.content === "orphan answer")).toBe(
+      false,
+    );
     expect(sent.messages.at(-1)).toEqual({
       role: "user",
       content: "new question",
     });
-    expect(sent.messages.length).toBeLessThan(5);
   });
 
   it("tests the provider with the stored configuration", async () => {
@@ -319,7 +406,7 @@ describe("ChatService", () => {
       audit,
       client,
       lock: new SessionRunLock(),
-      options: { contextBudgetChars: 5000, testMaxTokens: 16 },
+      options: { testMaxTokens: 16 },
     });
 
     expect(() => emptyService.assertReady(session.id)).toThrowError();

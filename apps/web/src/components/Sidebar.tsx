@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronRight,
   Folder,
   Plus,
   Settings,
@@ -19,6 +20,26 @@ const MODE_DOT: Record<SandboxMode, string> = {
   "danger-full-access": "bg-danger",
 };
 
+interface SessionGroup {
+  root: string;
+  sessions: Session[];
+}
+
+/** Groups sessions by workspace while preserving the store's recency order. */
+function groupSessions(sessions: Session[]): SessionGroup[] {
+  const groups = new Map<string, SessionGroup>();
+  for (const session of sessions) {
+    const existing = groups.get(session.workspaceRoot);
+    if (existing) existing.sessions.push(session);
+    else
+      groups.set(session.workspaceRoot, {
+        root: session.workspaceRoot,
+        sessions: [session],
+      });
+  }
+  return [...groups.values()];
+}
+
 export function Sidebar() {
   const sessions = useAppStore((state) => state.sessions);
   const currentId = useAppStore((state) => state.currentSessionId);
@@ -33,6 +54,39 @@ export function Sidebar() {
   const agentBusy = useAppStore((state) => state.agentBusy);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    new Set(),
+  );
+  const groups = useMemo(() => groupSessions(sessions), [sessions]);
+  // Keep a live handle on sessions so the auto-expand effect only reruns when
+  // the selected conversation changes, not on every title update.
+  const sessionsRef = useRef(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    const active = sessionsRef.current.find(
+      (session) => session.id === currentId,
+    );
+    if (!active) return;
+    setCollapsedGroups((previous) => {
+      if (!previous.has(active.workspaceRoot)) return previous;
+      const next = new Set(previous);
+      next.delete(active.workspaceRoot);
+      return next;
+    });
+  }, [currentId]);
+
+  const toggleGroup = (root: string): void => {
+    setCollapsedGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  };
 
   const confirmDelete = async (): Promise<void> => {
     if (!pendingDelete || deleting) return;
@@ -102,64 +156,106 @@ export function Sidebar() {
               创建一个并绑定工作区目录。
             </p>
           ) : (
-            <ul className="space-y-1">
-              {sessions.map((session) => {
-                const active = session.id === currentId;
-                const busy = Boolean(
-                  chatBusy[session.id] || agentBusy[session.id],
+            <ul className="space-y-1.5">
+              {groups.map((group) => {
+                const collapsed = collapsedGroups.has(group.root);
+                const groupActive = group.sessions.some(
+                  (session) => session.id === currentId,
                 );
                 return (
-                  <li key={session.id} className="group relative">
+                  <li key={group.root}>
                     <button
                       type="button"
-                      onClick={() => selectSession(session.id)}
+                      onClick={() => toggleGroup(group.root)}
+                      aria-expanded={!collapsed}
+                      title={group.root}
                       className={cn(
-                        "w-full rounded-xl border px-2.5 py-2 pr-9 text-left transition-colors",
-                        active
-                          ? "border-primary/30 bg-primary/10"
-                          : "border-transparent hover:border-border hover:bg-muted/40",
+                        "flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/40",
+                        groupActive
+                          ? "text-foreground"
+                          : "text-muted-foreground",
                       )}
-                      title={session.workspaceRoot}
                     >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "h-1.5 w-1.5 shrink-0 rounded-full",
-                            MODE_DOT[session.mode],
-                          )}
-                        />
-                        <span
-                          className={cn(
-                            "truncate text-xs font-medium",
-                            active ? "text-foreground" : "text-foreground/85",
-                          )}
-                        >
-                          {session.title}
-                        </span>
-                        <span className="ml-auto shrink-0 text-[9px] text-muted-foreground/50">
-                          {relativeTime(session.updatedAt)}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex items-center gap-1 pl-3.5">
-                        <Folder className="h-2.5 w-2.5 shrink-0 text-muted-foreground/50" />
-                        <span className="truncate font-mono text-[9px] text-muted-foreground/60">
-                          {basename(session.workspaceRoot)}
-                        </span>
-                        <span className="ml-auto shrink-0 rounded bg-muted/50 px-1 py-px text-[8px] text-muted-foreground/70">
-                          {MODE_SHORT_LABEL[session.mode]}
-                        </span>
-                      </div>
+                      <ChevronRight
+                        className={cn(
+                          "h-3 w-3 shrink-0 text-muted-foreground/50 transition-transform",
+                          !collapsed && "rotate-90",
+                        )}
+                      />
+                      <Folder className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                      <span className="truncate font-mono text-[10px] font-medium">
+                        {basename(group.root)}
+                      </span>
+                      <span className="ml-auto shrink-0 font-mono text-[9px] text-muted-foreground/50">
+                        {group.sessions.length}
+                      </span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setPendingDelete(session)}
-                      disabled={busy}
-                      aria-label={`删除会话 ${session.title}`}
-                      title={busy ? "会话执行中，停止后才能删除" : "删除会话"}
-                      className="absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground/40 opacity-100 transition-colors hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 lg:opacity-0 lg:group-hover:opacity-100"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    {collapsed ? null : (
+                      <ul className="mt-1 space-y-1 pl-1.5">
+                        {group.sessions.map((session) => {
+                          const active = session.id === currentId;
+                          const busy = Boolean(
+                            chatBusy[session.id] || agentBusy[session.id],
+                          );
+                          return (
+                            <li key={session.id} className="group relative">
+                              <button
+                                type="button"
+                                onClick={() => selectSession(session.id)}
+                                className={cn(
+                                  "w-full rounded-xl border px-2.5 py-2 pr-9 text-left transition-colors",
+                                  active
+                                    ? "border-primary/30 bg-primary/10"
+                                    : "border-transparent hover:border-border hover:bg-muted/40",
+                                )}
+                                title={`${session.title} · ${session.workspaceRoot}`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={cn(
+                                      "h-1.5 w-1.5 shrink-0 rounded-full",
+                                      MODE_DOT[session.mode],
+                                    )}
+                                  />
+                                  <span
+                                    className={cn(
+                                      "truncate text-xs font-medium",
+                                      active
+                                        ? "text-foreground"
+                                        : "text-foreground/85",
+                                    )}
+                                  >
+                                    {session.title}
+                                  </span>
+                                  <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                                    <span className="rounded bg-muted/50 px-1 py-px text-[8px] text-muted-foreground/70">
+                                      {MODE_SHORT_LABEL[session.mode]}
+                                    </span>
+                                    <span className="text-[9px] text-muted-foreground/50">
+                                      {relativeTime(session.updatedAt)}
+                                    </span>
+                                  </span>
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPendingDelete(session)}
+                                disabled={busy}
+                                aria-label={`删除会话 ${session.title}`}
+                                title={
+                                  busy
+                                    ? "会话执行中，停止后才能删除"
+                                    : "删除会话"
+                                }
+                                className="absolute right-1.5 top-1.5 rounded-md p-1.5 text-muted-foreground/40 opacity-100 transition-colors hover:bg-danger/10 hover:text-danger focus-visible:opacity-100 disabled:cursor-not-allowed disabled:opacity-30 lg:opacity-0 lg:group-hover:opacity-100"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
                   </li>
                 );
               })}

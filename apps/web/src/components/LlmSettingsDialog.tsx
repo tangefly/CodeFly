@@ -201,10 +201,10 @@ export function LlmSettingsDialog() {
     const timeoutValue = Number(timeoutMs);
     if (
       !Number.isInteger(timeoutValue) ||
-      timeoutValue < 1000 ||
+      timeoutValue < 0 ||
       timeoutValue > 600_000
     ) {
-      setFormError("超时必须是 1000 到 600000 毫秒之间的整数。");
+      setFormError("超时必须是 0 到 600000 毫秒之间的整数（0 表示不限制）。");
       return null;
     }
 
@@ -476,7 +476,10 @@ export function LlmSettingsDialog() {
                 className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-xs leading-5 text-foreground placeholder:text-muted-foreground/45 focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/20"
               />
             </Field>
-            <Field label="请求超时（ms）">
+            <Field
+              label="无输出超时（ms）"
+              hint="只要模型还在持续输出（含思考）就不会超时；0 表示不限制"
+            >
               <input
                 value={timeoutMs}
                 onChange={(event) => setTimeoutMs(event.target.value)}

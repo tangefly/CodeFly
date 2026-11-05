@@ -103,6 +103,15 @@ export const api = {
     return request(`/api/sessions/${sessionId}`, { method: "DELETE" });
   },
 
+  cancelRun(
+    sessionId: string,
+  ): Promise<{ cancelled: boolean; kind: "chat" | "agent" | null }> {
+    return request(`/api/sessions/${sessionId}/cancel`, {
+      method: "POST",
+      body: "{}",
+    });
+  },
+
   browseWorkspaces(path?: string): Promise<WorkspaceBrowseResponse> {
     const query =
       path === undefined || path.trim() === ""

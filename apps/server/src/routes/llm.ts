@@ -11,6 +11,7 @@ import { SSE_HEADERS, sseComment, sseFrame } from "../exec/sse.js";
 import type { LlmConfigStore } from "../llm/config-store.js";
 import type { MessageStore } from "../llm/messages.js";
 import type { ChatService } from "../llm/service.js";
+import { waitForTitle, type SessionTitler } from "../llm/title.js";
 import type { SessionStore } from "../session/store.js";
 
 export interface LlmRouteDeps {
@@ -18,6 +19,7 @@ export interface LlmRouteDeps {
   messages: MessageStore;
   llmConfig: LlmConfigStore;
   chat: ChatService;
+  titler: SessionTitler;
   audit: AuditLog;
 }
 
@@ -103,6 +105,14 @@ export function registerLlmRoutes(app: FastifyInstance, deps: LlmRouteDeps): voi
     try {
       if (!abort.signal.aborted) {
         await deps.chat.chat(session, body.message, abort.signal, emit);
+        // Name the session after its first exchange once the turn is done.
+        // The wait is bounded; a slow title still persists in the background.
+        const titled = await waitForTitle(
+          deps.titler.maybeTitle(id, body.message),
+        );
+        if (titled !== null) {
+          emit({ type: "session.updated", session: titled });
+        }
       }
     } catch (error) {
       const appError = error instanceof AppError ? error : null;

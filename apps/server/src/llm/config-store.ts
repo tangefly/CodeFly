@@ -168,7 +168,7 @@ export class LlmConfigStore {
             : DEFAULT_SYSTEM_PROMPT,
         timeoutMs:
           typeof parsed.timeoutMs === "number" &&
-          parsed.timeoutMs >= 1000 &&
+          parsed.timeoutMs >= 0 &&
           parsed.timeoutMs <= appConfig.llm.maxTimeoutMs
             ? Math.round(parsed.timeoutMs)
             : appConfig.llm.defaultTimeoutMs,
@@ -237,7 +237,9 @@ export class LlmConfigStore {
     const timeoutMs =
       input.timeoutMs === undefined
         ? this.current.timeoutMs
-        : Math.min(appConfig.llm.maxTimeoutMs, Math.max(1000, input.timeoutMs));
+        : input.timeoutMs === 0
+          ? 0
+          : Math.min(appConfig.llm.maxTimeoutMs, Math.max(1000, input.timeoutMs));
 
     this.current = {
       baseUrl,

@@ -20,7 +20,6 @@ import type { MessageStore } from "./messages.js";
 import type { SessionRunLock } from "./run-lock.js";
 
 export interface ChatServiceOptions {
-  contextBudgetChars: number;
   testMaxTokens: number;
 }
 
@@ -33,46 +32,32 @@ export interface ChatServiceDeps {
   options: ChatServiceOptions;
 }
 
-interface BuiltContext {
-  messages: LlmChatMessage[];
-  trimmed: boolean;
-}
-
+/**
+ * Builds the outgoing chat context with the full session history. The model
+ * server enforces its own context window; there is no local character budget.
+ */
 function buildContext(
   systemPrompt: string,
   prior: ChatMessageRecord[],
   userContent: string,
-  budgetChars: number,
-): BuiltContext {
+): LlmChatMessage[] {
   const baseSystem = systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT;
-  let used = baseSystem.length + userContent.length;
   const picked: LlmChatMessage[] = [];
 
-  for (let index = prior.length - 1; index >= 0; index -= 1) {
-    const message = prior[index]!;
+  for (const message of prior) {
     if (message.role !== "user" && message.role !== "assistant") continue;
     if (message.content.trim() === "") continue;
-    if (picked.length > 0 && used + message.content.length > budgetChars) break;
-    picked.unshift({ role: message.role, content: message.content });
-    used += message.content.length;
+    picked.push({ role: message.role, content: message.content });
   }
 
   // Some providers require the first non-system message to be a user turn.
   while (picked[0]?.role === "assistant") picked.shift();
 
-  const trimmed = picked.length < prior.length;
-  const system = trimmed
-    ? `${baseSystem}\n\n[Earlier conversation messages were omitted to fit the context window.]`
-    : baseSystem;
-
-  return {
-    messages: [
-      { role: "system", content: system },
-      ...picked,
-      { role: "user", content: userContent },
-    ],
-    trimmed,
-  };
+  return [
+    { role: "system", content: baseSystem },
+    ...picked,
+    { role: "user", content: userContent },
+  ];
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -126,7 +111,10 @@ export class ChatService {
     this.assertReady(session.id);
     if (clientSignal.aborted) return;
 
-    this.deps.lock.acquire(session.id, "chat");
+    const runSignal = this.deps.lock.acquire(session.id, "chat");
+    // The run stops when the client disconnects or when it is cancelled
+    // explicitly through the session cancel endpoint.
+    const signal = AbortSignal.any([clientSignal, runSignal]);
     const startedAt = Date.now();
     const config = this.deps.llmConfig.getInternal();
     const prior = this.deps.messages.list(session.id);
@@ -159,28 +147,31 @@ export class ChatService {
       await this.deps.messages.appendMany(session.id, [userMessage, assistantMessage]);
       emit({ type: "chat.started", userMessage, assistantMessage });
 
-      const context = buildContext(
-        config.systemPrompt,
-        prior,
-        content,
-        this.deps.options.contextBudgetChars,
-      );
+      const context = buildContext(config.systemPrompt, prior, content);
 
+      // Inactivity timeout: re-arm whenever the provider produces output, so
+      // a long thinking phase that keeps streaming is never cut off.
       const timeoutController = new AbortController();
       let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        timeoutController.abort();
-      }, config.timeoutMs);
-      timer.unref?.();
+      let timer: NodeJS.Timeout | undefined;
+      const armTimeout = (): void => {
+        if (config.timeoutMs <= 0) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          timeoutController.abort();
+        }, config.timeoutMs);
+        timer.unref?.();
+      };
+      armTimeout();
 
-      const signal = AbortSignal.any([clientSignal, timeoutController.signal]);
+      const streamSignal = AbortSignal.any([signal, timeoutController.signal]);
       let usage: ChatUsage | undefined;
 
       try {
         const result = await this.deps.client.streamChat(
           config,
-          context.messages,
+          context,
           (delta) => {
             assistantContent += delta;
             emit({
@@ -189,7 +180,7 @@ export class ChatService {
               data: delta,
             });
           },
-          signal,
+          streamSignal,
           {
             onReasoningDelta: (delta) => {
               assistantReasoning += delta;
@@ -199,6 +190,7 @@ export class ChatService {
                 data: delta,
               });
             },
+            onActivity: armTimeout,
           },
         );
 
@@ -243,17 +235,18 @@ export class ChatService {
           model: config.model,
           outcome: "complete",
           durationMs: Date.now() - startedAt,
-          promptChars: context.messages.reduce(
+          promptChars: context.reduce(
             (total, message) => total + (message.content?.length ?? 0),
             0,
           ),
           responseChars: assistantContent.length,
           reasoningChars: assistantReasoning.length,
-          contextTrimmed: context.trimmed,
           usage,
         });
       } catch (error) {
-        const aborted = clientSignal.aborted;
+        // `!timedOut` keeps a timeout an error even though the combined
+        // signal is aborted in that case too.
+        const aborted = !timedOut && signal.aborted;
         const code = timedOut
           ? "LLM_TIMEOUT"
           : aborted
@@ -262,7 +255,7 @@ export class ChatService {
               ? error.code
               : "LLM_ERROR";
         const message = timedOut
-          ? `模型响应超时（${config.timeoutMs} ms）。`
+          ? `模型超过 ${config.timeoutMs} ms 没有输出，已停止。`
           : aborted
             ? "生成已取消。"
             : redactSecret(
@@ -295,7 +288,7 @@ export class ChatService {
           outcome: aborted ? "cancelled" : "error",
           code,
           durationMs: Date.now() - startedAt,
-          promptChars: context.messages.reduce(
+          promptChars: context.reduce(
             (total, message) => total + (message.content?.length ?? 0),
             0,
           ),
@@ -349,6 +342,9 @@ export class ChatService {
     };
 
     const startedAt = Date.now();
+    // A connection probe still needs a bound even when streaming timeouts
+    // are disabled (0).
+    const probeTimeoutMs = config.timeoutMs > 0 ? config.timeoutMs : 30_000;
     try {
       const result = await this.deps.client.complete(
         config,
@@ -358,7 +354,7 @@ export class ChatService {
             content: "Reply with exactly: OK",
           },
         ],
-        AbortSignal.timeout(config.timeoutMs),
+        AbortSignal.timeout(probeTimeoutMs),
         this.deps.options.testMaxTokens,
       );
       return {
@@ -369,7 +365,7 @@ export class ChatService {
       };
     } catch (error) {
       const message = isTimeoutError(error)
-        ? `连接模型 API 超时（${config.timeoutMs} ms）。`
+        ? `连接模型 API 超时（${probeTimeoutMs} ms）。`
         : redactSecret(
             error instanceof Error ? error.message : String(error),
             config.apiKey,

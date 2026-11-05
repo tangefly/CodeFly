@@ -45,6 +45,12 @@ export interface StreamChatOptions {
   toolChoice?: "auto" | "none";
   /** Called for each streamed reasoning/thinking delta. */
   onReasoningDelta?: (text: string) => void;
+  /**
+   * Called whenever the provider produces bytes (response headers or a body
+   * chunk). Chat/agent services use it to arm an inactivity timeout, so long
+   * thinking that keeps streaming is never cut off by a total-duration limit.
+   */
+  onActivity?: () => void;
 }
 
 export interface LlmStreamResult {
@@ -65,6 +71,14 @@ export interface LlmCompleteResult {
   latencyMs: number;
   model: string;
   usage?: ChatUsage;
+}
+
+export interface LlmCompleteOptions {
+  /**
+   * Provider-specific chat template kwargs (vLLM passes these straight to
+   * the template; e.g. Qwen's `enable_thinking`).
+   */
+  chatTemplateKwargs?: Record<string, unknown>;
 }
 
 export class LlmError extends Error {
@@ -93,6 +107,7 @@ export interface LlmClientLike {
     messages: LlmChatMessage[],
     signal: AbortSignal,
     maxTokens?: number,
+    options?: LlmCompleteOptions,
   ): Promise<LlmCompleteResult>;
 }
 
@@ -398,6 +413,7 @@ export class LlmClient implements LlmClientLike {
       true,
       signal,
     );
+    options?.onActivity?.();
 
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json") && !contentType.includes("event-stream")) {
@@ -504,6 +520,7 @@ export class LlmClient implements LlmClientLike {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        options?.onActivity?.();
         buffer += decoder.decode(value, { stream: true });
         let newline = buffer.indexOf("\n");
         while (newline >= 0) {
@@ -566,14 +583,14 @@ export class LlmClient implements LlmClientLike {
     messages: LlmChatMessage[],
     signal: AbortSignal,
     maxTokens = 32,
+    options?: LlmCompleteOptions,
   ): Promise<LlmCompleteResult> {
     const startedAt = Date.now();
-    const response = await postChat(
-      config,
-      bodyFor(config, messages, false, maxTokens),
-      false,
-      signal,
-    );
+    const body = bodyFor(config, messages, false, maxTokens);
+    if (options?.chatTemplateKwargs !== undefined) {
+      body.chat_template_kwargs = options.chatTemplateKwargs;
+    }
+    const response = await postChat(config, body, false, signal);
     let json: OpenAiResponse;
     try {
       json = (await response.json()) as OpenAiResponse;

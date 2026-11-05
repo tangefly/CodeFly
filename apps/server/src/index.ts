@@ -27,6 +27,7 @@ import { SearchConfigStore } from "./search/config-store.js";
 import { MessageStore } from "./llm/messages.js";
 import { LlmClient } from "./llm/client.js";
 import { ChatService } from "./llm/service.js";
+import { SessionTitler } from "./llm/title.js";
 import { SessionRunLock } from "./llm/run-lock.js";
 import { AgentConfigStore } from "./agent/config-store.js";
 import { AgentToolExecutor } from "./agent/tools.js";
@@ -78,9 +79,16 @@ async function main(): Promise<void> {
     client: new LlmClient(),
     lock: runLock,
     options: {
-      contextBudgetChars: config.llm.contextBudgetChars,
       testMaxTokens: config.llm.testMaxTokens,
     },
+  });
+
+  const titler = new SessionTitler({
+    sessions,
+    messages: messageStore,
+    llmConfig,
+    client: new LlmClient(),
+    audit,
   });
 
   const sandbox = new SandboxManager();
@@ -127,7 +135,6 @@ async function main(): Promise<void> {
     dataDir: config.dataDir,
     maxReadBytes: config.fs.maxReadBytes,
     maxWriteBytes: config.fs.maxWriteBytes,
-    contextBudgetChars: config.llm.contextBudgetChars,
   });
 
   const app = Fastify({
@@ -225,6 +232,7 @@ async function main(): Promise<void> {
     messages: messageStore,
     llmConfig,
     chat,
+    titler,
     audit,
   });
   registerSearchRoutes(app, { searchConfig, audit });
@@ -232,6 +240,7 @@ async function main(): Promise<void> {
     sessions,
     agentConfig,
     agent,
+    titler,
     audit,
   });
 

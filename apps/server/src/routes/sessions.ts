@@ -56,6 +56,15 @@ export function registerSessionRoutes(
     return { session: deps.sessions.getOrThrow(id) };
   });
 
+  app.post("/api/sessions/:id/cancel", async (request) => {
+    const { id } = request.params as { id: string };
+    deps.sessions.getOrThrow(id);
+    // Aborts the in-flight chat/agent run so the upstream model request is
+    // torn down even if the SSE connection close never reaches the server.
+    const kind = deps.lock.cancel(id);
+    return { cancelled: kind !== null, kind };
+  });
+
   app.delete("/api/sessions/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const session = deps.sessions.getOrThrow(id);

@@ -21,6 +21,11 @@ export type SandboxProbe = "full" | "partial" | "unusable";
 export interface Session {
   id: string;
   title: string;
+  /**
+   * How the title was chosen. `default` titles (the folder name) are replaced
+   * with an auto-generated summary once the first exchange exists.
+   */
+  titleSource?: "default" | "user" | "auto";
   /** Canonical absolute path. Immutable after creation. */
   workspaceRoot: string;
   mode: SandboxMode;
@@ -224,6 +229,7 @@ export interface LlmSettingsPublic {
   temperature: number | null;
   maxTokens: number | null;
   systemPrompt: string;
+  /** Inactivity timeout in ms; 0 disables it. */
   timeoutMs: number;
   /** DeepSeek thinking mode. Enabled by default. */
   thinking: boolean;
@@ -240,6 +246,7 @@ export interface LlmSettingsInput {
   temperature?: number | null;
   maxTokens?: number | null;
   systemPrompt?: string;
+  /** Inactivity timeout in ms; 0 disables it. */
   timeoutMs?: number;
   thinking?: boolean;
   reasoningEffort?: ReasoningEffort;
@@ -308,6 +315,7 @@ export interface ChatHistoryResponse {
 export type AuditType =
   | "session.created"
   | "session.deleted"
+  | "session.titled"
   | "permission.changed"
   | "settings.changed"
   | "exec.started"

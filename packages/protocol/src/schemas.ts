@@ -73,7 +73,8 @@ export const llmSettingsUpdateSchema = z.object({
   temperature: z.number().min(0).max(2).nullable().optional(),
   maxTokens: z.number().int().min(1).max(131_072).nullable().optional(),
   systemPrompt: z.string().max(20_000).optional(),
-  timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  /** Inactivity timeout: 0 disables it. */
+  timeoutMs: z.number().int().min(0).max(600_000).optional(),
   thinking: z.boolean().optional(),
   reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
 });
@@ -84,7 +85,7 @@ export const llmTestSchema = z.object({
   model: z.string().trim().min(1).max(200).optional(),
   temperature: z.number().min(0).max(2).nullable().optional(),
   maxTokens: z.number().int().min(1).max(131_072).nullable().optional(),
-  timeoutMs: z.number().int().min(1000).max(600_000).optional(),
+  timeoutMs: z.number().int().min(0).max(600_000).optional(),
 });
 
 export const searchSettingsUpdateSchema = z.object({
