@@ -9,11 +9,11 @@ const MODES: Array<{
   icon: typeof MessageSquare;
 }> = [
   { id: "chat", label: "对话", icon: MessageSquare },
-  { id: "agent", label: "Agent", icon: Bot },
+  { id: "agent", label: "Code", icon: Bot },
   { id: "paper", label: "论文", icon: BookOpen },
 ];
 
-/** Switches between the independent UIs (chat, agent and paper assistant). */
+/** Switches between the independent UIs (chat, code and paper assistant). */
 export function ModeSwitcher() {
   const mode = useAppStore((state) => state.mode);
   const setMode = useAppStore((state) => state.setMode);

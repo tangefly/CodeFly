@@ -37,8 +37,8 @@ export function NewSessionDialog() {
     <Modal
       open={open}
       onClose={pending ? undefined : close}
-      title="新建 Agent 会话"
-      description="Agent 会话需要绑定一个已存在的本机工作区目录。工作区路径在创建后不可变。"
+      title="新建 Code 会话"
+      description="Code 会话需要绑定一个已存在的本机工作区目录。工作区路径在创建后不可变。"
       footer={
         <>
           <Button variant="outline" size="sm" disabled={pending} onClick={close}>
@@ -50,7 +50,7 @@ export function NewSessionDialog() {
             disabled={pending || !workspaceRoot.trim()}
             onClick={() => void submit()}
           >
-            {pending ? "创建中…" : "创建 Agent 会话"}
+            {pending ? "创建中…" : "创建 Code 会话"}
           </Button>
         </>
       }

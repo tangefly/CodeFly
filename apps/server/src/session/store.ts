@@ -211,7 +211,7 @@ export class SessionStore {
     if (session.kind !== "agent") {
       throw new AppError(
         "WRONG_SESSION_KIND",
-        "该会话不是 Agent 会话，不能执行 Agent 操作。",
+        "该会话不是 Code 会话，不能执行 Code 操作。",
         400,
       );
     }

@@ -34,7 +34,7 @@ describe("SessionStore session kinds", () => {
     expect(session.titleSource).toBe("default");
     expect(store.getChatOrThrow(session.id).id).toBe(session.id);
     expect(() => store.getAgentOrThrow(session.id)).toThrowError(
-      /不是 Agent 会话/,
+      /不是 Code 会话/,
     );
 
     const reloaded = new SessionStore(file);
@@ -72,7 +72,7 @@ describe("SessionStore session kinds", () => {
     expect(session.kind === "paper" ? session.paperIds : null).toEqual([]);
     expect(store.getPaperOrThrow(session.id).id).toBe(session.id);
     expect(() => store.getAgentOrThrow(session.id)).toThrowError(
-      /不是 Agent 会话/,
+      /不是 Code 会话/,
     );
 
     await Promise.all([

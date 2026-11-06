@@ -117,7 +117,7 @@ export function SettingsDialog() {
                 </>
               ) : (
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  对话、Agent 与论文助手都需要配置 OpenAI-compatible 模型 API。
+                  对话、Code 与论文助手都需要配置 OpenAI-compatible 模型 API。
                 </p>
               )}
             </div>
@@ -160,7 +160,7 @@ export function SettingsDialog() {
                 </>
               ) : (
                 <p className="text-[11px] leading-5 text-muted-foreground">
-                  Agent 的 web_search 需要单独配置搜索 API；与聊天模型互不复用。
+                  Code 的 web_search 需要单独配置搜索 API；与聊天模型互不复用。
                 </p>
               )}
             </div>
@@ -177,7 +177,7 @@ export function SettingsDialog() {
 
         <section>
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold text-foreground">Agent 模式</h3>
+            <h3 className="text-xs font-semibold text-foreground">Code 模式</h3>
             <span className="font-mono text-[9px] text-muted-foreground/60">
               {agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} steps
             </span>
@@ -186,7 +186,7 @@ export function SettingsDialog() {
             <Bot className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
             <div className="min-w-0 flex-1">
               <p className="text-[11px] leading-5 text-muted-foreground">
-                tool-calling / agent loop：模型可调用命令与文件工具，最多{" "}
+                tool-calling 循环：模型可调用命令与文件工具，最多{" "}
                 {agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} 步，已启用{" "}
                 {agentSettings?.enabledTools.length ?? 0} 个工具。
               </p>

@@ -58,19 +58,19 @@ export function AgentComposer() {
         <div className="mb-2 flex items-center gap-2">
           <span className="inline-flex items-center gap-1 rounded-lg border border-border bg-card/60 px-2 py-1 text-[10px] font-medium text-primary">
             <Bot className="h-3 w-3" />
-            Agent
+            Code
           </span>
           <span className="hidden text-[10px] text-muted-foreground/60 sm:inline">
             {ready
               ? `最多 ${agentSettings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS} 步 · 工具在沙箱内执行`
-              : "Agent 需要先配置模型 API"}
+              : "Code 需要先配置模型 API"}
           </span>
         </div>
 
         {!ready ? (
           <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
             <Sparkles className="h-3.5 w-3.5 shrink-0" />
-            <span>Agent 模式需要先配置 OpenAI-compatible 模型 API。</span>
+            <span>Code 模式需要先配置 OpenAI-compatible 模型 API。</span>
             <Button
               size="sm"
               variant="outline"
@@ -111,12 +111,12 @@ export function AgentComposer() {
               }}
               placeholder={
                 !session
-                  ? "请先创建或选择一个 Agent 会话"
+                  ? "请先创建或选择一个 Code 会话"
                   : !ready
                     ? "请先配置模型 API"
                     : streaming
-                      ? "Agent 正在执行…"
-                      : "描述一个任务，Enter 启动 Agent…"
+                      ? "Code 正在执行…"
+                      : "描述一个任务，Enter 启动 Code…"
               }
               spellCheck={false}
               className="max-h-[200px] min-h-[44px] w-full resize-none bg-transparent py-1 font-mono text-[13px] leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground/45 focus:outline-none disabled:cursor-not-allowed"
@@ -128,8 +128,8 @@ export function AgentComposer() {
             <Button
               variant="ghost"
               size="icon"
-              aria-label="Agent 设置"
-              title="Agent 设置"
+              aria-label="Code 设置"
+              title="Code 设置"
               onClick={openAgentSettings}
               className="h-8 w-8"
             >

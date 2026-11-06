@@ -119,7 +119,7 @@ export function AgentSidebar() {
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <SidebarHeader subtitle="local agent console" />
+        <SidebarHeader subtitle="local code console" />
 
         <div className="px-3 pb-2">
           <Button
@@ -129,13 +129,13 @@ export function AgentSidebar() {
             onClick={openNewSession}
           >
             <Plus className="h-4 w-4" />
-            新建 Agent 会话
+            新建 Code 会话
           </Button>
         </div>
 
         <div className="flex items-center justify-between px-4 pb-1 pt-2">
           <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground/60">
-            Agent 会话
+            Code 会话
           </span>
           <span className="font-mono text-[10px] text-muted-foreground/50">
             {sessions.length}
@@ -145,7 +145,7 @@ export function AgentSidebar() {
         <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {sessions.length === 0 ? (
             <p className="px-2 py-6 text-center text-[11px] leading-5 text-muted-foreground/60">
-              还没有 Agent 会话。
+              还没有 Code 会话。
               <br />
               创建一个并绑定工作区目录。
             </p>

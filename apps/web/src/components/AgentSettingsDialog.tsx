@@ -131,8 +131,8 @@ export function AgentSettingsDialog() {
     <Modal
       open={open}
       onClose={saving ? undefined : close}
-      title="Agent 设置"
-      description="控制 tool-calling / agent loop。工具在会话权限下执行；模型请求提权时会弹一次性审批。"
+      title="Code 设置"
+      description="控制 tool-calling 循环。工具在会话权限下执行；模型请求提权时会弹一次性审批。"
       className="max-w-xl"
       footer={
         <>
@@ -146,7 +146,7 @@ export function AgentSettingsDialog() {
             onClick={() => void save()}
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            保存 Agent 配置
+            保存 Code 配置
           </Button>
         </>
       }
@@ -155,7 +155,7 @@ export function AgentSettingsDialog() {
         <div className="flex gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2 text-[10px] leading-5 text-muted-foreground">
           <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
           <span>
-            Agent 会长耗时地循环「模型 → 工具 → 模型」，直到模型不再调用工具或达到最大步数。
+            Code 会长耗时地循环「模型 → 工具 → 模型」，直到模型不再调用工具或达到最大步数。
             当前模型：
             <span className="text-foreground">
               {llmSettings?.model || "未配置"}
@@ -230,7 +230,7 @@ export function AgentSettingsDialog() {
           </div>
           {enabledTools.length === 0 ? (
             <p className="mt-1 text-[10px] text-warning">
-              未启用任何工具，Agent 只能对话。
+              未启用任何工具，Code 只能对话。
             </p>
           ) : null}
           {enabledTools.includes("web_search") &&
@@ -244,7 +244,7 @@ export function AgentSettingsDialog() {
 
         <details className="rounded-lg border border-border bg-background/40 px-3 py-2">
           <summary className="cursor-pointer select-none text-[11px] font-medium text-foreground">
-            高级：Agent system prompt
+            高级：Code system prompt
           </summary>
           <textarea
             value={systemPrompt}

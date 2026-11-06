@@ -242,7 +242,17 @@ function storeCurrentSessionId(kind: SessionKind, id: string | null): void {
 function readStoredMode(): SessionKind {
   if (typeof window !== "undefined") {
     const hash = window.location.hash.replace(/^#\/?/, "");
-    if (hash === "chat" || hash === "agent" || hash === "paper") return hash;
+    if (hash === "code") return "agent";
+    if (hash === "agent") {
+      // Legacy links keep working; the visible URL uses the new name.
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}#/code`,
+      );
+      return "agent";
+    }
+    if (hash === "chat" || hash === "paper") return hash;
   }
   try {
     const stored = localStorage.getItem(MODE_KEY);
@@ -262,7 +272,8 @@ function writeStoredMode(mode: SessionKind): void {
     // Ignore storage failures.
   }
   if (typeof window === "undefined") return;
-  const next = `${window.location.pathname}${window.location.search}#/${mode}`;
+  const hashMode = mode === "agent" ? "code" : mode;
+  const next = `${window.location.pathname}${window.location.search}#/${hashMode}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) {
     window.history.replaceState(null, "", next);
@@ -458,7 +469,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     if (!state.llmSettings?.configured) {
       get().notify(
         "info",
-        kind === "paper" ? "论文助手需要先配置模型 API" : "Agent 需要先配置模型 API",
+        kind === "paper" ? "论文助手需要先配置模型 API" : "Code 需要先配置模型 API",
       );
       get().openLlmSettings();
       return;
@@ -1423,7 +1434,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     try {
       const { settings } = await api.updateAgentSettings(input);
       set({ agentSettings: settings });
-      get().notify("info", "Agent 配置已保存");
+      get().notify("info", "Code 配置已保存");
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);

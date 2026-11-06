@@ -30,7 +30,7 @@ export class SessionRunLock {
             ? "聊天"
             : current.kind === "paper"
               ? "论文助手"
-              : "Agent"
+              : "Code"
         } 回合，请等待结束或先停止。`,
         409,
       );

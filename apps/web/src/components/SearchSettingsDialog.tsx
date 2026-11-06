@@ -182,7 +182,7 @@ export function SearchSettingsDialog() {
       open={open}
       onClose={saving ? undefined : close}
       title="搜索 API"
-      description="独立于模型 API 的联网搜索配置。仅 web_search 使用，不影响聊天与 Agent 的模型请求。"
+      description="独立于模型 API 的联网搜索配置。仅 web_search 使用，不影响聊天与 Code 的模型请求。"
       className="max-w-xl"
       footer={
         <>
@@ -317,7 +317,7 @@ export function SearchSettingsDialog() {
             POST /v1/tools/search
           </code>{" "}
           请求与响应格式。Base URL 留空并保存会清除配置，web_search
-          将不会再出现在 Agent 工具列表中。
+          将不会再出现在 Code 工具列表中。
         </div>
 
         {formError ? (

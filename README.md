@@ -1,21 +1,21 @@
 # CodeFly
 
-本地单用户 agent 控制台：浏览器通过 REST + SSE 连接本机 Node 服务，在 Landlock 沙箱中
+本地单用户编码控制台：浏览器通过 REST + SSE 连接本机 Node 服务，在 Landlock 沙箱中
 执行命令，文件写操作限制在工作区与 `/tmp`。
 
 ## 功能
 
-- **三界面**：侧栏顶部切换「对话」「Agent」「论文」，三者拥有独立的会话列表、输入框
-  与历史；地址栏用 `#/chat`、`#/agent`、`#/paper` 记住当前界面。
+- **三界面**：侧栏顶部切换「对话」「Code」「论文」，三者拥有独立的会话列表、输入框
+  与历史；地址栏用 `#/chat`、`#/code`、`#/paper` 记住当前界面（旧的 `#/agent` 仍兼容）。
 - **对话**：不绑定工作区，只与模型聊天，不执行命令或读写文件；支持多个独立对话、
   自动标题、删除与历史持久化。
-- **Agent 会话**：按工作区新建、切换、删除；工具调用与消息历史持久化，刷新后恢复。
+- **Code 会话**：按工作区新建、切换、删除；工具调用与消息历史持久化，刷新后恢复。
 - **论文助手**：不绑定工作区，通过 arXiv 检索最新论文，下载并解析 PDF，按目录/页码/
   章节分段阅读，把标签、阅读状态、用户笔记与结构化摘要整理进全局论文库；支持本地上传
-  PDF、BibTeX/Markdown 导出。论文工具与原 Agent 工具完全分离。
+  PDF、BibTeX/Markdown 导出。论文工具与 Code 工具完全分离。
 - **聊天模型**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
-- **Agent 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
+- **Code 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
   `edit_file`、`list_files`、`grep`、`glob`、`web_search`、`web_fetch`、`read_image`；
   `read_file` 支持行号与 `offset`/`limit`，`edit_file` 支持一次多处原子替换，
   只读工具（含 `web_search`、`web_fetch`、`read_image`）并行执行；工具输出以可折叠
@@ -36,7 +36,7 @@
   工作区与 `/tmp`，并拒绝 `.git/`、`.claude/` 等受保护路径。
 - **GPU**：`workspace-write` 默认放行 GPU 设备节点、`/dev/shm` 与 `/proc`。
 - **用量统计**：会话上下文、累积上下文、累计输出、思考 token、缓存命中率。
-- **审计**：JSONL 记录审批、执行、配置变更与 Agent 事件。
+- **审计**：JSONL 记录审批、执行、配置变更与 Code 事件。
 
 ## 论文助手
 
@@ -103,7 +103,7 @@ Ollama、OpenAI 或其他厂商，搜索则单独指向 DeepSeek Search 或兼�
 
 ## 配置搜索 API
 
-顶栏齿轮 →「联网搜索」→「配置」（或 Agent 设置中的提示入口）：
+顶栏齿轮 →「联网搜索」→「配置」（或 Code 设置中的提示入口）：
 
 1. 填写搜索服务 Base URL，例如 `https://api.deepseek.com/v1`；服务端会自动拼接
    `/tools/search`，也可以直接填写完整的 `/v1/tools/search` 地址。
@@ -111,21 +111,21 @@ Ollama、OpenAI 或其他厂商，搜索则单独指向 DeepSeek Search 或兼�
 3. 「测试搜索」会发送一次 `query=CodeFly` 的最小请求，通过后保存。
 
 搜索配置只保存在本机 `data/search.json`（权限 `0600`），不会返回前端，也不会传给
-执行 shell 的沙箱进程。未配置（Base URL 为空）时，`web_search` 不会出现在 Agent 的
+执行 shell 的沙箱进程。未配置（Base URL 为空）时，`web_search` 不会出现在 Code 的
 工具列表中；Base URL 留空保存会停用并清除已保存的搜索 Key。升级后搜索不再复用模型
 Key，需要在「搜索 API」中单独填写一次。
 
 ## 使用
 
-1. 侧栏顶部选择「对话」「Agent」或「论文」。
+1. 侧栏顶部选择「对话」「Code」或「论文」。
 2. 对话：点击「新建对话」，无需选择工作区，直接开始聊天；每个对话有独立历史。
-3. Agent：点击「新建 Agent 会话」，选择一个已存在的绝对路径作为工作区。
-   Agent 会携带历史工具输出和思考内容；长会话的上下文与 token 消耗更大。
+3. Code：点击「新建 Code 会话」，选择一个已存在的绝对路径作为工作区。
+   Code 会携带历史工具输出和思考内容；长会话的上下文与 token 消耗更大。
 4. 论文：点击「新建论文会话」，直接检索 arXiv、阅读 PDF 或上传本地论文。
    左上/顶栏的「论文库」打开全局论文库，可筛选、编辑标签/状态/笔记、打开 PDF 与导出。
-5. Agent 工具卡片可展开/收起命令与结果；执行失败时自动展开。
-6. 顶栏或 Agent 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
-7. 顶栏「审计日志」查看当前 Agent 会话的审批、执行、文件写入与模型事件。
+5. Code 工具卡片可展开/收起命令与结果；执行失败时自动展开。
+6. 顶栏或 Code 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
+7. 顶栏「审计日志」查看当前 Code 会话的审批、执行、文件写入与模型事件。
 8. 侧边栏会话右侧的删除按钮可删除会话及其聊天/工具记录，不会删除工作区文件。
 9. 底部用量显示：
    - **会话上下文**：当前会话已保存的全部消息长度（条数与估算 token）。
@@ -159,7 +159,7 @@ Key，需要在「搜索 API」中单独填写一次。
 
 - `data/llm.json`：模型地址、模型名、API Key、思考设置。
 - `data/search.json`：搜索服务地址、搜索 API Key、请求超时。
-- `data/agent.json`：Agent 最大步数、命令超时、启用工具、system prompt。
+- `data/agent.json`：Code 最大步数、命令超时、启用工具、system prompt。
 - `data/papers/library.json`：全局论文库元数据、标签、阅读状态、笔记与摘要。
 - `data/papers/pdf/`：下载或上传的 PDF 缓存。
 - `data/papers/text/`：按页抽取的论文文本与章节索引。
@@ -184,8 +184,8 @@ Key，需要在「搜索 API」中单独填写一次。
 - `danger-full-access` 没有沙箱也没有审批，仅在明确确认后使用。
 - `workspace-write` 默认放行 GPU 设备、`/dev/shm` 与 `/proc`（CUDA 需要）；可用
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。
-- 思考 token 计入输出；Agent 模式会在每步回传历史思考内容，进一步增加上下文。
-- Agent 的只读工具（`read_file`、`list_files`、`grep`、`glob`）并行执行；写操作与
+- 思考 token 计入输出；Code 模式会在每步回传历史思考内容，进一步增加上下文。
+- Code 的只读工具（`read_file`、`list_files`、`grep`、`glob`）并行执行；写操作与
   `run_command` 严格按顺序执行。不支持交互式 stdin 或后台 PTY。
 - 历史上下文按字符预算截断（默认 120k 字符），每个会话最多保存 500 条消息。
 

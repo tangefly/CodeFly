@@ -329,11 +329,11 @@ export function AgentTimeline({
           </div>
           <div>
             <h2 className="text-lg font-semibold">
-              {mode === "agent" ? "还没有 Agent 会话" : "还没有论文会话"}
+              {mode === "agent" ? "还没有 Code 会话" : "还没有论文会话"}
             </h2>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
               {mode === "agent"
-                ? "创建会话并绑定一个本机工作区目录。Agent 工具都通过本机服务在沙箱内运行。"
+                ? "创建会话并绑定一个本机工作区目录。Code 工具都通过本机服务在沙箱内运行。"
                 : "创建一个论文会话，开始检索 arXiv、阅读 PDF 并整理论文库。"}
             </p>
           </div>
@@ -360,7 +360,7 @@ export function AgentTimeline({
             <p className="mx-auto max-w-md text-sm leading-6 text-muted-foreground">
               {mode === "agent" ? (
                 <>
-                  Agent 会在 Landlock 沙箱内运行命令与文件工具，写操作被限制在工作区与{" "}
+                  Code 会在 Landlock 沙箱内运行命令与文件工具，写操作被限制在工作区与{" "}
                   <code className="rounded bg-muted/60 px-1 py-0.5 font-mono text-[11px]">
                     /tmp
                   </code>
@@ -376,7 +376,7 @@ export function AgentTimeline({
               <>
                 <SuggestionCard
                   icon={<Terminal className="h-4 w-4" />}
-                  title="让 Agent 看看工作区"
+                  title="让 Code 看看工作区"
                   hint="列出内容并总结"
                   onClick={() => {
                     if (llmSettings?.configured) {

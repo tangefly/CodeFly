@@ -10,7 +10,7 @@ import {
 } from "@codefly/protocol";
 import { isNotFound } from "../http/errors.js";
 
-export const DEFAULT_AGENT_PROMPT = `你是 CodeFly 的本地编码 agent，在用户指定的工作区中完成软件工程任务。
+export const DEFAULT_AGENT_PROMPT = `你是 CodeFly 的本地编码助手，在用户指定的工作区中完成软件工程任务。
 
 工作方式：
 - 先理解后行动：阅读相关代码与上下文，遵循项目已有的结构和约定。

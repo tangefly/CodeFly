@@ -197,7 +197,7 @@ export async function runToolLoop(
           : aborted
             ? profile.runKind === "paper"
               ? "论文助手已取消。"
-              : "Agent 已取消。"
+              : "Code 已取消。"
             : redactSecret(
                 error instanceof Error ? error.message : String(error),
                 profile.config.apiKey,
