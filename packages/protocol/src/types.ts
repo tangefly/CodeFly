@@ -419,6 +419,27 @@ export interface ChatUsage {
 export const REASONING_EFFORTS = ["low", "high", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
+/**
+ * A saved model configuration. Profiles are keyed by Base URL + model, so
+ * configuring another model keeps the previous one available for switching.
+ */
+export interface LlmProfilePublic {
+  id: string;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+  apiKeyHint: string | null;
+  temperature: number | null;
+  maxTokens: number | null;
+  systemPrompt: string;
+  timeoutMs: number;
+  thinking: boolean;
+  reasoningEffort: ReasoningEffort;
+  /** Whether this profile backs the configuration currently in use. */
+  active: boolean;
+  updatedAt: string;
+}
+
 export interface LlmSettingsPublic {
   configured: boolean;
   baseUrl: string;
@@ -433,6 +454,10 @@ export interface LlmSettingsPublic {
   /** DeepSeek thinking mode. Enabled by default. */
   thinking: boolean;
   reasoningEffort: ReasoningEffort;
+  /** Id of the saved profile backing the active configuration. */
+  activeProfileId: string | null;
+  /** Saved configurations, active first and newest first. */
+  profiles: LlmProfilePublic[];
   updatedAt: string | null;
 }
 
@@ -449,6 +474,11 @@ export interface LlmSettingsInput {
   timeoutMs?: number;
   thinking?: boolean;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Saved profile the form was loaded from. When the submitted Base URL
+   * matches it, an omitted API key falls back to that profile's key.
+   */
+  profileId?: string;
 }
 
 /** Input accepted by POST /api/llm/test; omitted fields fall back to saved config. */
@@ -459,6 +489,8 @@ export interface LlmTestInput {
   temperature?: number | null;
   maxTokens?: number | null;
   timeoutMs?: number;
+  /** Saved profile the form was loaded from, for API-key inheritance. */
+  profileId?: string;
 }
 
 export interface LlmTestResult {

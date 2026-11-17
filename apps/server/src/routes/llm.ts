@@ -51,6 +51,46 @@ export function registerLlmRoutes(app: FastifyInstance, deps: LlmRouteDeps): voi
     return { settings };
   });
 
+  app.post("/api/llm/profiles/:id/activate", async (request) => {
+    const { id } = request.params as { id: string };
+    const settings = await deps.llmConfig.activateProfile(id);
+
+    await deps.audit.append({
+      type: "llm.config.changed",
+      action: "profile.activated",
+      profileId: id,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      thinking: settings.thinking,
+      reasoningEffort: settings.reasoningEffort,
+      hasApiKey: settings.hasApiKey,
+      apiKeyChanged: false,
+    });
+
+    return { settings };
+  });
+
+  app.delete("/api/llm/profiles/:id", async (request) => {
+    const { id } = request.params as { id: string };
+    const removed =
+      deps.llmConfig
+        .getPublic()
+        .profiles.find((profile) => profile.id === id) ?? null;
+    const settings = await deps.llmConfig.deleteProfile(id);
+
+    await deps.audit.append({
+      type: "llm.config.changed",
+      action: "profile.deleted",
+      profileId: id,
+      model: removed?.model,
+      baseUrl: removed?.baseUrl,
+      remainingProfiles: settings.profiles.length,
+      activeProfileId: settings.activeProfileId,
+    });
+
+    return { settings };
+  });
+
   app.post("/api/llm/test", async (request) => {
     const body = llmTestSchema.parse(request.body ?? {});
     return deps.chat.test(body);

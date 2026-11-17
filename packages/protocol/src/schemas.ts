@@ -159,6 +159,8 @@ export const llmSettingsUpdateSchema = z.object({
   timeoutMs: z.number().int().min(0).max(600_000).optional(),
   thinking: z.boolean().optional(),
   reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
+  /** Saved profile the form was loaded from, for API-key inheritance. */
+  profileId: z.string().trim().min(1).max(200).optional(),
 });
 
 export const llmTestSchema = z.object({
@@ -168,6 +170,8 @@ export const llmTestSchema = z.object({
   temperature: z.number().min(0).max(2).nullable().optional(),
   maxTokens: z.number().int().min(1).max(131_072).nullable().optional(),
   timeoutMs: z.number().int().min(0).max(600_000).optional(),
+  /** Saved profile the form was loaded from, for API-key inheritance. */
+  profileId: z.string().trim().min(1).max(200).optional(),
 });
 
 export const searchSettingsUpdateSchema = z.object({

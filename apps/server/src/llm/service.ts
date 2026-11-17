@@ -321,10 +321,14 @@ export class ChatService {
       );
     }
 
-    let apiKey = stored.apiKey;
-    if (input.apiKey !== undefined && input.apiKey.trim() !== "") {
-      apiKey = input.apiKey.trim();
-    }
+    const apiKey =
+      input.apiKey !== undefined && input.apiKey.trim() !== ""
+        ? input.apiKey.trim()
+        : this.deps.llmConfig.resolveApiKey(
+            baseUrl,
+            model,
+            input.profileId,
+          );
 
     const config: LlmInternalConfig = {
       ...stored,

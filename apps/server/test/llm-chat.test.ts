@@ -29,6 +29,7 @@ class FakeClient implements LlmClientLike {
   mode: "ok" | "error" | "abort" | "slow" = "ok";
   reasoning = "";
   calls: Array<{ config: LlmInternalConfig; messages: LlmChatMessage[] }> = [];
+  completions: LlmInternalConfig[] = [];
 
   async streamChat(
     config: LlmInternalConfig,
@@ -90,6 +91,7 @@ class FakeClient implements LlmClientLike {
     _signal: AbortSignal,
     _maxTokens?: number,
   ): Promise<LlmCompleteResult> {
+    this.completions.push(config);
     if (this.mode === "error") {
       throw new LlmError("LLM_HTTP_ERROR", "upstream failed", 502);
     }
@@ -396,6 +398,41 @@ describe("ChatService", () => {
     const failed = await service.test({});
     expect(failed.ok).toBe(false);
     expect(failed.message).toContain("upstream failed");
+  });
+
+  it("tests with the selected saved profile's key", async () => {
+    const first = await configStore.update({
+      baseUrl: "https://api.alpha.com/v1",
+      model: "alpha-model",
+      apiKey: "alpha-key",
+    });
+    const firstId = first.activeProfileId!;
+    await configStore.update({
+      baseUrl: "https://api.beta.com/v1",
+      model: "beta-model",
+      apiKey: "beta-key",
+    });
+
+    await service.test({
+      baseUrl: "https://api.alpha.com/v1",
+      model: "alpha-model",
+    });
+    expect(client.completions.at(-1)?.apiKey).toBe("alpha-key");
+
+    // A new model on the selected profile's provider reuses its key.
+    await service.test({
+      baseUrl: "https://api.alpha.com/v1",
+      model: "alpha-model-2",
+      profileId: firstId,
+    });
+    expect(client.completions.at(-1)?.apiKey).toBe("alpha-key");
+
+    // Another provider must not receive the active profile's key.
+    await service.test({
+      baseUrl: "https://api.gamma.com/v1",
+      model: "gamma-model",
+    });
+    expect(client.completions.at(-1)?.apiKey).toBe("");
   });
 
   it("refuses when no provider is configured", async () => {

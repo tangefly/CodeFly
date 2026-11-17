@@ -93,6 +93,12 @@ pnpm start
    vLLM、OpenRouter 等 OpenAI-compatible 服务。
 3. 「测试连接」通过后保存。
 
+每次保存都会按 Base URL + 模型名保存一份配置；「模型 API」页会以标签列出所有配置，点击
+标签即可切换，正在使用的配置标记为「正在使用」，每个标签也可以删除。API Key 随各自配置
+保存，切换时不需要重新填写。同一厂商下新增模型（Base URL 相同、仅模型名不同）会沿用已
+保存的 Key；切换到其他厂商时需要单独填写。删除正在使用的配置会自动回退到最近使用的其他
+配置。`data/llm.json` 中的旧版单配置会在启动时自动迁移为第一条已保存配置。
+
 API Key 只保存在本机 `data/llm.json`（权限 `0600`），不会返回前端，也不会传给执行
 shell 的沙箱进程。DeepSeek V4 默认开启思考模式，可在同一设置中关闭或调整强度。
 旧的 `deepseek-chat` / `deepseek-reasoner` 配置会在启动时自动迁移为
@@ -157,7 +163,7 @@ Key，需要在「搜索 API」中单独填写一次。
 
 数据文件：
 
-- `data/llm.json`：模型地址、模型名、API Key、思考设置。
+- `data/llm.json`：已保存的模型配置（地址、模型名、API Key、思考设置）与当前激活项。
 - `data/search.json`：搜索服务地址、搜索 API Key、请求超时。
 - `data/agent.json`：Code 最大步数、命令超时、启用工具、system prompt。
 - `data/papers/library.json`：全局论文库元数据、标签、阅读状态、笔记与摘要。

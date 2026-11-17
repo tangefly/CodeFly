@@ -179,6 +179,23 @@ export const api = {
     });
   },
 
+  activateLlmProfile(
+    profileId: string,
+  ): Promise<{ settings: LlmSettingsPublic }> {
+    return request(
+      `/api/llm/profiles/${encodeURIComponent(profileId)}/activate`,
+      { method: "POST", body: "{}" },
+    );
+  },
+
+  deleteLlmProfile(
+    profileId: string,
+  ): Promise<{ settings: LlmSettingsPublic }> {
+    return request(`/api/llm/profiles/${encodeURIComponent(profileId)}`, {
+      method: "DELETE",
+    });
+  },
+
   getSearchSettings(): Promise<{ settings: SearchSettingsPublic }> {
     return request("/api/search/settings");
   },

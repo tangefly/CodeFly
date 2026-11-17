@@ -179,6 +179,8 @@ export interface AppState {
   closePaperLibrary(): void;
   setPaperQuery(patch: Partial<AppState["paperQuery"]>): void;
   saveLlmSettings(input: LlmSettingsInput): Promise<boolean>;
+  activateLlmProfile(profileId: string): Promise<boolean>;
+  deleteLlmProfile(profileId: string): Promise<boolean>;
   testLlm(input: LlmTestInput): Promise<LlmTestResult>;
   saveSearchSettings(input: SearchSettingsInput): Promise<boolean>;
   testSearch(input: SearchTestInput): Promise<SearchTestResult>;
@@ -1178,6 +1180,30 @@ export const useAppStore = create<AppState>()((set, get) => {
       const { settings } = await api.updateLlmSettings(input);
       set({ llmSettings: settings });
       get().notify("info", "模型配置已保存");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  activateLlmProfile: async (profileId: string) => {
+    try {
+      const { settings } = await api.activateLlmProfile(profileId);
+      set({ llmSettings: settings });
+      get().notify("info", `已切换到 ${settings.model}`);
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  deleteLlmProfile: async (profileId: string) => {
+    try {
+      const { settings } = await api.deleteLlmProfile(profileId);
+      set({ llmSettings: settings });
+      get().notify("info", "模型配置已删除");
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
