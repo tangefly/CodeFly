@@ -21,9 +21,10 @@ export type SandboxProbe = "full" | "partial" | "unusable";
 /**
  * Chat sessions are plain model conversations and have no workspace; agent
  * sessions are bound to a workspace and can run tools inside it; paper
- * sessions are bound to the global paper library and can search/read papers.
+ * sessions are bound to the global paper library and can search/read papers;
+ * schedule sessions are bound to the global schedule store.
  */
-export type SessionKind = "chat" | "agent" | "paper";
+export type SessionKind = "chat" | "agent" | "paper" | "schedule";
 
 interface SessionBase {
   id: string;
@@ -61,7 +62,13 @@ export interface PaperSession extends SessionBase {
   paperIds: string[];
 }
 
-export type Session = ChatSession | AgentSession | PaperSession;
+export interface ScheduleSession extends SessionBase {
+  kind: "schedule";
+  /** Schedule sessions never bind a filesystem workspace. */
+  workspaceRoot: null;
+}
+
+export type Session = ChatSession | AgentSession | PaperSession | ScheduleSession;
 
 export interface DenialRecord {
   command: string;
@@ -172,6 +179,8 @@ export interface AgentToolMeta {
     | "arxiv"
     | "paper"
     | "library"
+    | "schedule"
+    | "memory"
     | "error";
   command?: string;
   cwd?: string;
@@ -449,6 +458,266 @@ export interface PaperOutline {
   sections: PaperSection[];
 }
 
+/** Tools available to schedule sessions. Kept separate from other modes. */
+export const SCHEDULE_TOOL_NAMES = [
+  "memory_search",
+  "memory_upsert",
+  "memory_delete",
+  "task_list",
+  "task_upsert",
+  "task_delete",
+  "plan_get",
+  "plan_schedule",
+  "plan_replan",
+  "block_update",
+  "plan_render",
+  "plan_email",
+] as const;
+
+export type ScheduleToolName = (typeof SCHEDULE_TOOL_NAMES)[number];
+
+export const SCHEDULE_MEMORY_CATEGORIES = [
+  "preference",
+  "constraint",
+  "routine",
+  "goal",
+  "context",
+] as const;
+export type ScheduleMemoryCategory =
+  (typeof SCHEDULE_MEMORY_CATEGORIES)[number];
+
+/** One structured memory document maintained by the schedule assistant. */
+export interface ScheduleMemory {
+  id: string;
+  /** Stable unique slug used for deterministic lookups. */
+  key: string;
+  category: ScheduleMemoryCategory;
+  title: string;
+  content: string;
+  /** Optional structured fields, e.g. scheduling_preferences. */
+  data: Record<string, unknown> | null;
+  tags: string[];
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const SCHEDULE_PRIORITIES = ["low", "medium", "high", "urgent"] as const;
+export type SchedulePriority = (typeof SCHEDULE_PRIORITIES)[number];
+
+export const SCHEDULE_TASK_STATUSES = [
+  "todo",
+  "in_progress",
+  "done",
+  "cancelled",
+] as const;
+export type ScheduleTaskStatus = (typeof SCHEDULE_TASK_STATUSES)[number];
+
+export const SCHEDULE_CONFIDENCE = ["low", "medium", "high"] as const;
+export type ScheduleConfidence = (typeof SCHEDULE_CONFIDENCE)[number];
+
+export const SCHEDULE_BLOCK_STATUSES = ["planned", "done", "skipped"] as const;
+export type ScheduleBlockStatus = (typeof SCHEDULE_BLOCK_STATUSES)[number];
+
+export const SCHEDULE_TIMES_OF_DAY = [
+  "any",
+  "morning",
+  "afternoon",
+  "evening",
+] as const;
+export type ScheduleTimeOfDay = (typeof SCHEDULE_TIMES_OF_DAY)[number];
+
+/** A unit of work the user wants to finish. Tasks are global across weeks. */
+export interface ScheduleTask {
+  id: string;
+  title: string;
+  notes: string;
+  project: string | null;
+  priority: SchedulePriority;
+  status: ScheduleTaskStatus;
+  estimatedMinutes: number;
+  /** Unfinished work not yet performed; done blocks reduce it. */
+  remainingMinutes: number;
+  actualMinutes: number;
+  estimateConfidence: ScheduleConfidence;
+  /** YYYY-MM-DD, inclusive. */
+  deadline: string | null;
+  splittable: boolean;
+  minBlockMinutes: number;
+  preferredTimeOfDay: ScheduleTimeOfDay;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One scheduled piece of a task. Times are local wall-clock HH:mm. */
+export interface ScheduleBlock {
+  id: string;
+  taskId: string;
+  /** YYYY-MM-DD. */
+  date: string;
+  start: string;
+  end: string;
+  status: ScheduleBlockStatus;
+  actualMinutes: number | null;
+  note: string;
+}
+
+export const SCHEDULE_PLAN_STATUSES = ["draft", "active", "archived"] as const;
+export type SchedulePlanStatus = (typeof SCHEDULE_PLAN_STATUSES)[number];
+
+/** One week's plan. Blocks reference global tasks by id. */
+export interface SchedulePlan {
+  id: string;
+  /** Monday of the planned week, YYYY-MM-DD. */
+  weekStart: string;
+  weekEnd: string;
+  timezone: string;
+  status: SchedulePlanStatus;
+  blocks: ScheduleBlock[];
+  /** Work that did not fit when the plan was last generated. */
+  unscheduled: ScheduleUnscheduledTask[];
+  warnings: string[];
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleBreak {
+  label: string;
+  start: string;
+  end: string;
+}
+
+/** Normalized scheduling preferences stored in a special memory document. */
+export interface SchedulePreferences {
+  timezone: string;
+  /** ISO weekdays, Monday = 1 … Sunday = 7. */
+  workdays: number[];
+  workStart: string;
+  workEnd: string;
+  breaks: ScheduleBreak[];
+  maxFocusMinutes: number;
+  minBlockMinutes: number;
+  bufferRatio: number;
+  dailyFocusLimitMinutes: number;
+}
+
+export interface ScheduleUnscheduledTask {
+  taskId: string;
+  title: string;
+  remainingMinutes: number;
+  reason: string;
+}
+
+export interface SchedulePlanSummary {
+  weekStart: string;
+  weekEnd: string;
+  timezone: string;
+  planId: string | null;
+  totalPlannedMinutes: number;
+  taskCount: number;
+  doneMinutes: number;
+  unscheduled: ScheduleUnscheduledTask[];
+  warnings: string[];
+}
+
+/** GET /api/schedule/overview response and tool card payload. */
+export interface ScheduleOverview {
+  timezone: string;
+  today: string;
+  weekStart: string;
+  weekEnd: string;
+  preferences: SchedulePreferences;
+  preferencesConfigured: boolean;
+  memories: ScheduleMemory[];
+  tasks: ScheduleTask[];
+  plan: SchedulePlan | null;
+  summary: SchedulePlanSummary;
+  calibration: ScheduleCalibration;
+}
+
+/** Actual/estimate calibration derived from completed tasks. */
+export interface ScheduleCalibration {
+  completedTasks: number;
+  /** Average actual / estimated ratio; null when no history exists. */
+  ratio: number | null;
+}
+
+export interface ScheduleEmailSettingsPublic {
+  configured: boolean;
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  hasPassword: boolean;
+  passwordHint: string | null;
+  from: string;
+  to: string;
+  updatedAt: string | null;
+}
+
+export interface ScheduleEmailSettingsInput {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  password?: string;
+  clearPassword?: boolean;
+  from: string;
+  to: string;
+}
+
+export interface ScheduleEmailTestInput {
+  host?: string;
+  port?: number;
+  secure?: boolean;
+  user?: string;
+  password?: string;
+  clearPassword?: boolean;
+  from?: string;
+  to?: string;
+}
+
+export interface ScheduleEmailTestResult {
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+}
+
+export interface ScheduleEmailSendResult {
+  ok: boolean;
+  message: string;
+  to: string;
+  messageId: string | null;
+  imagePath: string;
+}
+
+export interface ScheduleMemoryInput {
+  key?: string;
+  category?: ScheduleMemoryCategory;
+  title?: string;
+  content?: string;
+  data?: Record<string, unknown> | null;
+  tags?: string[];
+  pinned?: boolean;
+}
+
+export interface ScheduleTaskInput {
+  title?: string;
+  notes?: string;
+  project?: string | null;
+  priority?: SchedulePriority;
+  status?: ScheduleTaskStatus;
+  estimatedMinutes?: number;
+  remainingMinutes?: number;
+  actualMinutes?: number;
+  estimateConfidence?: ScheduleConfidence;
+  deadline?: string | null;
+  splittable?: boolean;
+  minBlockMinutes?: number;
+  preferredTimeOfDay?: ScheduleTimeOfDay;
+}
+
 export interface AgentSettingsPublic {
   maxSteps: number;
   commandTimeoutMs: number;
@@ -630,7 +899,12 @@ export type AuditType =
   | "paper.updated"
   | "paper.deleted"
   | "paper.extracted"
-  | "paper.context.changed";
+  | "paper.context.changed"
+  | "schedule.run"
+  | "schedule.memory.changed"
+  | "schedule.task.changed"
+  | "schedule.plan.changed"
+  | "schedule.email.sent";
 
 export interface AuditEvent {
   ts: string;

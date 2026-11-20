@@ -25,6 +25,15 @@ import type {
   PaperUpdateInput,
   SandboxMode,
   SandboxStatus,
+  ScheduleEmailSettingsInput,
+  ScheduleEmailSettingsPublic,
+  ScheduleEmailTestInput,
+  ScheduleEmailTestResult,
+  ScheduleMemoryInput,
+  ScheduleOverview,
+  ScheduleSession,
+  ScheduleTask,
+  ScheduleTaskInput,
   SearchSettingsInput,
   SearchSettingsPublic,
   SearchTestInput,
@@ -107,6 +116,8 @@ interface UiState {
   agentSettingsOpen: boolean;
   searchSettingsOpen: boolean;
   paperLibraryOpen: boolean;
+  schedulePanelOpen: boolean;
+  scheduleEmailSettingsOpen: boolean;
 }
 
 interface Notification {
@@ -140,10 +151,18 @@ export interface AppState {
   agentBusy: Record<string, boolean>;
   /** Per-session paper run in flight. */
   paperBusy: Record<string, boolean>;
+  /** Per-session schedule run in flight. */
+  scheduleBusy: Record<string, boolean>;
   /** A chat session creation request is in flight. */
   chatCreating: boolean;
   /** A paper session creation request is in flight. */
   paperCreating: boolean;
+  /** A schedule session creation request is in flight. */
+  scheduleCreating: boolean;
+  /** Global schedule store snapshot for the current week. */
+  scheduleOverview: ScheduleOverview | null;
+  scheduleLoading: boolean;
+  scheduleEmailSettings: ScheduleEmailSettingsPublic | null;
   /** Filtered library view used by the drawer. */
   papers: PaperRecord[];
   /** Every paper seen so far, regardless of the active library filter. */
@@ -171,6 +190,7 @@ export interface AppState {
   createSession(workspaceRoot: string, title?: string): Promise<boolean>;
   createChatSession(title?: string): Promise<boolean>;
   createPaperSession(title?: string): Promise<boolean>;
+  createScheduleSession(title?: string): Promise<boolean>;
   deleteSession(sessionId: string): Promise<boolean>;
   updatePermissions(mode: SandboxMode, confirmRisk?: boolean): Promise<boolean>;
   decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
@@ -184,6 +204,29 @@ export interface AppState {
   cancelAgent(): void;
   sendPaper(text: string): Promise<void>;
   cancelPaper(): void;
+  sendSchedule(text: string): Promise<void>;
+  cancelSchedule(): void;
+  loadScheduleOverview(weekStart?: string): Promise<void>;
+  createScheduleMemory(input: ScheduleMemoryInput): Promise<boolean>;
+  updateScheduleMemory(
+    memoryId: string,
+    input: ScheduleMemoryInput,
+  ): Promise<boolean>;
+  deleteScheduleMemory(memoryId: string): Promise<boolean>;
+  updateScheduleTask(taskId: string, input: ScheduleTaskInput): Promise<boolean>;
+  deleteScheduleTask(taskId: string): Promise<boolean>;
+  loadScheduleEmailSettings(): Promise<void>;
+  saveScheduleEmailSettings(
+    input: ScheduleEmailSettingsInput,
+  ): Promise<boolean>;
+  testScheduleEmail(
+    input: ScheduleEmailTestInput,
+  ): Promise<ScheduleEmailTestResult>;
+  sendScheduleEmailNow(weekStart?: string): Promise<boolean>;
+  openSchedulePanel(): void;
+  closeSchedulePanel(): void;
+  openScheduleEmailSettings(): void;
+  closeScheduleEmailSettings(): void;
   loadPapers(): Promise<void>;
   addPaperByArxiv(ref: string): Promise<PaperRecord | null>;
   updatePaper(paperId: string, patch: PaperUpdateInput): Promise<boolean>;
@@ -229,6 +272,7 @@ const CURRENT_SESSION_KEYS: Record<SessionKind, string> = {
   chat: "codefly.currentSession.chat",
   agent: "codefly.currentSession.agent",
   paper: "codefly.currentSession.paper",
+  schedule: "codefly.currentSession.schedule",
 };
 /** Key written before chat and agent were split; still read for agent mode. */
 const LEGACY_CURRENT_SESSION_KEY = "codefly.currentSession";
@@ -236,6 +280,7 @@ const LEGACY_CURRENT_SESSION_KEY = "codefly.currentSession";
 const chatAborters = new Map<string, AbortController>();
 const agentAborters = new Map<string, AbortController>();
 const paperAborters = new Map<string, AbortController>();
+const scheduleAborters = new Map<string, AbortController>();
 const loadedSessionIds = new Set<string>();
 
 function readStoredSessionId(kind: SessionKind): string | null {
@@ -273,11 +318,16 @@ function readStoredMode(): SessionKind {
       );
       return "agent";
     }
-    if (hash === "chat" || hash === "paper") return hash;
+    if (hash === "chat" || hash === "paper" || hash === "schedule") return hash;
   }
   try {
     const stored = localStorage.getItem(MODE_KEY);
-    if (stored === "chat" || stored === "agent" || stored === "paper") {
+    if (
+      stored === "chat" ||
+      stored === "agent" ||
+      stored === "paper" ||
+      stored === "schedule"
+    ) {
       return stored;
     }
   } catch {
@@ -472,11 +522,11 @@ function upsertStoredMessage(
 
 export const useAppStore = create<AppState>()((set, get) => {
   /**
-   * Shared streaming loop for Agent and paper sessions. Their SSE event
-   * contract is identical; only the endpoint and busy bookkeeping differ.
+   * Shared streaming loop for Agent, paper and schedule sessions. Their SSE
+   * event contract is identical; only the endpoint and busy bookkeeping differ.
    */
   const streamToolRun = async (
-    kind: "agent" | "paper",
+    kind: "agent" | "paper" | "schedule",
     text: string,
   ): Promise<void> => {
     const state = get();
@@ -490,7 +540,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     if (!state.llmSettings?.configured) {
       get().notify(
         "info",
-        kind === "paper" ? "论文助手需要先配置模型 API" : "Code 需要先配置模型 API",
+        kind === "paper"
+          ? "论文助手需要先配置模型 API"
+          : kind === "schedule"
+            ? "日程助手需要先配置模型 API"
+            : "Code 需要先配置模型 API",
       );
       get().openLlmSettings();
       return;
@@ -499,24 +553,35 @@ export const useAppStore = create<AppState>()((set, get) => {
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
       state.paperBusy[sessionId] ||
+      state.scheduleBusy[sessionId] ||
       chatAborters.has(sessionId) ||
       agentAborters.has(sessionId) ||
-      paperAborters.has(sessionId)
+      paperAborters.has(sessionId) ||
+      scheduleAborters.has(sessionId)
     ) {
       get().notify("info", "当前会话正在执行回合，请等待结束或先停止");
       return;
     }
 
     const controller = new AbortController();
-    const aborters = kind === "agent" ? agentAborters : paperAborters;
+    const aborters =
+      kind === "agent"
+        ? agentAborters
+        : kind === "paper"
+          ? paperAborters
+          : scheduleAborters;
     aborters.set(sessionId, controller);
     if (kind === "agent") {
       set((current) => ({
         agentBusy: { ...current.agentBusy, [sessionId]: true },
       }));
-    } else {
+    } else if (kind === "paper") {
       set((current) => ({
         paperBusy: { ...current.paperBusy, [sessionId]: true },
+      }));
+    } else {
+      set((current) => ({
+        scheduleBusy: { ...current.scheduleBusy, [sessionId]: true },
       }));
     }
 
@@ -726,10 +791,15 @@ export const useAppStore = create<AppState>()((set, get) => {
               }
             : {}),
         }));
-      } else {
+      } else if (kind === "paper") {
         set((current) => ({
           paperBusy: { ...current.paperBusy, [sessionId]: false },
         }));
+      } else {
+        set((current) => ({
+          scheduleBusy: { ...current.scheduleBusy, [sessionId]: false },
+        }));
+        void get().loadScheduleOverview();
       }
     }
   };
@@ -754,8 +824,13 @@ export const useAppStore = create<AppState>()((set, get) => {
   chatBusy: {},
   agentBusy: {},
   paperBusy: {},
+  scheduleBusy: {},
   chatCreating: false,
   paperCreating: false,
+  scheduleCreating: false,
+  scheduleOverview: null,
+  scheduleLoading: false,
+  scheduleEmailSettings: null,
   papers: [],
   paperIndex: {},
   paperTotal: 0,
@@ -780,6 +855,8 @@ export const useAppStore = create<AppState>()((set, get) => {
     agentSettingsOpen: false,
     searchSettingsOpen: false,
     paperLibraryOpen: false,
+    schedulePanelOpen: false,
+    scheduleEmailSettingsOpen: false,
   },
 
   init: async () => {
@@ -799,6 +876,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         agentResponse,
         paperResponse,
         paperTagResponse,
+        scheduleResponse,
+        scheduleEmailResponse,
       ] = await Promise.all([
         api.health(),
         api.listSessions(),
@@ -808,6 +887,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         api.getAgentSettings(),
         api.listPapers({ limit: 200 }),
         api.paperTags(),
+        api.scheduleOverview(),
+        api.getScheduleEmailSettings(),
       ]);
 
       const sessions = sessionsResponse.sessions;
@@ -843,6 +924,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         paperTotal: paperResponse.total,
         paperTags: paperTagResponse.tags,
         paperCollections: paperTagResponse.collections,
+        scheduleOverview: scheduleResponse.overview,
+        scheduleEmailSettings: scheduleEmailResponse.settings,
         sandbox: health.sandbox,
         dev: health.dev,
       });
@@ -872,6 +955,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     const state = get();
     if (state.mode === mode) {
       set({ ui: { ...state.ui, sidebarOpen: false } });
+      if (mode === "schedule") void get().loadScheduleOverview();
       return;
     }
 
@@ -898,6 +982,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       storeCurrentSessionId(mode, current);
       void get().ensureMessagesLoaded(current);
     }
+    if (mode === "schedule") void get().loadScheduleOverview();
   },
 
   selectSession: (id: string) => {
@@ -1006,6 +1091,29 @@ export const useAppStore = create<AppState>()((set, get) => {
     }
   },
 
+  createScheduleSession: async (title?: string) => {
+    if (get().scheduleCreating) return false;
+    set({ scheduleCreating: true });
+    try {
+      const { session } = await api.createSession({ kind: "schedule", title });
+      loadedSessionIds.add(session.id);
+      set((state) => ({
+        sessions: [session, ...state.sessions],
+        currentSessionId: session.id,
+        scheduleCreating: false,
+        messages: { ...state.messages, [session.id]: [] },
+        ui: { ...state.ui, newSessionOpen: false, sidebarOpen: false },
+      }));
+      storeCurrentSessionId("schedule", session.id);
+      void get().loadScheduleOverview();
+      return true;
+    } catch (error) {
+      set({ scheduleCreating: false });
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
   deleteSession: async (sessionId: string) => {
     const state = get();
     const target = state.sessions.find((session) => session.id === sessionId);
@@ -1014,9 +1122,11 @@ export const useAppStore = create<AppState>()((set, get) => {
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
       state.paperBusy[sessionId] ||
+      state.scheduleBusy[sessionId] ||
       chatAborters.has(sessionId) ||
       agentAborters.has(sessionId) ||
-      paperAborters.has(sessionId)
+      paperAborters.has(sessionId) ||
+      scheduleAborters.has(sessionId)
     ) {
       get().notify("info", "当前会话正在执行回合，请先停止后再删除");
       return false;
@@ -1045,6 +1155,8 @@ export const useAppStore = create<AppState>()((set, get) => {
       delete agentBusy[sessionId];
       const paperBusy = { ...current.paperBusy };
       delete paperBusy[sessionId];
+      const scheduleBusy = { ...current.scheduleBusy };
+      delete scheduleBusy[sessionId];
       return {
         sessions: remaining,
         currentSessionId: nextId,
@@ -1052,6 +1164,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         chatBusy,
         agentBusy,
         paperBusy,
+        scheduleBusy,
         approvals: current.approvals.filter(
           (approval) => approval.sessionId !== sessionId,
         ),
@@ -1152,9 +1265,11 @@ export const useAppStore = create<AppState>()((set, get) => {
       state.chatBusy[sessionId] ||
       state.agentBusy[sessionId] ||
       state.paperBusy[sessionId] ||
+      state.scheduleBusy[sessionId] ||
       chatAborters.has(sessionId) ||
       agentAborters.has(sessionId) ||
-      paperAborters.has(sessionId)
+      paperAborters.has(sessionId) ||
+      scheduleAborters.has(sessionId)
     ) {
       get().notify("info", "当前会话正在执行回合，请等待结束或先停止");
       return;
@@ -1340,6 +1455,125 @@ export const useAppStore = create<AppState>()((set, get) => {
     if (!sessionId) return;
     void api.cancelRun(sessionId).catch(() => undefined);
     paperAborters.get(sessionId)?.abort();
+  },
+
+  sendSchedule: (text: string) => streamToolRun("schedule", text),
+
+  cancelSchedule: () => {
+    const sessionId = get().currentSessionId;
+    if (!sessionId) return;
+    void api.cancelRun(sessionId).catch(() => undefined);
+    scheduleAborters.get(sessionId)?.abort();
+  },
+
+  loadScheduleOverview: async (weekStart?: string) => {
+    set({ scheduleLoading: true });
+    try {
+      const { overview } = await api.scheduleOverview(weekStart);
+      set({ scheduleOverview: overview, scheduleLoading: false });
+    } catch (error) {
+      set({ scheduleLoading: false });
+      get().notify("error", asApiError(error).message);
+    }
+  },
+
+  createScheduleMemory: async (input: ScheduleMemoryInput) => {
+    try {
+      await api.createScheduleMemory(input);
+      await get().loadScheduleOverview();
+      get().notify("info", "记忆已保存");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  updateScheduleMemory: async (
+    memoryId: string,
+    input: ScheduleMemoryInput,
+  ) => {
+    try {
+      await api.updateScheduleMemory(memoryId, input);
+      await get().loadScheduleOverview();
+      get().notify("info", "记忆已更新");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  deleteScheduleMemory: async (memoryId: string) => {
+    try {
+      await api.deleteScheduleMemory(memoryId);
+      await get().loadScheduleOverview();
+      get().notify("info", "记忆已删除");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  updateScheduleTask: async (taskId: string, input: ScheduleTaskInput) => {
+    try {
+      await api.updateScheduleTask(taskId, input);
+      await get().loadScheduleOverview();
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  deleteScheduleTask: async (taskId: string) => {
+    try {
+      await api.deleteScheduleTask(taskId);
+      await get().loadScheduleOverview();
+      get().notify("info", "任务已删除");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  loadScheduleEmailSettings: async () => {
+    try {
+      const { settings } = await api.getScheduleEmailSettings();
+      set({ scheduleEmailSettings: settings });
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+    }
+  },
+
+  saveScheduleEmailSettings: async (input: ScheduleEmailSettingsInput) => {
+    try {
+      const { settings } = await api.updateScheduleEmailSettings(input);
+      set({ scheduleEmailSettings: settings });
+      get().notify("info", "邮件设置已保存");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  testScheduleEmail: async (input: ScheduleEmailTestInput) => {
+    const { result } = await api.testScheduleEmail(input);
+    return result;
+  },
+
+  sendScheduleEmailNow: async (weekStart?: string) => {
+    try {
+      const result = await api.sendScheduleEmail(weekStart);
+      get().notify("info", `计划表已发送到 ${result.to}`);
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
   },
 
   loadPapers: async () => {
@@ -1547,6 +1781,35 @@ export const useAppStore = create<AppState>()((set, get) => {
   closePaperLibrary: () =>
     set((state) => ({ ui: { ...state.ui, paperLibraryOpen: false } })),
 
+  openSchedulePanel: () => {
+    set((state) => ({
+      ui: { ...state.ui, schedulePanelOpen: true },
+    }));
+    void get().loadScheduleOverview();
+  },
+
+  closeSchedulePanel: () =>
+    set((state) => ({ ui: { ...state.ui, schedulePanelOpen: false } })),
+
+  openScheduleEmailSettings: () => {
+    set((state) => ({
+      ui: {
+        ...state.ui,
+        scheduleEmailSettingsOpen: true,
+        settingsOpen: false,
+        llmSettingsOpen: false,
+        searchSettingsOpen: false,
+        agentSettingsOpen: false,
+      },
+    }));
+    void get().loadScheduleEmailSettings();
+  },
+
+  closeScheduleEmailSettings: () =>
+    set((state) => ({
+      ui: { ...state.ui, scheduleEmailSettingsOpen: false },
+    })),
+
   saveAgentSettings: async (input: AgentSettingsInput) => {
     try {
       const { settings } = await api.updateAgentSettings(input);
@@ -1614,6 +1877,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         llmSettingsOpen: true,
         settingsOpen: false,
         searchSettingsOpen: false,
+        scheduleEmailSettingsOpen: false,
       },
     })),
   closeLlmSettings: () =>
@@ -1626,6 +1890,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         settingsOpen: false,
         llmSettingsOpen: false,
         agentSettingsOpen: false,
+        scheduleEmailSettingsOpen: false,
       },
     })),
   closeSearchSettings: () =>
@@ -1638,6 +1903,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         settingsOpen: false,
         llmSettingsOpen: false,
         searchSettingsOpen: false,
+        scheduleEmailSettingsOpen: false,
       },
     })),
   closeAgentSettings: () =>
@@ -1660,6 +1926,13 @@ export function selectCurrentSession(state: AppState): Session | null {
 export function selectCurrentAgentSession(state: AppState): AgentSession | null {
   const session = selectCurrentSession(state);
   return session?.kind === "agent" ? session : null;
+}
+
+export function selectCurrentScheduleSession(
+  state: AppState,
+): ScheduleSession | null {
+  const session = selectCurrentSession(state);
+  return session?.kind === "schedule" ? session : null;
 }
 
 export function selectCurrentChatSession(state: AppState): ChatSession | null {

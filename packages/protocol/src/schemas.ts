@@ -6,13 +6,18 @@ import {
   PAPER_READ_STATUSES,
   REASONING_EFFORTS,
   SANDBOX_MODES,
+  SCHEDULE_CONFIDENCE,
+  SCHEDULE_MEMORY_CATEGORIES,
+  SCHEDULE_PRIORITIES,
+  SCHEDULE_TASK_STATUSES,
+  SCHEDULE_TIMES_OF_DAY,
 } from "./types.js";
 
 export const sandboxModeSchema = z.enum(SANDBOX_MODES);
 
 export const approvalPolicySchema = z.enum(APPROVAL_POLICIES);
 
-export const sessionKindSchema = z.enum(["chat", "agent", "paper"]);
+export const sessionKindSchema = z.enum(["chat", "agent", "paper", "schedule"]);
 
 export const createSessionSchema = z
   .object({
@@ -27,7 +32,7 @@ export const createSessionSchema = z
   })
   .refine((value) => (value.kind ?? "agent") === "agent" || value.workspaceRoot === undefined, {
     path: ["workspaceRoot"],
-    message: "chat and paper sessions do not take a workspaceRoot",
+    message: "non-agent sessions do not take a workspaceRoot",
   });
 
 const paperTagsSchema = z.array(z.string().trim().min(1).max(64)).max(64).optional();
@@ -220,6 +225,92 @@ export const updateSettingsSchema = z.object({
   defaultPreset: sandboxModeSchema,
 });
 
+const dateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
+const clockSchema = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "expected HH:mm");
+
+const scheduleTagsSchema = z
+  .array(z.string().trim().min(1).max(64))
+  .max(64)
+  .optional();
+
+export const scheduleMemoryCreateSchema = z.object({
+  key: z.string().trim().min(1).max(120).optional(),
+  category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
+  title: z.string().trim().min(1).max(300),
+  content: z.string().max(200_000).optional(),
+  data: z.record(z.string(), z.unknown()).nullable().optional(),
+  tags: scheduleTagsSchema,
+  pinned: z.boolean().optional(),
+});
+
+export const scheduleMemoryUpdateSchema = z
+  .object({
+    key: z.string().trim().min(1).max(120).optional(),
+    category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
+    title: z.string().trim().min(1).max(300).optional(),
+    content: z.string().max(200_000).optional(),
+    data: z.record(z.string(), z.unknown()).nullable().optional(),
+    tags: scheduleTagsSchema,
+    pinned: z.boolean().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "no fields to update",
+  });
+
+export const scheduleTaskUpdateSchema = z
+  .object({
+    title: z.string().trim().min(1).max(300).optional(),
+    notes: z.string().max(100_000).optional(),
+    project: z.string().trim().max(120).nullable().optional(),
+    priority: z.enum(SCHEDULE_PRIORITIES).optional(),
+    status: z.enum(SCHEDULE_TASK_STATUSES).optional(),
+    estimatedMinutes: z.number().int().min(1).max(100_000).optional(),
+    remainingMinutes: z.number().int().min(0).max(100_000).optional(),
+    actualMinutes: z.number().int().min(0).max(1_000_000).optional(),
+    estimateConfidence: z.enum(SCHEDULE_CONFIDENCE).optional(),
+    deadline: dateSchema.nullable().optional(),
+    splittable: z.boolean().optional(),
+    minBlockMinutes: z.number().int().min(5).max(600).optional(),
+    preferredTimeOfDay: z.enum(SCHEDULE_TIMES_OF_DAY).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "no fields to update",
+  });
+
+export const scheduleOverviewQuerySchema = z.object({
+  week_start: dateSchema.optional(),
+});
+
+export const scheduleEmailSettingsSchema = z.object({
+  host: z.string().trim().min(1).max(255),
+  port: z.number().int().min(1).max(65_535),
+  secure: z.boolean(),
+  user: z.string().trim().max(255),
+  password: z.string().max(8192).optional(),
+  clearPassword: z.boolean().optional(),
+  from: z.string().trim().email().max(320),
+  to: z.string().trim().email().max(320),
+});
+
+export const scheduleEmailTestSchema = z.object({
+  host: z.string().trim().max(255).optional(),
+  port: z.number().int().min(1).max(65_535).optional(),
+  secure: z.boolean().optional(),
+  user: z.string().trim().max(255).optional(),
+  password: z.string().max(8192).optional(),
+  clearPassword: z.boolean().optional(),
+  from: z.string().trim().email().max(320).optional(),
+  to: z.string().trim().email().max(320).optional(),
+});
+
+export const scheduleEmailSendSchema = z.object({
+  week_start: dateSchema.optional(),
+});
+
 export type CreateSessionInput = z.infer<typeof createSessionSchema>;
 export type PermissionsInput = z.infer<typeof permissionsSchema>;
 export type ExecInput = z.infer<typeof execSchema>;
@@ -232,3 +323,13 @@ export type PaperCreateInputSchema = z.infer<typeof paperCreateSchema>;
 export type PaperUpdateInputSchema = z.infer<typeof paperUpdateSchema>;
 export type PaperQueryInput = z.infer<typeof paperQuerySchema>;
 export type PaperContextInputSchema = z.infer<typeof paperContextSchema>;
+export type ScheduleMemoryCreateInput = z.infer<
+  typeof scheduleMemoryCreateSchema
+>;
+export type ScheduleMemoryUpdateInput = z.infer<
+  typeof scheduleMemoryUpdateSchema
+>;
+export type ScheduleTaskUpdateInput = z.infer<typeof scheduleTaskUpdateSchema>;
+export type ScheduleEmailSettingsInputSchema = z.infer<
+  typeof scheduleEmailSettingsSchema
+>;

@@ -79,6 +79,9 @@ export const config = {
       120_000,
     ),
   },
+  schedule: {
+    maxSteps: num(process.env.CODEFLY_SCHEDULE_MAX_STEPS, 80),
+  },
 } as const;
 
 export const paths = {
@@ -93,6 +96,8 @@ export const paths = {
   papers: path.join(config.dataDir, "papers", "library.json"),
   paperPdfs: path.join(config.dataDir, "papers", "pdf"),
   paperTexts: path.join(config.dataDir, "papers", "text"),
+  scheduleDir: path.join(config.dataDir, "schedule"),
+  scheduleEmail: path.join(config.dataDir, "schedule", "email.json"),
   spills: path.join(config.dataDir, "spills"),
   webDist: fileURLToPath(new URL("../../web/dist", import.meta.url)),
 } as const;

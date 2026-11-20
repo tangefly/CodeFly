@@ -29,6 +29,7 @@ function summarize(event: AuditEvent): string {
     case "session.created":
       if (event.kind === "paper") return "论文会话";
       if (event.kind === "chat") return "对话会话";
+      if (event.kind === "schedule") return "日程会话";
       return `工作区 ${String(event.workspaceRoot ?? "")}`;
     case "session.deleted":
       return "会话已删除";
@@ -50,6 +51,18 @@ function summarize(event: AuditEvent): string {
       )}`;
     case "paper.run":
       return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
+    case "schedule.run":
+      return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
+    case "schedule.memory.changed":
+      return `${String(event.action ?? "")} · ${String(event.key ?? event.memoryId ?? "")}`;
+    case "schedule.task.changed":
+      return `${String(event.action ?? "")} · ${String(event.taskId ?? "")}`;
+    case "schedule.plan.changed":
+      return `${String(event.action ?? "")} · ${String(
+        Array.isArray(event.weeks) ? (event.weeks as string[]).join(", ") : "",
+      )} · ${String(event.blocks ?? 0)} blocks`;
+    case "schedule.email.sent":
+      return `→ ${String(event.to ?? "")} · ${String(event.weekStart ?? "")}`;
     case "agent.run":
       return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
     case "agent.tool":
@@ -60,6 +73,9 @@ function summarize(event: AuditEvent): string {
       return `${from?.mode ?? "?"} → ${to?.mode ?? "?"}`;
     }
     case "settings.changed":
+      if (event.source === "schedule-email") {
+        return `日程邮件 · ${String(event.to ?? "")}`;
+      }
       return `默认权限 ${String(event.defaultPreset ?? "")}`;
     case "exec.started":
       return String(event.command ?? "");

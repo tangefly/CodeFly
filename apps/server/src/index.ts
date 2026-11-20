@@ -43,6 +43,14 @@ import { PdfExtractor } from "./paper/pdf-extractor.js";
 import { PaperTextStore } from "./paper/text-store.js";
 import { PaperToolExecutor } from "./paper/tools.js";
 import { PaperService } from "./paper/service.js";
+import { ScheduleStore } from "./schedule/store.js";
+import { ScheduleEmailConfigStore, ScheduleEmailService } from "./schedule/email.js";
+import { ScheduleToolExecutor } from "./schedule/tools.js";
+import { ScheduleService } from "./schedule/service.js";
+import {
+  registerScheduleRoutes,
+  registerScheduleRunRoutes,
+} from "./routes/schedule.js";
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -97,6 +105,14 @@ async function main(): Promise<void> {
     maxPdfBytes: config.papers.maxPdfBytes,
     maxReadChars: config.papers.maxReadChars,
   });
+
+  const scheduleStore = new ScheduleStore(config.dataDir);
+  await scheduleStore.init();
+  const scheduleEmailConfig = new ScheduleEmailConfigStore(
+    paths.scheduleEmail,
+  );
+  await scheduleEmailConfig.init();
+  const scheduleEmail = new ScheduleEmailService(scheduleEmailConfig);
 
   const messageStore = new MessageStore(
     paths.messages,
@@ -198,6 +214,24 @@ async function main(): Promise<void> {
     maxSteps: config.papers.maxSteps,
     maxReadChars: config.papers.maxReadChars,
     historyBudgetChars: config.papers.historyBudgetChars,
+  });
+
+  const scheduleTools = new ScheduleToolExecutor({
+    store: scheduleStore,
+    email: scheduleEmail,
+    audit,
+  });
+  const schedule = new ScheduleService({
+    messages: messageStore,
+    llmConfig,
+    audit,
+    client: new LlmClient(),
+    lock: runLock,
+    sessions,
+    store: scheduleStore,
+    email: scheduleEmailConfig,
+    tools: scheduleTools,
+    maxSteps: config.schedule.maxSteps,
   });
 
   const app = Fastify({
@@ -330,6 +364,17 @@ async function main(): Promise<void> {
     titler,
     audit,
   });
+  const scheduleRouteDeps = {
+    sessions,
+    store: scheduleStore,
+    emailConfig: scheduleEmailConfig,
+    email: scheduleEmail,
+    schedule,
+    titler,
+    audit,
+  };
+  registerScheduleRoutes(app, scheduleRouteDeps);
+  registerScheduleRunRoutes(app, scheduleRouteDeps);
 
   if (config.devWebUrl) {
     app.get("/", async (_request, reply) => {
@@ -394,6 +439,14 @@ async function main(): Promise<void> {
   );
   console.log(
     `  papers  : ${paperLibrary.list({ limit: 1 }).total} in library · ${paths.papersDir}`,
+  );
+  const scheduleOverview = scheduleStore.overview();
+  console.log(
+    `  schedule: ${scheduleOverview.tasks.length} tasks · ${
+      scheduleOverview.memories.length
+    } memories · email ${
+      scheduleEmailConfig.isConfigured() ? "configured" : "not configured"
+    } · ${paths.scheduleDir}`,
   );
   console.log(`  data    : ${config.dataDir}`);
   console.log(`  open    : ${url}`);

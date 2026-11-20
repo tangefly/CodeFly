@@ -16,6 +16,15 @@ import type {
   PaperRecord,
   PaperUpdateInput,
   SandboxMode,
+  ScheduleEmailSettingsInput,
+  ScheduleEmailSettingsPublic,
+  ScheduleEmailTestInput,
+  ScheduleEmailTestResult,
+  ScheduleMemory,
+  ScheduleMemoryInput,
+  ScheduleOverview,
+  ScheduleTask,
+  ScheduleTaskInput,
   SearchSettingsInput,
   SearchSettingsPublic,
   SearchTestInput,
@@ -120,7 +129,10 @@ export const api = {
 
   cancelRun(
     sessionId: string,
-  ): Promise<{ cancelled: boolean; kind: "chat" | "agent" | null }> {
+  ): Promise<{
+    cancelled: boolean;
+    kind: "chat" | "agent" | "paper" | "schedule" | null;
+  }> {
     return request(`/api/sessions/${sessionId}/cancel`, {
       method: "POST",
       body: "{}",
@@ -355,6 +367,89 @@ export const api = {
       );
     }
     return response.blob();
+  },
+
+  scheduleOverview(weekStart?: string): Promise<{ overview: ScheduleOverview }> {
+    const suffix =
+      weekStart === undefined || weekStart === ""
+        ? ""
+        : `?week_start=${encodeURIComponent(weekStart)}`;
+    return request(`/api/schedule/overview${suffix}`);
+  },
+
+  createScheduleMemory(
+    input: ScheduleMemoryInput,
+  ): Promise<{ memory: ScheduleMemory }> {
+    return request("/api/schedule/memories", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateScheduleMemory(
+    memoryId: string,
+    input: ScheduleMemoryInput,
+  ): Promise<{ memory: ScheduleMemory }> {
+    return request(`/api/schedule/memories/${memoryId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteScheduleMemory(memoryId: string): Promise<void> {
+    return request(`/api/schedule/memories/${memoryId}`, { method: "DELETE" });
+  },
+
+  updateScheduleTask(
+    taskId: string,
+    input: ScheduleTaskInput,
+  ): Promise<{ task: ScheduleTask }> {
+    return request(`/api/schedule/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteScheduleTask(taskId: string): Promise<void> {
+    return request(`/api/schedule/tasks/${taskId}`, { method: "DELETE" });
+  },
+
+  getScheduleEmailSettings(): Promise<{ settings: ScheduleEmailSettingsPublic }> {
+    return request("/api/schedule/email/settings");
+  },
+
+  updateScheduleEmailSettings(
+    input: ScheduleEmailSettingsInput,
+  ): Promise<{ settings: ScheduleEmailSettingsPublic }> {
+    return request("/api/schedule/email/settings", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  testScheduleEmail(
+    input: ScheduleEmailTestInput,
+  ): Promise<{ result: ScheduleEmailTestResult }> {
+    return request("/api/schedule/email/test", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  sendScheduleEmail(
+    weekStart?: string,
+  ): Promise<{
+    ok: boolean;
+    to: string;
+    messageId: string | null;
+    imagePath: string;
+  }> {
+    return request("/api/schedule/email/send", {
+      method: "POST",
+      body: JSON.stringify(
+        weekStart === undefined ? {} : { week_start: weekStart },
+      ),
+    });
   },
 
   getAgentSettings(): Promise<{ settings: AgentSettingsPublic }> {

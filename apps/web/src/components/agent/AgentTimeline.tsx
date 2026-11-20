@@ -7,8 +7,19 @@ import {
   type TouchEvent as ReactTouchEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { BookOpen, Plus, Sparkles, Terminal, Zap } from "lucide-react";
-import type { AgentSession, PaperSession } from "@codefly/protocol";
+import {
+  BookOpen,
+  CalendarDays,
+  Plus,
+  Sparkles,
+  Terminal,
+  Zap,
+} from "lucide-react";
+import type {
+  AgentSession,
+  PaperSession,
+  ScheduleSession,
+} from "@codefly/protocol";
 import {
   selectCurrentMessages,
   selectCurrentSession,
@@ -99,10 +110,10 @@ const TOUCH_DETACH_PX = 6;
 export function AgentTimeline({
   mode = "agent",
 }: {
-  mode?: "agent" | "paper";
+  mode?: "agent" | "paper" | "schedule";
 } = {}) {
   const session = useAppStore(
-    (state): AgentSession | PaperSession | null => {
+    (state): AgentSession | PaperSession | ScheduleSession | null => {
       const current = selectCurrentSession(state);
       return current !== null && current.kind === mode ? current : null;
     },
@@ -110,9 +121,15 @@ export function AgentTimeline({
   const messages = useAppStore(selectCurrentMessages) ?? EMPTY;
   const openNewSession = useAppStore((state) => state.openNewSession);
   const createPaperSession = useAppStore((state) => state.createPaperSession);
+  const createScheduleSession = useAppStore(
+    (state) => state.createScheduleSession,
+  );
   const sendAgent = useAppStore((state) => state.sendAgent);
   const sendPaper = useAppStore((state) => state.sendPaper);
+  const sendSchedule = useAppStore((state) => state.sendSchedule);
   const openPaperLibrary = useAppStore((state) => state.openPaperLibrary);
+  const openSchedulePanel = useAppStore((state) => state.openSchedulePanel);
+  const scheduleOverview = useAppStore((state) => state.scheduleOverview);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
   const setMode = useAppStore((state) => state.setMode);
   const llmSettings = useAppStore((state) => state.llmSettings);
@@ -121,13 +138,22 @@ export function AgentTimeline({
       state.currentSessionId !== null &&
       (mode === "agent"
         ? state.agentBusy[state.currentSessionId]
-        : state.paperBusy[state.currentSessionId]) === true,
+        : mode === "paper"
+          ? state.paperBusy[state.currentSessionId]
+          : state.scheduleBusy[state.currentSessionId]) === true,
   );
-  const send = mode === "agent" ? sendAgent : sendPaper;
+  const send =
+    mode === "agent"
+      ? sendAgent
+      : mode === "paper"
+        ? sendPaper
+        : sendSchedule;
   const newSession =
     mode === "agent"
       ? openNewSession
-      : () => void createPaperSession();
+      : mode === "paper"
+        ? () => void createPaperSession()
+        : () => void createScheduleSession();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -323,18 +349,26 @@ export function AgentTimeline({
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary">
             {mode === "agent" ? (
               <Terminal className="h-6 w-6" />
-            ) : (
+            ) : mode === "paper" ? (
               <BookOpen className="h-6 w-6" />
+            ) : (
+              <CalendarDays className="h-6 w-6" />
             )}
           </div>
           <div>
             <h2 className="text-lg font-semibold">
-              {mode === "agent" ? "还没有 Code 会话" : "还没有论文会话"}
+              {mode === "agent"
+                ? "还没有 Code 会话"
+                : mode === "paper"
+                  ? "还没有论文会话"
+                  : "还没有日程会话"}
             </h2>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
               {mode === "agent"
                 ? "创建会话并绑定一个本机工作区目录。Code 工具都通过本机服务在沙箱内运行。"
-                : "创建一个论文会话，开始检索 arXiv、阅读 PDF 并整理论文库。"}
+                : mode === "paper"
+                  ? "创建一个论文会话，开始检索 arXiv、阅读 PDF 并整理论文库。"
+                  : "创建一个日程会话，让助手记住你的偏好、安排一周计划，并在变化时自动重排。"}
             </p>
           </div>
           <Button variant="primary" onClick={newSession}>
@@ -347,15 +381,19 @@ export function AgentTimeline({
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary shadow-[0_0_40px_-12px_var(--primary)]">
             {mode === "agent" ? (
               <Zap className="h-6 w-6" />
-            ) : (
+            ) : mode === "paper" ? (
               <BookOpen className="h-6 w-6" />
+            ) : (
+              <CalendarDays className="h-6 w-6" />
             )}
           </div>
           <div className="space-y-1.5">
             <h2 className="text-lg font-semibold">
               {mode === "agent"
                 ? "本地安全执行，从这里开始"
-                : "从 arXiv 到结构化笔记"}
+                : mode === "paper"
+                  ? "从 arXiv 到结构化笔记"
+                  : "把一周安排明白"}
             </h2>
             <p className="mx-auto max-w-md text-sm leading-6 text-muted-foreground">
               {mode === "agent" ? (
@@ -366,8 +404,10 @@ export function AgentTimeline({
                   </code>
                   。默认权限为「工作区内修改」，越界命令需要一次性审批。
                 </>
-              ) : (
+              ) : mode === "paper" ? (
                 "论文助手会检索 arXiv、下载并解析 PDF、把阅读笔记和标签整理进全局论文库。它不会执行命令，也不会读写工作区文件。"
+              ) : (
+                "日程助手会读取你的偏好、约束和任务，按工作时段生成一周计划；任务没做完时，会把剩余工作推后并重新排期，最后导出表格图片。"
               )}
             </p>
           </div>
@@ -411,7 +451,7 @@ export function AgentTimeline({
                   onClick={() => setMode("chat")}
                 />
               </>
-            ) : (
+            ) : mode === "paper" ? (
               <>
                 <SuggestionCard
                   icon={<BookOpen className="h-4 w-4" />}
@@ -448,6 +488,43 @@ export function AgentTimeline({
                   }}
                 />
               </>
+            ) : (
+              <>
+                <SuggestionCard
+                  icon={<CalendarDays className="h-4 w-4" />}
+                  title="规划这一周"
+                  hint="先读偏好，再生成计划"
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send(
+                        "帮我规划这一周的安排。先读取我的排期偏好和任务清单；如果偏好还没配置，先问我要工作时段。",
+                      );
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+                <SuggestionCard
+                  icon={<Sparkles className="h-4 w-4" />}
+                  title="记录任务进度"
+                  hint="没做完就自动推后"
+                  onClick={() => {
+                    if (llmSettings?.configured) {
+                      void send(
+                        "我有一个任务没做完，请帮我记录进度，并把未完成的部分从今天开始重新排期。",
+                      );
+                    } else {
+                      openLlmSettings();
+                    }
+                  }}
+                />
+                <SuggestionCard
+                  icon={<BookOpen className="h-4 w-4" />}
+                  title="打开日程面板"
+                  hint="计划表、记忆与任务"
+                  onClick={openSchedulePanel}
+                />
+              </>
             )}
           </div>
           {mode === "agent" ? (
@@ -457,12 +534,30 @@ export function AgentTimeline({
                 {session.kind === "agent" ? session.workspaceRoot : ""}
               </span>
             </p>
-          ) : (
+          ) : mode === "paper" ? (
             <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
               当前上下文：
               {session.kind === "paper" && session.paperIds.length > 0
                 ? `${session.paperIds.length} 篇论文`
                 : "尚未添加论文，可以让我先检索 arXiv"}
+            </p>
+          ) : (
+            <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
+              本周：
+              {scheduleOverview
+                ? `${scheduleOverview.weekStart} ~ ${scheduleOverview.weekEnd} · ${
+                    scheduleOverview.tasks.filter(
+                      (task) =>
+                        (task.status === "todo" ||
+                          task.status === "in_progress") &&
+                        task.remainingMinutes > 0,
+                    ).length
+                  } 项待办 · 偏好${
+                    scheduleOverview.preferencesConfigured
+                      ? "已配置"
+                      : "待配置"
+                  }`
+                : "正在加载日程数据…"}
             </p>
           )}
         </div>

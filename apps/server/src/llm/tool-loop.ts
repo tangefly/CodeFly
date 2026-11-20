@@ -22,8 +22,8 @@ import type { ToolResult } from "../agent/tools.js";
 
 /** Everything a tool-calling turn needs from a concrete session kind. */
 export interface ToolLoopProfile {
-  /** "agent" or "paper"; never "chat" (chat has no tools). */
-  runKind: Extract<RunKind, "agent" | "paper">;
+  /** "agent", "paper" or "schedule"; never "chat" (chat has no tools). */
+  runKind: Extract<RunKind, "agent" | "paper" | "schedule">;
   sessionId: string;
   config: LlmInternalConfig;
   maxSteps: number;
@@ -48,7 +48,7 @@ export interface ToolLoopProfile {
     call: AgentToolCall,
     context: ToolCallContext,
   ) => Promise<ToolResult>;
-  auditType: "agent.run" | "paper.run";
+  auditType: "agent.run" | "paper.run" | "schedule.run";
   auditExtra?: Record<string, unknown>;
 }
 
@@ -196,7 +196,9 @@ export async function runToolLoop(
           : aborted
             ? profile.runKind === "paper"
               ? "PAPER_ABORTED"
-              : "AGENT_ABORTED"
+              : profile.runKind === "schedule"
+                ? "SCHEDULE_ABORTED"
+                : "AGENT_ABORTED"
             : error instanceof LlmError
               ? error.code
               : "LLM_ERROR";
@@ -205,7 +207,9 @@ export async function runToolLoop(
           : aborted
             ? profile.runKind === "paper"
               ? "论文助手已取消。"
-              : "Code 已取消。"
+              : profile.runKind === "schedule"
+                ? "日程助手已取消。"
+                : "Code 已取消。"
             : redactSecret(
                 error instanceof Error ? error.message : String(error),
                 profile.config.apiKey,

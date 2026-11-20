@@ -16,13 +16,20 @@ import {
   Terminal,
 } from "lucide-react";
 import type { ToolMessage } from "../lib/store.js";
-import { PAPER_TOOL_LABEL, isPaperTool } from "../lib/tool-labels.js";
+import {
+  PAPER_TOOL_LABEL,
+  SCHEDULE_TOOL_LABEL,
+  isPaperTool,
+  isScheduleTool,
+} from "../lib/tool-labels.js";
 import { cn, formatDuration } from "../lib/utils.js";
 import { PaperToolCard } from "./paper/PaperToolCard.js";
+import { ScheduleToolCard } from "./schedule/ScheduleToolCard.js";
 import { Button } from "./ui.js";
 
 export const TOOL_LABEL: Record<string, string> = {
   ...PAPER_TOOL_LABEL,
+  ...SCHEDULE_TOOL_LABEL,
   run_command: "运行命令",
   read_file: "读取文件",
   write_file: "写入文件",
@@ -84,6 +91,9 @@ function statusMeta(message: ToolMessage): {
 export function ToolCard({ message }: { message: ToolMessage }) {
   if (isPaperTool(message.toolName)) {
     return <PaperToolCard message={message} />;
+  }
+  if (isScheduleTool(message.toolName)) {
+    return <ScheduleToolCard message={message} />;
   }
   return <StandardToolCard message={message} />;
 }

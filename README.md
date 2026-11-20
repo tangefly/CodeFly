@@ -5,14 +5,19 @@
 
 ## 功能
 
-- **三界面**：侧栏顶部切换「对话」「Code」「论文」，三者拥有独立的会话列表、输入框
-  与历史；地址栏用 `#/chat`、`#/code`、`#/paper` 记住当前界面（旧的 `#/agent` 仍兼容）。
+- **四界面**：侧栏顶部切换「对话」「Code」「论文」「日程」，四者拥有独立的会话列表、
+  输入框与历史；地址栏用 `#/chat`、`#/code`、`#/paper`、`#/schedule` 记住当前界面
+  （旧的 `#/agent` 仍兼容）。
 - **对话**：不绑定工作区，只与模型聊天，不执行命令或读写文件；支持多个独立对话、
   自动标题、删除与历史持久化。
 - **Code 会话**：按工作区新建、切换、删除；工具调用与消息历史持久化，刷新后恢复。
 - **论文助手**：不绑定工作区，通过 arXiv 检索最新论文，下载并解析 PDF，按目录/页码/
   章节分段阅读，把标签、阅读状态、用户笔记与结构化摘要整理进全局论文库；支持本地上传
   PDF、BibTeX/Markdown 导出。论文工具与 Code 工具完全分离。
+- **日程助手**：不绑定工作区，用结构化 JSON 文档保存偏好、约束、任务与每周计划；
+  按工作时段、休息、截止日期和预估置信度生成一周计划，任务未完成时可从任意日期重排
+  并自动推后；计划表渲染为「任务 × 星期」PNG，可预览、下载，或通过 SMTP 发送到用户
+  自己的邮箱。
 - **聊天模型**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
 - **Code 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
@@ -73,6 +78,55 @@
 本身也不提供删除、执行或写文件工具。arXiv 请求默认串行并遵守约 3 秒的最小间隔，可用
 环境变量调整。
 
+## 日程助手
+
+侧栏选择「日程」后，新建日程会话即可开始。日程助手没有命令执行或工作区文件权限，只能
+读写全局日程存储、生成计划表图片，以及在用户明确要求时发送邮件。
+
+| 工具 | 用途 |
+| --- | --- |
+| `memory_search` | 按 query/key/category/tags 检索结构化记忆 |
+| `memory_upsert` | 新增或修改记忆；`scheduling_preferences` 用 `data` 保存工作时段等字段 |
+| `memory_delete` | 按 id/key 删除记忆 |
+| `task_list` | 列出任务、剩余/实际耗时与历史预估校准比例 |
+| `task_upsert` | 新增/修改任务；`add_actual_minutes` 记录进度并自动扣减剩余时间 |
+| `task_delete` | 删除任务及其所有计划时段 |
+| `plan_get` | 读取指定周计划、block id、每日安排、未排期项与提醒 |
+| `plan_schedule` | 生成/重排一周计划，保留已完成 block，替换未来 planned block |
+| `plan_replan` | 从指定日期重排未完成工作，过去 planned block 标记 skipped |
+| `block_update` | 标记 done/skipped、记录实际耗时、调整时间（含重叠校验） |
+| `plan_render` | 重新渲染「任务 × 星期」PNG，保存到 `data/schedule/exports/` |
+| `plan_email` | 把计划表 PNG 发送到已配置的本人邮箱；收件人不可由模型指定 |
+
+存储文件（全部是结构化 JSON，启动时宽松校验、原子写入）：
+
+- `data/schedule/memories.json`：偏好、约束、习惯、目标与背景；`scheduling_preferences`
+  是排期算法读取的特殊 key。
+- `data/schedule/tasks.json`：任务、预估/剩余/实际分钟、置信度、截止日期、优先级。
+- `data/schedule/plans.json`：每周计划与 block；block 关联全局任务 id。
+- `data/schedule/exports/`：生成的 PNG 计划表。
+- `data/schedule/email.json`：SMTP 配置（权限 `0600`），密码不会返回前端。
+
+排期规则：
+
+- 可用时间 = 偏好中的工作日与工作时段 − 休息时段 − 已完成/保留的 block；每日专注
+  上限默认 480 分钟，最长单块 90 分钟，block 之间有 10 分钟缓冲。
+- 预估 = `remainingMinutes × (1 + bufferRatio + 置信度缓冲)`；置信度 low/medium/high
+  分别额外加 25%/10%/0% 缓冲。`task_list` 会返回已完成任务的 actual/estimate 比例，
+  助手应据此校准新预估。
+- 任务按优先级 → 截止日期 → 创建时间排序；可拆分的任务按最长专注时长切块，不可拆分
+  任务要求一个连续时段。
+- `plan_replan` 从指定日期（默认今天）开始，保留 done block，把过去 planned block 标记
+  为 skipped，删除并重排该日期之后的 planned block；容量不足时默认溢出到下一周，并在
+  `warnings`/`unscheduled` 中如实报告。
+- 每次 `plan_schedule` / `plan_replan` 都会自动渲染 PNG；界面工具卡片可直接预览、
+  下载或点击「发送到我的邮箱」。
+
+邮件配置：日程顶栏的邮件图标（或日程面板里的「配置邮件」）填写 SMTP 主机、端口、
+SSL、用户名、授权码、发件地址与收件地址；「测试连接」只验证 SMTP，不发信。助手只有在
+用户明确要求发送时才调用 `plan_email`，且只能发到设置页配置的固定收件地址。密码保存在
+本机 `data/schedule/email.json`，不会通过模型 API 或前端返回。
+
 ## 快速开始
 
 要求：Node.js >= 20.19、pnpm 11、Linux（Landlock）或已安装 bwrap。
@@ -132,17 +186,19 @@ Key，需要在「搜索 API」中单独填写一次。
 
 ## 使用
 
-1. 侧栏顶部选择「对话」「Code」或「论文」。
+1. 侧栏顶部选择「对话」「Code」「论文」或「日程」。
 2. 对话：点击「新建对话」，无需选择工作区，直接开始聊天；每个对话有独立历史。
 3. Code：点击「新建 Code 会话」，选择一个已存在的绝对路径作为工作区。
    Code 会携带历史工具输出和思考内容；长会话的上下文与 token 消耗更大。
 4. 论文：点击「新建论文会话」，直接检索 arXiv、阅读 PDF 或上传本地论文。
    左上/顶栏的「论文库」打开全局论文库，可筛选、编辑标签/状态/笔记、打开 PDF 与导出。
-5. Code 工具卡片可展开/收起命令与结果；执行失败时自动展开。
-6. 顶栏或 Code 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
-7. 顶栏「审计日志」查看当前 Code 会话的审批、执行、文件写入与模型事件。
-8. 侧边栏会话右侧的删除按钮可删除会话及其聊天/工具记录，不会删除工作区文件。
-9. 底部用量显示：
+5. 日程：点击「新建日程会话」，先告诉助手工作时段和任务；顶栏「日程面板」查看本周
+   计划、结构化记忆与任务，可编辑/删除记忆、标记任务完成、切换周边界。
+6. Code 工具卡片可展开/收起命令与结果；执行失败时自动展开。
+7. 顶栏或 Code 输入框旁的权限选择器切换会话权限；越界命令会弹出一次性审批。
+8. 顶栏「审计日志」查看当前 Code 会话的审批、执行、文件写入与模型事件。
+9. 侧边栏会话右侧的删除按钮可删除会话及其聊天/工具记录，不会删除工作区文件。
+10. 底部用量显示：
    - **会话上下文**：当前会话已保存的全部消息长度（条数与估算 token）。
    - **累积上下文**：本会话所有模型请求的上下文之和，包含缓存命中。
    - **累计输出**：所有回复的 completion tokens 之和。
@@ -171,6 +227,7 @@ Key，需要在「搜索 API」中单独填写一次。
 | `CODEFLY_PAPER_HISTORY_BUDGET_CHARS` | `160000` | 论文会话送给模型的论文文本预算 |
 | `CODEFLY_PAPER_MAX_STEPS` | `80` | 论文助手单回合最大步数 |
 | `CODEFLY_PAPER_DOWNLOAD_TIMEOUT_MS` | `120000` | arXiv PDF 下载空闲超时：连续该时长未收到新数据才中断，慢速但持续的下载不会被打断 |
+| `CODEFLY_SCHEDULE_MAX_STEPS` | `80` | 日程助手单回合最大步数 |
 
 数据文件：
 
@@ -180,6 +237,11 @@ Key，需要在「搜索 API」中单独填写一次。
 - `data/papers/library.json`：全局论文库元数据、标签、阅读状态、笔记与摘要。
 - `data/papers/pdf/`：下载或上传的 PDF 缓存。
 - `data/papers/text/`：按页抽取的论文文本与章节索引。
+- `data/schedule/memories.json`：日程助手的结构化记忆。
+- `data/schedule/tasks.json`：任务、预估与实际耗时。
+- `data/schedule/plans.json`：每周计划与 block。
+- `data/schedule/exports/`：生成的周计划 PNG。
+- `data/schedule/email.json`：SMTP 配置（权限 `0600`）。
 - `data/messages.json`：会话消息、思考内容、工具调用与结果。
 - `data/audit.jsonl`：审计事件。
 
@@ -198,6 +260,12 @@ Key，需要在「搜索 API」中单独填写一次。
   和本地笔记只保存在本机 `data/papers/`。论文正文与上传文件都是不可信数据，请勿把
   含有恶意指令的 PDF 当作可信内容。
 - 论文模式没有 `run_command`、文件写入或删除工具；论文库删除只能由用户在 UI 发起。
+- 日程助手会把记忆、任务和计划字段发送给模型提供商；这些数据只保存在本机
+  `data/schedule/`。日程模式没有命令执行或工作区文件工具。
+- 邮件发送是外部动作：只允许发往设置页配置的固定收件地址，模型不能指定其他收件人；
+  `plan_email` 仅应在用户明确要求时调用，发送结果会写入审计日志。
+- PNG 由服务端用 sharp + 本机 Noto CJK 字体渲染；若系统缺少中文字体，图片中的中文可能
+  显示为方框，但计划数据本身不受影响。
 - `danger-full-access` 没有沙箱也没有审批，仅在明确确认后使用。
 - `workspace-write` 默认放行 GPU 设备、`/dev/shm` 与 `/proc`（CUDA 需要）；可用
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。
@@ -222,7 +290,7 @@ pnpm build
 
 ```text
 packages/protocol/   # 共享类型与 zod schemas
-apps/server/         # Fastify 服务端：sandbox / exec / fs / approval / llm / agent / paper / routes
+apps/server/         # Fastify 服务端：sandbox / exec / fs / approval / llm / agent / paper / schedule / routes
 apps/web/            # React + Vite + Tailwind 前端
 data/                # 运行时数据（gitignore）
 ```

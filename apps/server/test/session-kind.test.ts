@@ -91,6 +91,38 @@ describe("SessionStore session kinds", () => {
     expect(persisted.mode).toBe("read-only");
   });
 
+  it("creates a schedule session without a workspace", async () => {
+    const store = new SessionStore(file);
+    await store.init();
+
+    const session = await store.create(
+      undefined,
+      undefined,
+      "workspace-write",
+      "schedule",
+    );
+
+    expect(session.kind).toBe("schedule");
+    expect(session.workspaceRoot).toBeNull();
+    expect(session.title).toBe("新日程会话");
+    expect(session.mode).toBe("read-only");
+    expect(session.approvalPolicy).toBe("never");
+    expect(store.getScheduleOrThrow(session.id).id).toBe(session.id);
+    expect(() => store.getAgentOrThrow(session.id)).toThrowError(
+      /不是 Code 会话/,
+    );
+    expect(() => store.getPaperOrThrow(session.id)).toThrowError(
+      /不是论文助手会话/,
+    );
+
+    const reloaded = new SessionStore(file);
+    await reloaded.init();
+    const persisted = reloaded.getScheduleOrThrow(session.id);
+    expect(persisted.kind).toBe("schedule");
+    expect(persisted.workspaceRoot).toBeNull();
+    expect(persisted.mode).toBe("read-only");
+  });
+
   it("treats legacy workspace sessions as agent sessions", async () => {
     const now = new Date().toISOString();
     await writeFile(

@@ -1,6 +1,6 @@
 import { AppError } from "../http/errors.js";
 
-export type RunKind = "chat" | "agent" | "paper";
+export type RunKind = "chat" | "agent" | "paper" | "schedule";
 
 interface ActiveRun {
   kind: RunKind;
@@ -30,7 +30,9 @@ export class SessionRunLock {
             ? "聊天"
             : current.kind === "paper"
               ? "论文助手"
-              : "Code"
+              : current.kind === "schedule"
+                ? "日程助手"
+                : "Code"
         } 回合，请等待结束或先停止。`,
         409,
       );

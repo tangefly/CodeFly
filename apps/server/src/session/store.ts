@@ -8,6 +8,7 @@ import type {
   DenialRecord,
   PaperSession,
   SandboxMode,
+  ScheduleSession,
   Session,
   SessionKind,
 } from "@codefly/protocol";
@@ -35,6 +36,7 @@ interface SessionFile {
 
 const CHAT_DEFAULT_TITLE = "新对话";
 const PAPER_DEFAULT_TITLE = "新论文会话";
+const SCHEDULE_DEFAULT_TITLE = "新日程会话";
 
 function asPaperIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -102,7 +104,9 @@ export class SessionStore {
             ? "chat"
             : session.kind === "paper"
               ? "paper"
-              : "agent";
+              : session.kind === "schedule"
+                ? "schedule"
+                : "agent";
         const approvalPolicy =
           session.approvalPolicy === "never" ? "never" : "ask";
         const mode = isMode(session.mode) ? session.mode : "workspace-write";
@@ -151,6 +155,31 @@ export class SessionStore {
             titleSource,
             workspaceRoot: null,
             paperIds: asPaperIds(session.paperIds),
+            mode: "read-only",
+            approvalPolicy: "never",
+            createdAt,
+            updatedAt,
+            lastDenial: null,
+          });
+          continue;
+        }
+
+        if (kind === "schedule") {
+          const title =
+            typeof session.title === "string" && session.title.trim() !== ""
+              ? session.title
+              : SCHEDULE_DEFAULT_TITLE;
+          const titleSource = isTitleSource(session.titleSource)
+            ? session.titleSource
+            : title === SCHEDULE_DEFAULT_TITLE
+              ? "default"
+              : "user";
+          this.sessions.set(session.id, {
+            id: session.id,
+            kind: "schedule",
+            title,
+            titleSource,
+            workspaceRoot: null,
             mode: "read-only",
             approvalPolicy: "never",
             createdAt,
@@ -242,6 +271,18 @@ export class SessionStore {
     return session;
   }
 
+  getScheduleOrThrow(id: string): ScheduleSession {
+    const session = this.getOrThrow(id);
+    if (session.kind !== "schedule") {
+      throw new AppError(
+        "WRONG_SESSION_KIND",
+        "该会话不是日程助手会话。",
+        400,
+      );
+    }
+    return session;
+  }
+
   /**
    * Creates a chat session (no workspace) or an agent session (a workspace
    * directory is required and canonicalized).
@@ -255,6 +296,24 @@ export class SessionStore {
     const preset = presetForMode(defaultMode);
     const now = new Date().toISOString();
     const customTitle = title?.trim() ?? "";
+
+    if (kind === "schedule") {
+      const session: ScheduleSession = {
+        id: `s_${randomUUID()}`,
+        kind: "schedule",
+        title: customTitle !== "" ? customTitle : SCHEDULE_DEFAULT_TITLE,
+        titleSource: customTitle !== "" ? "user" : "default",
+        workspaceRoot: null,
+        mode: "read-only",
+        approvalPolicy: "never",
+        createdAt: now,
+        updatedAt: now,
+        lastDenial: null,
+      };
+      this.sessions.set(session.id, session);
+      await this.persist();
+      return session;
+    }
 
     if (kind === "paper") {
       const session: PaperSession = {
