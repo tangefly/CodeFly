@@ -19,10 +19,23 @@ export interface AgentInternalSettings {
   enabledTools: AgentToolName[];
   personaPrefix: string;
   personaSuffix: string;
+  /** Bumped when the built-in tool set grows, so old settings gain new tools. */
+  toolSchemaVersion: number;
   updatedAt: string | null;
 }
 
 const VALID_TOOLS = new Set<string>(AGENT_TOOL_NAMES);
+
+const TOOL_SCHEMA_VERSION = 2;
+const TOOLS_ADDED_V2: AgentToolName[] = [
+  "apply_patch",
+  "job_output",
+  "job_list",
+  "job_kill",
+  "write_stdin",
+  "todo_write",
+  "ask_user_question",
+];
 
 const DEFAULTS: AgentInternalSettings = {
   maxSteps: DEFAULT_AGENT_MAX_STEPS,
@@ -30,6 +43,7 @@ const DEFAULTS: AgentInternalSettings = {
   enabledTools: [...AGENT_TOOL_NAMES],
   personaPrefix: "",
   personaSuffix: "",
+  toolSchemaVersion: TOOL_SCHEMA_VERSION,
   updatedAt: null,
 };
 
@@ -76,10 +90,21 @@ export class AgentConfigStore {
       return;
     }
 
+    let needsPersist = false;
     try {
       const parsed = JSON.parse(raw) as Partial<
         AgentInternalSettings & { systemPrompt?: unknown }
       >;
+      const storedVersion =
+        typeof parsed.toolSchemaVersion === "number"
+          ? parsed.toolSchemaVersion
+          : 1;
+      const storedTools = normalizeTools(parsed.enabledTools);
+      const migratedTools =
+        storedVersion < TOOL_SCHEMA_VERSION && Array.isArray(parsed.enabledTools)
+          ? [...new Set([...storedTools, ...TOOLS_ADDED_V2])]
+          : storedTools;
+      if (storedVersion < TOOL_SCHEMA_VERSION) needsPersist = true;
       this.current = {
         maxSteps:
           typeof parsed.maxSteps === "number" &&
@@ -93,13 +118,14 @@ export class AgentConfigStore {
           parsed.commandTimeoutMs <= 600_000
             ? Math.round(parsed.commandTimeoutMs)
             : DEFAULTS.commandTimeoutMs,
-        enabledTools: normalizeTools(parsed.enabledTools),
+        enabledTools: migratedTools,
         personaPrefix:
           typeof parsed.personaPrefix === "string"
             ? parsed.personaPrefix
             : legacyPromptToPrefix(parsed),
         personaSuffix:
           typeof parsed.personaSuffix === "string" ? parsed.personaSuffix : "",
+        toolSchemaVersion: TOOL_SCHEMA_VERSION,
         updatedAt:
           typeof parsed.updatedAt === "string" ? parsed.updatedAt : null,
       };
@@ -107,6 +133,8 @@ export class AgentConfigStore {
       console.error("[agent] ignoring corrupt agent.json");
       return;
     }
+
+    if (needsPersist) await this.persist();
 
     try {
       await chmod(this.file, 0o600);
@@ -156,6 +184,7 @@ export class AgentConfigStore {
         input.personaSuffix === undefined
           ? this.current.personaSuffix
           : input.personaSuffix,
+      toolSchemaVersion: this.current.toolSchemaVersion,
       updatedAt: new Date().toISOString(),
     };
 

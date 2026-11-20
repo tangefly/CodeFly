@@ -1,4 +1,5 @@
 import type {
+  AgentQuestionAnswer,
   AgentSettingsInput,
   AgentSettingsPublic,
   ApprovalDecision,
@@ -148,6 +149,27 @@ export const api = {
     return request(`/api/exec/${execId}/approval`, {
       method: "POST",
       body: JSON.stringify({ decision }),
+    });
+  },
+
+  /** Agent approvals cover both exec escalation and one-shot file writes. */
+  decideAgentApproval(
+    approvalId: string,
+    decision: ApprovalDecision,
+  ): Promise<{ ok: boolean }> {
+    return request(`/api/agent/approvals/${approvalId}`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    });
+  },
+
+  answerQuestion(
+    questionId: string,
+    answers: AgentQuestionAnswer[],
+  ): Promise<{ ok: boolean }> {
+    return request(`/api/agent/questions/${questionId}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ answers }),
     });
   },
 

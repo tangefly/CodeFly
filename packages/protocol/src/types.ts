@@ -120,6 +120,38 @@ export interface AgentToolCall {
   arguments: string;
 }
 
+export const TODO_STATUSES = ["pending", "in_progress", "completed"] as const;
+export type TodoStatus = (typeof TODO_STATUSES)[number];
+
+/** One entry of the model-maintained task list (todo_write). */
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+}
+
+/** One question shown to the user by ask_user_question. */
+export interface AgentQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface AgentQuestion {
+  id: string;
+  question: string;
+  header?: string;
+  options?: AgentQuestionOption[];
+  multiSelect?: boolean;
+}
+
+/** The user's answer to one question. Empty selected + no custom means skipped. */
+export interface AgentQuestionAnswer {
+  id: string;
+  selected: string[];
+  custom?: string;
+}
+
+export type AgentQuestionOutcome = "answered" | "skipped" | "timeout" | "cancelled";
+
 /** Structured display metadata for a persisted tool result. */
 export interface AgentToolMeta {
   kind?:
@@ -127,12 +159,16 @@ export interface AgentToolMeta {
     | "read"
     | "write"
     | "edit"
+    | "patch"
     | "list"
     | "grep"
     | "glob"
     | "search"
     | "fetch"
     | "image"
+    | "job"
+    | "todo"
+    | "question"
     | "arxiv"
     | "paper"
     | "library"
@@ -181,6 +217,21 @@ export interface AgentToolMeta {
   truncated?: boolean;
   denied?: boolean;
   spillPaths?: string[];
+  /** apply_patch / edit_file: unified diff and changed-file summary. */
+  diff?: string;
+  filesChanged?: number;
+  /** Background execution (run_command run_in_background, job_* tools). */
+  jobId?: string;
+  running?: boolean;
+  startedAt?: string;
+  /** todo_write: the complete task list. */
+  todos?: TodoItem[];
+  /** ask_user_question: questions and the answers that came back. */
+  questions?: AgentQuestion[];
+  answers?: AgentQuestionAnswer[];
+  questionOutcome?: AgentQuestionOutcome;
+  /** Read version recorded for a file (mtimeMs:size) when it was read/edited. */
+  fileVersion?: string;
   [key: string]: unknown;
 }
 
@@ -219,12 +270,19 @@ export const AGENT_TOOL_NAMES = [
   "read_file",
   "write_file",
   "edit_file",
+  "apply_patch",
   "list_files",
   "grep",
   "glob",
   "web_search",
   "web_fetch",
   "read_image",
+  "job_output",
+  "job_list",
+  "job_kill",
+  "write_stdin",
+  "todo_write",
+  "ask_user_question",
 ] as const;
 
 /** Hard ceiling for Agent loop steps in a single run. */
@@ -565,6 +623,8 @@ export type AuditType =
   | "llm.chat"
   | "agent.run"
   | "agent.tool"
+  | "agent.question"
+  | "agent.answer"
   | "paper.run"
   | "paper.added"
   | "paper.updated"

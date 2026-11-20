@@ -1,14 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import {
+  agentQuestionAnswerSchema,
   agentSettingsUpdateSchema,
+  approvalDecisionSchema,
   chatSchema,
   type AgentEvent,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
+import type { ApprovalService } from "../approval/service.js";
 import { AppError } from "../http/errors.js";
 import { SSE_HEADERS, sseComment, sseFrame } from "../exec/sse.js";
 import type { AgentConfigStore } from "../agent/config-store.js";
 import type { AgentService } from "../agent/service.js";
+import type { QuestionService } from "../interaction/questions.js";
 import { waitForTitle, type SessionTitler } from "../llm/title.js";
 import type { SessionStore } from "../session/store.js";
 
@@ -16,6 +20,8 @@ export interface AgentRouteDeps {
   sessions: SessionStore;
   agentConfig: AgentConfigStore;
   agent: AgentService;
+  approvals: ApprovalService;
+  questions: QuestionService;
   titler: SessionTitler;
   audit: AuditLog;
 }
@@ -41,6 +47,34 @@ export function registerAgentRoutes(
       enabledTools: settings.enabledTools,
     });
     return { settings };
+  });
+
+  app.post("/api/agent/approvals/:approvalId", async (request) => {
+    const { approvalId } = request.params as { approvalId: string };
+    const body = approvalDecisionSchema.parse(request.body);
+    const decided = deps.approvals.decide(approvalId, body.decision);
+    if (!decided) {
+      throw new AppError(
+        "APPROVAL_NOT_PENDING",
+        "this approval is no longer pending",
+        409,
+      );
+    }
+    return { ok: true };
+  });
+
+  app.post("/api/agent/questions/:questionId/answer", async (request) => {
+    const { questionId } = request.params as { questionId: string };
+    const body = agentQuestionAnswerSchema.parse(request.body);
+    const answered = deps.questions.answer(questionId, body.answers);
+    if (!answered) {
+      throw new AppError(
+        "QUESTION_NOT_PENDING",
+        "this question is no longer pending",
+        409,
+      );
+    }
+    return { ok: true };
   });
 
   app.post("/api/sessions/:id/agent", async (request, reply) => {

@@ -61,6 +61,8 @@ interface ExecRecord {
   runnerFailureSignatures: string[];
   startedAt: number | null;
   finishedAt: number | null;
+  exitCode: number | null;
+  exitSignal: string | null;
   timeoutTimer: NodeJS.Timeout | null;
   flushTimer: NodeJS.Timeout | null;
   pending: { stdout: Buffer[]; stderr: Buffer[] };
@@ -73,12 +75,19 @@ interface ExecRecord {
   stderrTail: string;
   spillPaths: string[];
   spills: { stdout: WriteStream | null; stderr: WriteStream | null };
+  spillBytes: number;
+  runInBackground: boolean;
+  promoteOnTimeout: boolean;
+  promoted: boolean;
 }
 
 export interface ExecServiceOptions {
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
+  /** Bytes buffered in memory before switching a stream to spill-only. */
   outputLimitBytes: number;
+  /** Maximum bytes written to spill files before the process is stopped. */
+  spillLimitBytes: number;
   flushIntervalMs: number;
   approvalTimeoutMs: number;
   denialTtlMs: number;
@@ -98,6 +107,34 @@ export interface ExecServiceDeps {
   options: ExecServiceOptions;
 }
 
+export interface JobOutput {
+  execId: string;
+  command: string;
+  status: ExecStatus;
+  text: string;
+  nextSeq: number;
+  running: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  durationMs: number;
+  truncated: boolean;
+  spillPaths: string[];
+  promoted: boolean;
+}
+
+export interface JobSummary {
+  execId: string;
+  command: string;
+  status: ExecStatus;
+  running: boolean;
+  startedAt: string | null;
+  durationMs: number;
+  exitCode: number | null;
+  runInBackground: boolean;
+  promoted: boolean;
+  truncated: boolean;
+}
+
 const TERMINAL: ReadonlySet<ExecStatus> = new Set(["exited", "error", "cancelled"]);
 
 export class ExecService {
@@ -111,10 +148,14 @@ export class ExecService {
   async create(session: AgentSession, input: ExecInput): Promise<ExecRecord> {
     const snapshot: AgentSession = { ...session };
     const cwd = await this.resolveCwd(snapshot, input.cwd);
-    const timeoutMs = Math.min(
-      input.timeoutMs ?? this.deps.options.defaultTimeoutMs,
-      this.deps.options.maxTimeoutMs,
-    );
+    const runInBackground = input.runInBackground === true;
+    // Background jobs have no wall-clock deadline; the caller stops them.
+    const timeoutMs = runInBackground
+      ? 0
+      : Math.min(
+          input.timeoutMs ?? this.deps.options.defaultTimeoutMs,
+          this.deps.options.maxTimeoutMs,
+        );
 
     const requestedMode = input.sandboxPermissions ?? null;
     const justification = input.justification?.trim() ?? null;
@@ -182,6 +223,8 @@ export class ExecService {
       runnerFailureSignatures: [],
       startedAt: null,
       finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
       timeoutTimer: null,
       flushTimer: null,
       pending: { stdout: [], stderr: [] },
@@ -194,8 +237,13 @@ export class ExecService {
       stderrTail: "",
       spillPaths: [],
       spills: { stdout: null, stderr: null },
+      spillBytes: 0,
+      runInBackground,
+      promoteOnTimeout: input.promoteOnTimeout !== false,
+      promoted: false,
     };
 
+    this.pruneSessionRecords(session.id);
     this.records.set(record.id, record);
     this.emit(record, {
       type: "exec.queued",
@@ -286,6 +334,117 @@ export class ExecService {
     }
 
     return false;
+  }
+
+  /** Writes to a background job's stdin; returns false when stdin is closed. */
+  writeStdin(execId: string, data: string): boolean {
+    const record = this.getRecord(execId);
+    if (!record) throw new AppError("EXEC_NOT_FOUND", `unknown execution: ${execId}`, 404);
+    if (record.finishedAt !== null || record.status !== "running") {
+      throw new AppError(
+        "EXEC_NOT_RUNNING",
+        `execution ${execId} is not running (status: ${record.status})`,
+        409,
+      );
+    }
+    const stdin = record.child?.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable) return false;
+    stdin.write(data);
+    return true;
+  }
+
+  /**
+   * Returns buffered output for a job. With `fromSeq`, only events after that
+   * sequence are returned; otherwise the tail of the whole transcript.
+   */
+  jobOutput(
+    sessionId: string,
+    execId: string,
+    options: { fromSeq?: number; maxChars?: number } = {},
+  ): JobOutput {
+    const record = this.getRecord(execId);
+    if (!record) throw new AppError("EXEC_NOT_FOUND", `unknown execution: ${execId}`, 404);
+    if (record.sessionId !== sessionId) {
+      throw new AppError("EXEC_NOT_FOUND", `unknown execution: ${execId}`, 404);
+    }
+
+    const maxChars = Math.max(1_000, options.maxChars ?? 20_000);
+    let text = "";
+    for (const buffered of record.events) {
+      if (options.fromSeq !== undefined && Number(buffered.id) <= options.fromSeq) {
+        continue;
+      }
+      const event = buffered.event;
+      if (event.type === "stdout" || event.type === "stderr") {
+        text += event.data;
+      } else if (event.type === "exec.denied") {
+        text += `\n[sandbox denied] ${event.message}\n`;
+      } else if (event.type === "exec.error") {
+        text += `\n[exec ${event.code}] ${event.message}\n`;
+      }
+    }
+
+    const truncated = text.length > maxChars;
+    if (truncated) {
+      const head = Math.min(500, maxChars);
+      text = `${text.slice(0, head)}\n[... ${text.length - maxChars} characters omitted ...]\n${text.slice(-(maxChars - head))}`;
+    }
+
+    return {
+      execId: record.id,
+      command: record.command,
+      status: record.status,
+      text: text.length > 0 ? text : "(no output yet)",
+      nextSeq: record.seq,
+      running: record.finishedAt === null,
+      exitCode: record.exitCode,
+      signal: record.exitSignal,
+      durationMs:
+        record.startedAt === null
+          ? 0
+          : (record.finishedAt ?? Date.now()) - record.startedAt,
+      truncated: record.truncated || truncated,
+      spillPaths: record.spillPaths,
+      promoted: record.promoted,
+    };
+  }
+
+  /** Summaries of this session's executions, newest first. */
+  listJobs(sessionId: string): JobSummary[] {
+    return [...this.records.values()]
+      .filter((record) => record.sessionId === sessionId)
+      .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
+      .slice(0, 50)
+      .map((record) => ({
+        execId: record.id,
+        command: record.command,
+        status: record.status,
+        running: record.finishedAt === null,
+        startedAt:
+          record.startedAt === null
+            ? null
+            : new Date(record.startedAt).toISOString(),
+        durationMs:
+          record.startedAt === null
+            ? 0
+            : (record.finishedAt ?? Date.now()) - record.startedAt,
+        exitCode: record.exitCode,
+        runInBackground: record.runInBackground,
+        promoted: record.promoted,
+        truncated: record.truncated,
+      }));
+  }
+
+  /** Keeps the newest terminal records per session so memory is bounded. */
+  private pruneSessionRecords(sessionId: string): void {
+    const records = [...this.records.values()].filter(
+      (record) => record.sessionId === sessionId && record.finishedAt !== null,
+    );
+    if (records.length < 50) return;
+    records.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
+    for (const record of records.slice(0, records.length - 49)) {
+      this.records.delete(record.id);
+    }
   }
 
   /**
@@ -449,7 +608,7 @@ export class ExecService {
         cwd: record.cwd,
         env: sandboxEnv(record.sessionId),
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -463,6 +622,9 @@ export class ExecService {
     }
 
     record.child = child;
+    // Foreground commands must not block on an open stdin. Background jobs
+    // keep it open for write_stdin.
+    if (!record.runInBackground) child.stdin?.end();
     child.stdout?.on("data", (chunk: Buffer) => this.onData(record, "stdout", chunk));
     child.stderr?.on("data", (chunk: Buffer) => this.onData(record, "stderr", chunk));
     child.on("error", (error) => {
@@ -484,17 +646,39 @@ export class ExecService {
     );
     record.flushTimer.unref?.();
 
-    record.timeoutTimer = setTimeout(() => {
-      if (record.finishedAt !== null || record.status !== "running") return;
-      record.killReason ??= "timeout";
-      this.emit(record, {
-        type: "exec.error",
-        code: "TIMEOUT",
-        message: `Command timed out after ${record.timeoutMs} ms`,
-      });
-      this.kill(record);
-    }, record.timeoutMs);
-    record.timeoutTimer.unref?.();
+    if (record.timeoutMs > 0) {
+      record.timeoutTimer = setTimeout(() => {
+        if (record.finishedAt !== null || record.status !== "running") return;
+        if (record.promoteOnTimeout) {
+          // The command is still making progress; keep it alive and let the
+          // model collect the rest through job_output instead of killing it.
+          record.promoted = true;
+          this.emit(record, {
+            type: "exec.promoted",
+            execId: record.id,
+            timeoutMs: record.timeoutMs,
+            spillPaths: record.spillPaths,
+          });
+          void this.deps.audit.append({
+            type: "exec.started",
+            sessionId: record.sessionId,
+            execId: record.id,
+            command: record.command,
+            mode: record.effectiveMode,
+            promotedAfterMs: record.timeoutMs,
+          });
+          return;
+        }
+        record.killReason ??= "timeout";
+        this.emit(record, {
+          type: "exec.error",
+          code: "TIMEOUT",
+          message: `Command timed out after ${record.timeoutMs} ms`,
+        });
+        this.kill(record);
+      }, record.timeoutMs);
+      record.timeoutTimer.unref?.();
+    }
   }
 
   // ---------------------------------------------------------------- output
@@ -520,11 +704,37 @@ export class ExecService {
     }
 
     if (record.truncated) {
-      record.spills[stream]?.write(chunk);
+      this.appendSpill(record, stream, chunk);
       return;
     }
 
     record.pending[stream].push(chunk);
+  }
+
+  /** Appends to the spill stream; stops the process only past the hard cap. */
+  private appendSpill(
+    record: ExecRecord,
+    stream: "stdout" | "stderr",
+    chunk: Buffer,
+  ): void {
+    const spill = record.spills[stream];
+    if (!spill) return;
+    spill.write(chunk);
+    record.spillBytes += chunk.byteLength;
+    if (
+      record.spillBytes > this.deps.options.spillLimitBytes &&
+      record.killReason === null
+    ) {
+      record.killReason = "output-limit";
+      this.emit(record, {
+        type: "exec.error",
+        code: "OUTPUT_LIMIT",
+        message:
+          `Output exceeded the spill limit (${this.deps.options.spillLimitBytes} bytes); ` +
+          `the process was stopped. Full output: ${record.spillPaths.join(", ")}`,
+      });
+      this.kill(record);
+    }
   }
 
   private flush(record: ExecRecord): void {
@@ -587,7 +797,6 @@ export class ExecService {
 
   private beginTruncation(record: ExecRecord): void {
     record.truncated = true;
-    record.killReason ??= "output-limit";
     record.pending = { stdout: [], stderr: [] };
 
     for (const stream of ["stdout", "stderr"] as const) {
@@ -601,18 +810,12 @@ export class ExecService {
       });
       record.spills[stream] = spill;
       record.spillPaths.push(spillPath);
-      for (const buffered of record.history[stream]) spill.write(buffered);
+      for (const buffered of record.history[stream]) {
+        spill.write(buffered);
+        record.spillBytes += buffered.byteLength;
+      }
       record.history[stream] = [];
     }
-
-    this.emit(record, {
-      type: "exec.error",
-      code: "OUTPUT_LIMIT",
-      message:
-        `Output exceeded ${this.deps.options.outputLimitBytes} bytes; ` +
-        `process killed and output saved to ${record.spillPaths.join(", ")}`,
-    });
-    this.kill(record);
   }
 
   // ---------------------------------------------------------------- close
@@ -651,6 +854,8 @@ export class ExecService {
     }
 
     record.finishedAt = Date.now();
+    record.exitCode = code;
+    record.exitSignal = signal;
     const durationMs =
       record.startedAt === null ? 0 : record.finishedAt - record.startedAt;
     record.status = runnerFailure
@@ -704,6 +909,8 @@ export class ExecService {
     }
 
     record.finishedAt = Date.now();
+    record.exitCode = null;
+    record.exitSignal = null;
     record.status = status;
     const durationMs =
       record.startedAt === null ? 0 : record.finishedAt - record.startedAt;

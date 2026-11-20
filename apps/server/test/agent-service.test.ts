@@ -10,7 +10,10 @@ import {
   type AuditEvent,
 } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
+import type { ApprovalService } from "../src/approval/service.js";
 import type { ExecService } from "../src/exec/service.js";
+import { FileVersionStore } from "../src/fs/file-versions.js";
+import type { QuestionService } from "../src/interaction/questions.js";
 import {
   LlmError,
   type LlmChatMessage,
@@ -195,6 +198,7 @@ class FakeTools implements AgentToolExecutorLike {
           approvalId: "a_fake",
           execId: "e_fake",
           toolCallId: ctx.toolCallId,
+          kind: "exec",
           command: "echo hi",
           currentMode: "workspace-write",
           requestedMode: "danger-full-access",
@@ -286,6 +290,10 @@ describe("AgentService", () => {
       tools,
       lock,
       exec: {} as ExecService,
+      approvals: {} as ApprovalService,
+      questions: {} as QuestionService,
+      fileVersions: new FileVersionStore(),
+      approvalTimeoutMs: 1_200,
       dataDir: path.join(dir, "data"),
       maxReadBytes: 2 * 1024 * 1024,
       maxWriteBytes: 5 * 1024 * 1024,

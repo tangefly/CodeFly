@@ -74,6 +74,28 @@ describe("AgentConfigStore", () => {
     expect(updated.enabledTools).toEqual([]);
   });
 
+  it("adds new built-in tools to settings saved before the schema grew", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      file,
+      JSON.stringify({ enabledTools: ["read_file", "write_file"] }),
+      "utf8",
+    );
+    const store = new AgentConfigStore(file);
+    await store.init();
+    const tools = store.getPublic().enabledTools;
+    expect(tools).toContain("read_file");
+    expect(tools).toContain("apply_patch");
+    expect(tools).toContain("todo_write");
+    expect(tools).toContain("ask_user_question");
+
+    // After the migration is persisted, a deliberate disable is not undone.
+    await store.update({ enabledTools: ["read_file"] });
+    const reloaded = new AgentConfigStore(file);
+    await reloaded.init();
+    expect(reloaded.getPublic().enabledTools).toEqual(["read_file"]);
+  });
+
   it("migrates a legacy customized systemPrompt to the persona prefix", async () => {
     const { writeFile } = await import("node:fs/promises");
     await writeFile(

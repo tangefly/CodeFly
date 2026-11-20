@@ -112,11 +112,27 @@ export const execSchema = z.object({
   /** Only valid as a one-shot retry after a sandbox denial of the same command. */
   sandboxPermissions: sandboxModeSchema.optional(),
   justification: z.string().trim().min(1).max(2000).optional(),
+  /** Return immediately with a job id instead of waiting for exit. */
+  runInBackground: z.boolean().optional(),
+  /** Keep a timed-out foreground command running as a job (default true). */
+  promoteOnTimeout: z.boolean().optional(),
 });
 
 export const approvalDecisionSchema = z.object({
   decision: z.enum(["allow_once", "deny"]),
   approvalId: z.string().min(1).max(200).optional(),
+});
+
+export const agentQuestionAnswerSchema = z.object({
+  answers: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(200),
+        selected: z.array(z.string().max(500)).max(50),
+        custom: z.string().max(10_000).optional(),
+      }),
+    )
+    .max(50),
 });
 
 export const fsPathQuerySchema = z.object({

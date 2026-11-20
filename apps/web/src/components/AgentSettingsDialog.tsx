@@ -20,7 +20,8 @@ const TOOL_INFO: Array<{
   {
     name: "run_command",
     label: "运行命令",
-    description: "bash -c，在 Landlock 沙箱内执行；可请求一次性提权审批。",
+    description:
+      "bash -c，在 bwrap / Landlock 沙箱内执行；支持后台作业与一次性提权审批。",
   },
   {
     name: "read_file",
@@ -36,6 +37,12 @@ const TOOL_INFO: Array<{
     name: "edit_file",
     label: "编辑文件",
     description: "支持一次多处精确替换；默认要求唯一匹配，全部成功才写入。",
+  },
+  {
+    name: "apply_patch",
+    label: "应用补丁",
+    description:
+      "一次完成多文件新增、修改、删除与移动；全部校验通过才写入，失败会回滚。",
   },
   {
     name: "list_files",
@@ -69,6 +76,37 @@ const TOOL_INFO: Array<{
     label: "查看图片",
     description:
       "读取 PNG/JPEG/GIF/WebP 并附给模型查看，支持截图与图表；只读。",
+  },
+  {
+    name: "job_output",
+    label: "作业输出",
+    description: "读取后台命令的输出，可按序列号增量读取并等待新输出。",
+  },
+  {
+    name: "job_list",
+    label: "作业列表",
+    description: "列出当前会话的后台与前台作业及状态。",
+  },
+  {
+    name: "job_kill",
+    label: "停止作业",
+    description: "按作业 id 停止一个仍在运行的命令。",
+  },
+  {
+    name: "write_stdin",
+    label: "写入输入",
+    description: "向后台交互式命令的 stdin 写入内容并读取响应。",
+  },
+  {
+    name: "todo_write",
+    label: "任务清单",
+    description: "维护多步任务的完整清单，UI 以 checklist 展示。",
+  },
+  {
+    name: "ask_user_question",
+    label: "询问用户",
+    description:
+      "在工具调用中间暂停，向用户提问并等待回答；支持选项、多选与自定义输入。",
   },
 ];
 

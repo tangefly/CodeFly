@@ -37,6 +37,8 @@ export interface ApprovalAskInput {
 export interface AskOptions {
   policy: ApprovalPolicy;
   timeoutMs: number;
+  /** Cancels the pending approval when the owning turn is aborted. */
+  signal?: AbortSignal;
   onAsked?: (request: ApprovalRequest) => void;
 }
 
@@ -44,6 +46,8 @@ interface PendingApproval {
   request: ApprovalRequest;
   resolve: (result: ApprovalResult) => void;
   timer: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 /**
@@ -69,6 +73,9 @@ export class ApprovalService {
         reason: "policy",
       });
       return Promise.resolve({ outcome: "rejected", reason: "policy" });
+    }
+    if (options.signal?.aborted) {
+      return Promise.resolve({ outcome: "cancelled", reason: "cancelled" });
     }
 
     const id = `a_${randomUUID()}`;
@@ -96,7 +103,12 @@ export class ApprovalService {
       );
       timer.unref?.();
 
-      this.pending.set(id, { request, resolve, timer });
+      const onAbort = (): void => {
+        this.finish(id, { outcome: "cancelled", reason: "cancelled" });
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
+      this.pending.set(id, { request, resolve, timer, signal: options.signal, onAbort });
 
       void this.audit.append({
         type: "approval.asked",
@@ -149,6 +161,9 @@ export class ApprovalService {
     if (!pending) return;
     this.pending.delete(id);
     clearTimeout(pending.timer);
+    if (pending.signal !== undefined && pending.onAbort !== undefined) {
+      pending.signal.removeEventListener("abort", pending.onAbort);
+    }
 
     void this.audit.append({
       type: "approval.decided",

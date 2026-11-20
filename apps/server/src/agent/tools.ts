@@ -1,23 +1,43 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat, unlink } from "node:fs/promises";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
 import type {
   AgentEvent,
+  AgentQuestion,
+  AgentQuestionAnswer,
   AgentSession,
   AgentToolMeta,
   AgentToolName,
   ExecEvent,
   SandboxMode,
+  TodoItem,
 } from "@codefly/protocol";
-import { SANDBOX_MODES } from "@codefly/protocol";
+import { SANDBOX_MODES, TODO_STATUSES } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
 import { AppError, isNotFound } from "../http/errors.js";
 import { atomicWriteFile } from "../fs/atomic-write.js";
-import { isUnder } from "../fs/canonicalize.js";
+import { canonicalizeForWrite, isUnder } from "../fs/canonicalize.js";
+import { unifiedDiff } from "../fs/diff.js";
 import { assertWritable, denialMessage } from "../fs/fence.js";
+import {
+  applyPatchOperations,
+  parsePatch,
+  PatchParseError,
+  type PatchChange,
+} from "../fs/patch.js";
+import { assertReadable, isReadDenied } from "../fs/read-fence.js";
+import {
+  ripgrepAvailable,
+  ripgrepGlob,
+  ripgrepGrep,
+} from "../fs/ripgrep.js";
+import { isStrictlyWider } from "../policy/modes.js";
+import { writableRoots } from "../policy/writable-roots.js";
 import type { ExecService } from "../exec/service.js";
+import { assertCommandNetworkAllowed } from "../exec/network-guard.js";
+import { BLOCKED_HOSTNAMES, bareHost, isBlockedAddress } from "../net/address.js";
 import type { LlmToolDefinition } from "../llm/client.js";
 
 export interface ToolResult {
@@ -37,10 +57,59 @@ export interface ToolExecutionContext {
   signal: AbortSignal;
   emit: (event: AgentEvent) => void;
   toolCallId: string;
+  messageId: string;
+  questions: QuestionServiceLike;
+  fileVersions: FileVersionStoreLike;
+  requestFileEscalation: (
+    input: FileEscalationRequest,
+  ) => Promise<FileEscalationResult>;
+}
+
+/** Records and checks the version a file had when the model last read it. */
+export interface FileVersionStoreLike {
+  record(path: string, version: string): void;
+  get(path: string): string | undefined;
+  forget(path: string): void;
+}
+
+export interface QuestionAskInput {
+  sessionId: string;
+  toolCallId: string;
+  messageId: string;
+  questions: AgentQuestion[];
+  signal: AbortSignal;
+  emit: (event: AgentEvent) => void;
+}
+
+export interface QuestionAskResult {
+  answers: AgentQuestionAnswer[];
+  outcome: "answered" | "skipped" | "timeout" | "cancelled";
+}
+
+export interface QuestionServiceLike {
+  ask(input: QuestionAskInput): Promise<QuestionAskResult>;
+}
+
+export interface FileEscalationRequest {
+  session: AgentSession;
+  path: string;
+  requestedMode: SandboxMode;
+  justification: string;
+  toolCallId: string;
+  signal: AbortSignal;
+  emit: (event: AgentEvent) => void;
+}
+
+export interface FileEscalationResult {
+  allowed: boolean;
+  reason: string;
 }
 
 export interface AgentToolExecutorLike {
-  definitions(enabledTools: AgentToolName[]): LlmToolDefinition[];
+  definitions(
+    enabledTools: AgentToolName[],
+    options?: { session?: AgentSession },
+  ): LlmToolDefinition[];
   execute(
     name: string,
     rawArguments: string,
@@ -50,13 +119,17 @@ export interface AgentToolExecutorLike {
 
 const MAX_TOOL_CONTENT_CHARS = 30_000;
 const MAX_TOOL_STREAM_CHARS = 100_000;
+/** Model-facing command streams keep a head and a tail; failures live at the end. */
 const MAX_MODEL_STREAM_CHARS = 12_000;
-const MAX_TOOL_READ_CHARS = 60_000;
+const MAX_MODEL_STREAM_HEAD_CHARS = 4_000;
+const MAX_MODEL_STREAM_TAIL_CHARS = 8_000;
+const MAX_TOOL_READ_CHARS = 30_000;
 const MAX_LIST_ENTRIES = 500;
 const MAX_EDIT_OPERATIONS = 100;
 const DEFAULT_GREP_RESULTS = 200;
 const MAX_GREP_RESULTS = 2_000;
 const MAX_GREP_LINE_CHARS = 500;
+const MAX_GREP_CONTEXT_LINES = 8;
 const MAX_GLOB_MATCHES = 500;
 const MAX_SCAN_FILES = 50_000;
 const MAX_SCAN_DEPTH = 32;
@@ -65,7 +138,7 @@ const MAX_SEARCH_COUNT = 50;
 const MAX_SEARCH_CONTENT_CHARS = 4_000;
 const MAX_SEARCH_ERROR_CHARS = 2_000;
 const DEFAULT_FETCH_CHARS = 20_000;
-const MAX_FETCH_CHARS = 100_000;
+const MAX_FETCH_CHARS = 30_000;
 const FETCH_TIMEOUT_MS = 20_000;
 const FETCH_MAX_BYTES = 2 * 1024 * 1024;
 const FETCH_MAX_REDIRECTS = 5;
@@ -91,6 +164,7 @@ const runCommandArgs = z
     command: z.string().trim().min(1).max(100_000),
     cwd: z.string().max(4096).optional(),
     timeout_ms: z.number().int().min(1000).max(600_000).optional(),
+    run_in_background: z.boolean().optional(),
     sandbox_permissions: z.enum(SANDBOX_MODES).optional(),
     justification: z.string().trim().min(1).max(2000).optional(),
   })
@@ -110,6 +184,8 @@ const writeFileArgs = z
   .object({
     path: z.string().min(1).max(4096),
     content: z.string(),
+    sandbox_permissions: z.enum(SANDBOX_MODES).optional(),
+    justification: z.string().trim().min(1).max(2000).optional(),
   })
   .strict();
 
@@ -130,6 +206,8 @@ const editFileArgs = z
     old_string: z.string().min(1).optional(),
     new_string: z.string().optional(),
     replace_all: z.boolean().optional(),
+    sandbox_permissions: z.enum(SANDBOX_MODES).optional(),
+    justification: z.string().trim().min(1).max(2000).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -158,6 +236,10 @@ const editFileArgs = z
 const listFilesArgs = z
   .object({
     path: z.string().max(4096).optional(),
+    /** Zero-based index of the first entry to return. */
+    offset: z.number().int().min(0).optional(),
+    /** Maximum entries to return (default and max 500). */
+    limit: z.number().int().min(1).max(MAX_LIST_ENTRIES).optional(),
   })
   .strict();
 
@@ -169,6 +251,8 @@ const grepArgs = z
     case_insensitive: z.boolean().optional(),
     fixed_strings: z.boolean().optional(),
     include_ignored: z.boolean().optional(),
+    output_mode: z.enum(["content", "files_with_matches", "count"]).optional(),
+    context_lines: z.number().int().min(0).max(MAX_GREP_CONTEXT_LINES).optional(),
     max_results: z
       .number()
       .int()
@@ -217,6 +301,88 @@ const readImageArgs = z
   })
   .strict();
 
+const applyPatchArgs = z
+  .object({
+    /** Patch text; see the tool description for the format. */
+    input: z.string().min(1).max(1_000_000),
+    sandbox_permissions: z.enum(SANDBOX_MODES).optional(),
+    justification: z.string().trim().min(1).max(2000).optional(),
+  })
+  .strict();
+
+const jobOutputArgs = z
+  .object({
+    exec_id: z.string().trim().min(1).max(200),
+    /** Only return events after this sequence number (from a previous call). */
+    from_seq: z.number().int().min(0).optional(),
+    max_chars: z.number().int().min(1_000).max(100_000).optional(),
+    /** Wait up to this long for new output or exit. */
+    wait_ms: z.number().int().min(0).max(60_000).optional(),
+  })
+  .strict();
+
+const jobListArgs = z.object({}).strict();
+
+const jobKillArgs = z
+  .object({
+    exec_id: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+const writeStdinArgs = z
+  .object({
+    exec_id: z.string().trim().min(1).max(200),
+    chars: z.string().max(100_000),
+    /** Wait up to this long for output after writing. */
+    yield_ms: z.number().int().min(0).max(30_000).optional(),
+  })
+  .strict();
+
+const todoWriteArgs = z
+  .object({
+    todos: z
+      .array(
+        z
+          .object({
+            content: z.string().trim().min(1).max(2_000),
+            status: z.enum(TODO_STATUSES),
+          })
+          .strict(),
+      )
+      .max(200),
+  })
+  .strict();
+
+const askUserQuestionArgs = z
+  .object({
+    questions: z
+      .array(
+        z
+          .object({
+            id: z.string().trim().min(1).max(200),
+            question: z.string().trim().min(1).max(4_000),
+            header: z.string().trim().max(200).optional(),
+            options: z
+              .array(
+                z
+                  .object({
+                    label: z.string().trim().min(1).max(500),
+                    description: z.string().trim().max(2_000).optional(),
+                  })
+                  .strict(),
+              )
+              .min(2)
+              .max(20)
+              .optional(),
+            multi_select: z.boolean().optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(10),
+  })
+  .strict();
+
 const searchResultSchema = z
   .object({
     title: z.string().optional(),
@@ -243,7 +409,7 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "run_command",
       description:
-        "Run a shell command with bash -c inside the session workspace. The command runs in the Landlock sandbox: read + execute are allowed, writes are limited to the workspace and /tmp. stdin is unavailable. Use this to run tests, builds, git, and small scripts. Output is capped for the model.",
+        "Run a shell command with bash -c inside the session workspace. The command runs in the session sandbox: reads are unrestricted, writes are limited by the permission mode. stdin is closed for foreground commands; use run_in_background for long-running processes and collect output with job_output. Use this to run tests, builds, git, and small scripts. Large output is truncated for the model; the full output is saved to spill files whose paths are reported.",
       parameters: {
         type: "object",
         properties: {
@@ -260,7 +426,13 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
             type: "integer",
             minimum: 1000,
             maximum: 600000,
-            description: "Optional timeout; capped by the agent setting.",
+            description:
+              "Optional timeout; capped by the agent setting. A foreground command that hits the timeout keeps running as a background job.",
+          },
+          run_in_background: {
+            type: "boolean",
+            description:
+              "Start the command and return a job id immediately. No timeout applies; read output with job_output and stop it with job_kill. Keep stdin open for write_stdin.",
           },
           sandbox_permissions: {
             type: "string",
@@ -302,7 +474,7 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
             minimum: 1,
             maximum: 100000,
             description:
-              "Maximum number of lines to return. Defaults to the rest of the file.",
+              "Maximum number of lines to return. Defaults to the rest of the file; output is also capped at ~30k characters.",
           },
         },
         required: ["path"],
@@ -315,7 +487,7 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "write_file",
       description:
-        "Create or overwrite a file with UTF-8 content. Writes are fenced by the session permission (workspace + /tmp in workspace-write) and protected paths (.git, .claude, shell rc) are refused. File tools cannot request one-shot escalation.",
+        "Create or overwrite a file with UTF-8 content. Writes are fenced by the session permission (workspace + /tmp in workspace-write) and protected paths (.git, .claude, shell rc) are refused. Use sandbox_permissions + justification to request a one-shot wider mode outside the workspace.",
       parameters: {
         type: "object",
         properties: {
@@ -325,6 +497,17 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
               "File path. Relative paths must stay inside the workspace.",
           },
           content: { type: "string", description: "Complete file content." },
+          sandbox_permissions: {
+            type: "string",
+            enum: ["read-only", "workspace-write", "danger-full-access"],
+            description:
+              "Request a one-shot wider mode for this write; the user must approve it. Omit for the session mode.",
+          },
+          justification: {
+            type: "string",
+            description:
+              "Required with sandbox_permissions: explain why the wider access is needed.",
+          },
         },
         required: ["path", "content"],
         additionalProperties: false,
@@ -379,6 +562,17 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
             type: "boolean",
             description: "Single-edit form: replace every occurrence.",
           },
+          sandbox_permissions: {
+            type: "string",
+            enum: ["read-only", "workspace-write", "danger-full-access"],
+            description:
+              "Request a one-shot wider mode for this edit; the user must approve it. Omit for the session mode.",
+          },
+          justification: {
+            type: "string",
+            description:
+              "Required with sandbox_permissions: explain why the wider access is needed.",
+          },
         },
         required: ["path"],
         additionalProperties: false,
@@ -390,13 +584,24 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "list_files",
       description:
-        "List a directory. Relative paths resolve against the workspace; absolute paths are allowed. Returns type and name for up to 500 entries.",
+        "List a directory. Relative paths resolve against the workspace; absolute paths are allowed. Returns type and name for up to 500 entries; pass offset to page through larger directories.",
       parameters: {
         type: "object",
         properties: {
           path: {
             type: "string",
             description: "Directory path; defaults to the workspace root.",
+          },
+          offset: {
+            type: "integer",
+            minimum: 0,
+            description: "Zero-based index of the first entry to return.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 500,
+            description: "Maximum entries to return (default 500).",
           },
         },
         additionalProperties: false,
@@ -408,14 +613,14 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
     function: {
       name: "grep",
       description:
-        "Search file contents recursively with a regular expression. Prefer this over running grep/rg through run_command. Skips .git, node_modules, dist and other build directories unless include_ignored is true. Returns path:line: text.",
+        "Search file contents recursively with a regular expression (ripgrep when available). Prefer this over running grep/rg through run_command. Honors .gitignore and skips .git, node_modules and other ignored directories unless include_ignored is true. Returns path:line: text by default; output_mode can return matching files or per-file counts.",
       parameters: {
         type: "object",
         properties: {
           pattern: {
             type: "string",
             description:
-              "Regular expression (JavaScript syntax), or literal text when fixed_strings is true.",
+              "Regular expression (ripgrep syntax), or literal text when fixed_strings is true.",
           },
           path: {
             type: "string",
@@ -438,7 +643,20 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
           include_ignored: {
             type: "boolean",
             description:
-              "Also search .git, node_modules and other ignored directories.",
+              "Also search .git, node_modules and files excluded by .gitignore.",
+          },
+          output_mode: {
+            type: "string",
+            enum: ["content", "files_with_matches", "count"],
+            description:
+              "content (default) returns matching lines; files_with_matches returns file paths; count returns matches per file.",
+          },
+          context_lines: {
+            type: "integer",
+            minimum: 0,
+            maximum: MAX_GREP_CONTEXT_LINES,
+            description:
+              "Lines of context around each match in content mode (default 0, max 8).",
           },
           max_results: {
             type: "integer",
@@ -563,6 +781,241 @@ const DEFINITIONS: Record<AgentToolName, LlmToolDefinition> = {
       },
     },
   },
+  apply_patch: {
+    type: "function",
+    function: {
+      name: "apply_patch",
+      description:
+        "Create, update, delete, or move UTF-8 text files with one patch. Prefer it over several write_file/edit_file calls when a change spans multiple files or separated regions. Format: start with *** Begin Patch and end with *** End Patch. Use *** Add File: path followed by + lines; *** Update File: path, optionally followed by *** Move to: path, then @@ context hunks with space-prefixed context lines, + added lines and - removed lines; *** Delete File: path deletes a file; *** End of File anchors a hunk to the end of the file. Every hunk is validated before anything is written; a failed hunk writes nothing.",
+      parameters: {
+        type: "object",
+        properties: {
+          input: {
+            type: "string",
+            description:
+              "Patch text beginning with *** Begin Patch and ending with *** End Patch. Paths are relative to the workspace or absolute.",
+          },
+          sandbox_permissions: {
+            type: "string",
+            enum: ["read-only", "workspace-write", "danger-full-access"],
+            description:
+              "Request a one-shot wider mode for this patch; the user must approve it. Omit for the session mode.",
+          },
+          justification: {
+            type: "string",
+            description:
+              "Required with sandbox_permissions: explain why the wider access is needed.",
+          },
+        },
+        required: ["input"],
+        additionalProperties: false,
+      },
+    },
+  },
+  job_output: {
+    type: "function",
+    function: {
+      name: "job_output",
+      description:
+        "Read output from a background command started with run_in_background (or a foreground command promoted after its timeout). Returns buffered output, running status, exit code, and a next_seq cursor. Pass from_seq to read only new output; pass wait_ms to wait briefly for more output or exit.",
+      parameters: {
+        type: "object",
+        properties: {
+          exec_id: {
+            type: "string",
+            description: "Job id returned by run_in_background.",
+          },
+          from_seq: {
+            type: "integer",
+            minimum: 0,
+            description:
+              "Return only events after this sequence number (next_seq from a previous call).",
+          },
+          max_chars: {
+            type: "integer",
+            minimum: 1000,
+            maximum: 100000,
+            description: "Maximum characters to return (default 20000).",
+          },
+          wait_ms: {
+            type: "integer",
+            minimum: 0,
+            maximum: 60000,
+            description:
+              "Wait up to this many milliseconds for new output or exit before returning.",
+          },
+        },
+        required: ["exec_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  job_list: {
+    type: "function",
+    function: {
+      name: "job_list",
+      description:
+        "List the background and foreground jobs of this session, newest first, with status, duration and exit code.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  job_kill: {
+    type: "function",
+    function: {
+      name: "job_kill",
+      description:
+        "Stop a running command by job id. The job's status becomes cancelled and any process group is killed.",
+      parameters: {
+        type: "object",
+        properties: {
+          exec_id: {
+            type: "string",
+            description: "Job id to stop.",
+          },
+        },
+        required: ["exec_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  write_stdin: {
+    type: "function",
+    function: {
+      name: "write_stdin",
+      description:
+        "Write characters to a running background command's stdin and optionally wait for output. Use it for REPLs, prompts and interactive tools. Returns the output produced and a next_seq cursor.",
+      parameters: {
+        type: "object",
+        properties: {
+          exec_id: {
+            type: "string",
+            description: "Running background job id.",
+          },
+          chars: {
+            type: "string",
+            description:
+              "Bytes to write to stdin. Include a trailing newline when the program expects Enter.",
+          },
+          yield_ms: {
+            type: "integer",
+            minimum: 0,
+            maximum: 30000,
+            description:
+              "Wait up to this many milliseconds for output after writing (default 250).",
+          },
+        },
+        required: ["exec_id", "chars"],
+        additionalProperties: false,
+      },
+    },
+  },
+  todo_write: {
+    type: "function",
+    function: {
+      name: "todo_write",
+      description:
+        "Record and update the session task list. Pass the COMPLETE list every time; it replaces the previous list. Use it to plan multi-step work and keep the user informed; skip it for trivial single-step tasks. Keep exactly the items still relevant and mark each completed as soon as it is done.",
+      parameters: {
+        type: "object",
+        properties: {
+          todos: {
+            type: "array",
+            maxItems: 200,
+            description: "The complete task list.",
+            items: {
+              type: "object",
+              properties: {
+                content: {
+                  type: "string",
+                  description: "A short imperative line describing the task.",
+                },
+                status: {
+                  type: "string",
+                  enum: ["pending", "in_progress", "completed"],
+                  description: "Current state of the task.",
+                },
+              },
+              required: ["content", "status"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["todos"],
+        additionalProperties: false,
+      },
+    },
+  },
+  ask_user_question: {
+    type: "function",
+    function: {
+      name: "ask_user_question",
+      description:
+        "Ask the user one or more questions when a decision, confirmation or missing information blocks progress. This call blocks until the user answers, skips, or the request times out. Provide options when the choice is finite; set multi_select when several answers are allowed. Do not use it for information you can obtain with tools.",
+      parameters: {
+        type: "object",
+        properties: {
+          questions: {
+            type: "array",
+            minItems: 1,
+            maxItems: 10,
+            description: "Questions to ask before continuing.",
+            items: {
+              type: "object",
+              properties: {
+                id: {
+                  type: "string",
+                  description: "Stable id echoed in the answer.",
+                },
+                question: {
+                  type: "string",
+                  description: "The specific question to ask.",
+                },
+                header: {
+                  type: "string",
+                  description: "Optional short heading such as Confirm or Choose.",
+                },
+                options: {
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 20,
+                  description:
+                    "Optional choices. Put a recommended option first and append (Recommended) to its label.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      label: {
+                        type: "string",
+                        description: "Short user-facing label.",
+                      },
+                      description: {
+                        type: "string",
+                        description: "One sentence explaining the tradeoff.",
+                      },
+                    },
+                    required: ["label"],
+                    additionalProperties: false,
+                  },
+                },
+                multi_select: {
+                  type: "boolean",
+                  description:
+                    "Whether the user may select more than one option. Defaults to false.",
+                },
+              },
+              required: ["id", "question"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["questions"],
+        additionalProperties: false,
+      },
+    },
+  },
 };
 
 function parseArgs<T>(
@@ -594,15 +1047,39 @@ function appendCapped(current: string, chunk: string, limit: number): string {
   return (current + chunk).slice(0, limit);
 }
 
-function truncateContent(content: string): string {
-  if (content.length <= MAX_TOOL_CONTENT_CHARS) return content;
-  return `${content.slice(0, MAX_TOOL_CONTENT_CHARS)}\n\n[... truncated; result too large for the model context]`;
+function appendTail(current: string, chunk: string, limit: number): string {
+  return `${current}${chunk}`.slice(-limit);
 }
 
-/** Caps one stream for the model while keeping the trailing notes visible. */
-function formatStreamForModel(text: string): string {
-  if (text.length <= MAX_MODEL_STREAM_CHARS) return text || "(empty)";
-  return `${text.slice(0, MAX_MODEL_STREAM_CHARS)}\n[... ${text.length - MAX_MODEL_STREAM_CHARS} more characters omitted]`;
+/** Keeps both ends of a large result; the middle is where noise usually is. */
+function truncateContent(content: string): string {
+  if (content.length <= MAX_TOOL_CONTENT_CHARS) return content;
+  const head = content.slice(0, 4_000);
+  const tail = content.slice(-(MAX_TOOL_CONTENT_CHARS - 4_000 - 200));
+  return `${head}\n\n[... ${content.length - head.length - tail.length} characters omitted; showing the beginning and end ...]\n\n${tail}`;
+}
+
+/**
+ * Caps one captured stream for the model. A long command's useful signal
+ * (test failures, stack traces) is at the tail, so keep a head and a tail.
+ */
+function formatStreamForModel(
+  head: string,
+  tail: string,
+  total: number,
+): string {
+  if (total <= MAX_MODEL_STREAM_CHARS) return head || "(empty)";
+  return (
+    `${head.slice(0, MAX_MODEL_STREAM_HEAD_CHARS)}` +
+    `\n[... ${total - MAX_MODEL_STREAM_HEAD_CHARS - MAX_MODEL_STREAM_TAIL_CHARS} characters omitted; showing the beginning and end of ${total} total ...]\n` +
+    `${tail.slice(-MAX_MODEL_STREAM_TAIL_CHARS)}`
+  );
+}
+
+/** UI-facing copy of a stream: larger than the model copy but still bounded. */
+function captureForMeta(head: string, tail: string, total: number): string {
+  if (total <= MAX_TOOL_STREAM_CHARS) return head;
+  return `${head.slice(0, 20_000)}\n[... ${Math.max(0, total - 60_000)} characters omitted ...]\n${tail.slice(-40_000)}`;
 }
 
 function resolveReadPath(session: AgentSession, input: string | undefined): string {
@@ -626,6 +1103,90 @@ function resolveWritePath(session: AgentSession, input: string): string {
   return resolved;
 }
 
+/**
+ * `workspace-write` only widens writes inside the workspace and /tmp; asking
+ * the user to approve it for an outside path would only fail after the prompt.
+ */
+async function assertModeCoversTarget(
+  session: AgentSession,
+  target: string,
+  requestedMode: SandboxMode,
+): Promise<void> {
+  if (requestedMode !== "workspace-write") return;
+  const roots = await writableRoots({ ...session, mode: "workspace-write" });
+  const canonical = await canonicalizeForWrite(target);
+  if (!roots.some((root) => isUnder(canonical, root))) {
+    throw new AppError(
+      "INVALID_ESCALATION",
+      `workspace-write does not cover ${canonical}; request danger-full-access instead`,
+      400,
+    );
+  }
+}
+
+/**
+ * Resolves a write target and, when the caller asked for a wider mode,
+ * collects one-shot user approval before fencing. Returns the canonical path
+ * and the mode the write actually runs under.
+ */
+async function resolveWritableTarget(
+  session: AgentSession,
+  inputPath: string,
+  options: {
+    sandboxPermissions?: SandboxMode;
+    justification?: string;
+  },
+  ctx: ToolExecutionContext,
+): Promise<{ resolved: string; mode: SandboxMode }> {
+  const target = resolveWritePath(session, inputPath);
+  let effectiveSession = session;
+
+  if (options.sandboxPermissions !== undefined) {
+    if (options.justification === undefined || options.justification.trim() === "") {
+      throw new AppError(
+        "INVALID_ESCALATION",
+        "a non-empty justification is required to request wider file permissions",
+        400,
+      );
+    }
+    if (!isStrictlyWider(options.sandboxPermissions, session.mode)) {
+      throw new AppError(
+        "INVALID_ESCALATION",
+        `sandbox_permissions must be strictly wider than the session mode (${session.mode})`,
+        400,
+      );
+    }
+    await assertModeCoversTarget(session, target, options.sandboxPermissions);
+    const result = await ctx.requestFileEscalation({
+      session,
+      path: target,
+      requestedMode: options.sandboxPermissions,
+      justification: options.justification,
+      toolCallId: ctx.toolCallId,
+      signal: ctx.signal,
+      emit: ctx.emit,
+    });
+    if (!result.allowed) {
+      throw new AppError(
+        "SANDBOX_DENIED",
+        `[approval ${result.reason}] file write was not approved: ${target}`,
+        403,
+      );
+    }
+    effectiveSession = { ...session, mode: options.sandboxPermissions };
+  }
+
+  const { resolved } = await assertWritable(effectiveSession, target, ctx.dataDir);
+  if (!path.isAbsolute(inputPath) && !isUnder(resolved, session.workspaceRoot)) {
+    throw new AppError(
+      "SANDBOX_DENIED",
+      `${denialMessage(session.mode)}\n[relative path resolved outside the workspace: ${resolved}]`,
+      403,
+    );
+  }
+  return { resolved, mode: effectiveSession.mode };
+}
+
 function fileErrorResult(error: unknown, session: AgentSession): ToolResult {
   const appError = error instanceof AppError ? error : null;
   let message =
@@ -634,7 +1195,7 @@ function fileErrorResult(error: unknown, session: AgentSession): ToolResult {
 
   if (appError?.code === "SANDBOX_DENIED") {
     message +=
-      "\n\nFile tools cannot request one-shot escalation. Ask the user to change the session permission, or use run_command (which can request approval).";
+      "\n\nTo write outside the current mode, retry with sandbox_permissions and justification; the user will be asked for a one-shot approval.";
   }
 
   return {
@@ -644,9 +1205,13 @@ function fileErrorResult(error: unknown, session: AgentSession): ToolResult {
   };
 }
 
+/** A cheap change token: modification time plus size. */
+function fileVersionOf(info: { mtimeMs: number; size: number }): string {
+  return `${info.mtimeMs}:${info.size}`;
+}
+
 /** Splits text into lines, dropping the phantom line after a trailing newline. */
-function splitLines(text: string): string[] {
-  if (text === "") return [];
+function splitLines(text: string): string[] {  if (text === "") return [];
   const lines = text.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
   return lines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
@@ -676,20 +1241,27 @@ async function readFileResult(
       path: target,
     });
   }
+  let resolved: string;
+  try {
+    resolved = await assertReadable(target, ctx.dataDir);
+  } catch (error) {
+    return fileErrorResult(error, session);
+  }
   if (info.size > ctx.maxReadBytes) {
     return toolError(
-      `File is ${info.size} bytes; the tool read limit is ${ctx.maxReadBytes}. Use run_command with sed/head to read a portion.`,
+      `File is ${info.size} bytes; the tool read limit is ${ctx.maxReadBytes}. Use offset/limit to read a range, or grep to locate the relevant part.`,
       { kind: "read", path: target, bytes: info.size },
     );
   }
 
-  const buffer = await readFile(target);
+  const buffer = await readFile(resolved);
   if (buffer.includes(0)) {
     return toolError(`Refusing to read binary file: ${target}`, {
       kind: "read",
       path: target,
     });
   }
+  ctx.fileVersions.record(resolved, fileVersionOf(info));
 
   const allLines = splitLines(buffer.toString("utf8"));
   const totalLines = allLines.length;
@@ -755,12 +1327,19 @@ async function readFileResult(
 
 async function listFilesResult(
   session: AgentSession,
-  input: string | undefined,
+  input: { path?: string; offset?: number; limit?: number },
+  ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
-  const target = resolveReadPath(session, input);
+  const target = resolveReadPath(session, input.path);
+  let resolved: string;
+  try {
+    resolved = await assertReadable(target, ctx.dataDir);
+  } catch (error) {
+    return fileErrorResult(error, session);
+  }
   let entries;
   try {
-    entries = await readdir(target, { withFileTypes: true });
+    entries = await readdir(resolved, { withFileTypes: true });
   } catch (error) {
     if (isNotFound(error)) {
       return toolError(`Directory does not exist: ${target}`, {
@@ -778,7 +1357,10 @@ async function listFilesResult(
     if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
-  const visible = entries.slice(0, MAX_LIST_ENTRIES);
+  const limit = input.limit ?? MAX_LIST_ENTRIES;
+  const offset = input.offset ?? 0;
+  const visible = entries.slice(offset, offset + limit);
+  const end = offset + visible.length;
   const lines = visible.map((entry) => {
     const kind = entry.isDirectory()
       ? "dir "
@@ -790,15 +1372,22 @@ async function listFilesResult(
     return `${kind} ${entry.name}`;
   });
   const suffix =
-    entries.length > visible.length
-      ? `\n[... ${entries.length - visible.length} more entries not shown]`
+    end < entries.length
+      ? `\n[... showing ${offset + 1}-${end} of ${entries.length} entries; pass offset=${end} to continue]`
       : "";
-  const content = `directory: ${target}\n${lines.join("\n")}${suffix}`;
+  const content = `directory: ${target} (${entries.length} entries)\n${lines.join("\n")}${suffix}`;
 
   return {
     content,
     status: "complete",
-    meta: { kind: "list", path: target, entries: entries.length },
+    meta: {
+      kind: "list",
+      path: target,
+      entries: entries.length,
+      offset,
+      limit,
+      truncated: end < entries.length,
+    },
   };
 }
 
@@ -874,6 +1463,8 @@ async function walkFiles(
     signal?: AbortSignal;
     maxFiles?: number;
     maxDepth?: number;
+    /** Paths that must never be descended into or read. */
+    isDenied?: (absolutePath: string) => boolean;
   },
   visit: (filePath: string, relPath: string) => Promise<boolean | void>,
 ): Promise<WalkStats> {
@@ -910,6 +1501,7 @@ async function walkFiles(
 
       const childPath = path.join(dir, entry.name);
       const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (options.isDenied?.(childPath)) continue;
       if (entry.isDirectory()) {
         if (!options.includeIgnored && IGNORED_DIRS.has(entry.name)) continue;
         await walk(childPath, childRel, depth + 1);
@@ -996,8 +1588,81 @@ async function grepResult(
       { kind: "grep", path: root },
     );
   }
+  try {
+    await assertReadable(root, ctx.dataDir);
+  } catch (error) {
+    return fileErrorResult(error, ctx.session);
+  }
 
   const maxResults = args.max_results ?? DEFAULT_GREP_RESULTS;
+
+  if (ripgrepAvailable()) {
+    try {
+      const result = await ripgrepGrep({
+        root,
+        rootIsFile: rootInfo.isFile(),
+        pattern: args.pattern,
+        glob: args.glob,
+        caseInsensitive: args.case_insensitive === true,
+        fixedStrings: args.fixed_strings === true,
+        includeIgnored: args.include_ignored === true,
+        excludeDirs: [...IGNORED_DIRS],
+        maxResults,
+        contextLines: args.context_lines ?? 0,
+        mode: args.output_mode ?? "content",
+        signal: ctx.signal,
+      });
+      if (ctx.signal.aborted || result.stopReason === "signal") {
+        return {
+          content: result.lines.join("\n") || "(cancelled before any match)",
+          status: "cancelled",
+          meta: {
+            kind: "grep",
+            path: root,
+            pattern: args.pattern,
+            matches: result.matchCount,
+          },
+        };
+      }
+      const footer: string[] = [];
+      if (result.stopReason === "max") {
+        footer.push(
+          `[... stopped at ${maxResults} matches; narrow the pattern, path, or glob]`,
+        );
+      } else if (result.stopReason === "timeout") {
+        footer.push("[... ripgrep timed out after 30s; narrow the search]");
+      }
+      const content =
+        result.lines.length === 0
+          ? `No matches for ${JSON.stringify(args.pattern)} under ${root}`
+          : [...result.lines, ...(footer.length > 0 ? ["", ...footer] : [])].join("\n");
+      return {
+        content: truncateContent(content),
+        status: "complete",
+        meta: {
+          kind: "grep",
+          path: root,
+          pattern: args.pattern,
+          matches: result.matchCount,
+          truncated: result.stopReason === "max" || result.stopReason === "timeout",
+          outputMode: args.output_mode ?? "content",
+        },
+      };
+    } catch (error) {
+      if (error instanceof AppError) {
+        return toolError(error.message, {
+          kind: "grep",
+          path: root,
+          pattern: args.pattern,
+        });
+      }
+      return toolError(
+        `grep failed: ${error instanceof Error ? error.message : String(error)}`,
+        { kind: "grep", path: root, pattern: args.pattern },
+      );
+    }
+  }
+
   const matchers =
     args.glob === undefined
       ? null
@@ -1005,7 +1670,10 @@ async function grepResult(
   const matches: string[] = [];
   let skipped = 0;
   let scanned = 0;
+  let matched = 0;
   let stopReason: WalkStopReason = null;
+  const outputMode = args.output_mode ?? "content";
+  const contextLines = args.context_lines ?? 0;
 
   const inspect = async (
     filePath: string,
@@ -1019,16 +1687,47 @@ async function grepResult(
     }
 
     const lines = file.text.split("\n");
+    let fileMatches = 0;
     for (let index = 0; index < lines.length; index += 1) {
       const rawLine = lines[index]!;
       const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       if (!regex.test(line)) continue;
+      fileMatches += 1;
+      if (outputMode === "files_with_matches") {
+        matches.push(relPath);
+        matched += 1;
+        if (matched >= maxResults) return true;
+        return;
+      }
+      if (outputMode === "count") continue;
+
       const display =
         line.length > MAX_GREP_LINE_CHARS
           ? `${line.slice(0, MAX_GREP_LINE_CHARS)}…`
           : line;
-      matches.push(`${relPath}:${index + 1}: ${display}`);
-      if (matches.length >= maxResults) return true;
+      if (contextLines > 0) {
+        const from = Math.max(0, index - contextLines);
+        const to = Math.min(lines.length - 1, index + contextLines);
+        for (let cursor = from; cursor <= to; cursor += 1) {
+          const text = (lines[cursor] ?? "").replace(/\r$/, "");
+          const shown =
+            text.length > MAX_GREP_LINE_CHARS
+              ? `${text.slice(0, MAX_GREP_LINE_CHARS)}…`
+              : text;
+          const separator = cursor === index ? ":" : "-";
+          matches.push(`${relPath}${separator}${cursor + 1}${separator} ${shown}`);
+        }
+      } else {
+        matches.push(`${relPath}:${index + 1}: ${display}`);
+      }
+      matched += 1;
+      if (matched >= maxResults) return true;
+    }
+
+    if (outputMode === "count" && fileMatches > 0) {
+      matches.push(`${relPath}:${fileMatches}`);
+      matched += 1;
+      if (matched >= maxResults) return true;
     }
   };
 
@@ -1041,6 +1740,7 @@ async function grepResult(
       {
         includeIgnored: args.include_ignored === true,
         signal: ctx.signal,
+        isDenied: (candidate) => isReadDenied(candidate, ctx.dataDir),
       },
       inspect,
     );
@@ -1061,13 +1761,13 @@ async function grepResult(
         kind: "grep",
         path: root,
         pattern: args.pattern,
-        matches: matches.length,
+        matches: matched,
       },
     };
   }
 
   const footer: string[] = [];
-  if (matches.length >= maxResults) {
+  if (matched >= maxResults) {
     footer.push(
       `[... stopped at ${maxResults} matches; narrow the pattern, path, or glob]`,
     );
@@ -1102,9 +1802,10 @@ async function grepResult(
       kind: "grep",
       path: root,
       pattern: args.pattern,
-      matches: matches.length,
+      matches: matched,
       filesScanned: scanned,
-      truncated: matches.length >= maxResults || stopReason === "max-files",
+      outputMode,
+      truncated: matched >= maxResults || stopReason === "max-files",
     },
   };
 }
@@ -1131,6 +1832,61 @@ async function globResult(
       { kind: "glob", path: root },
     );
   }
+  try {
+    await assertReadable(root, ctx.dataDir);
+  } catch (error) {
+    return fileErrorResult(error, ctx.session);
+  }
+
+  if (rootInfo.isDirectory() && ripgrepAvailable()) {
+    try {
+      const result = await ripgrepGlob({
+        root,
+        pattern: args.pattern,
+        includeIgnored: args.include_ignored === true,
+        excludeDirs: [...IGNORED_DIRS],
+        maxMatches: MAX_GLOB_MATCHES,
+        signal: ctx.signal,
+      });
+      if (ctx.signal.aborted || result.stopReason === "signal") {
+        return {
+          content: result.lines.join("\n") || "(cancelled before any match)",
+          status: "cancelled",
+          meta: {
+            kind: "glob",
+            path: root,
+            pattern: args.pattern,
+            matches: result.matchCount,
+          },
+        };
+      }
+      const truncated =
+        result.stopReason === "max" || result.stopReason === "timeout";
+      const footer = truncated
+        ? `[... showing the first ${result.lines.length} matches; refine the pattern or path]`
+        : "";
+      return {
+        content: truncateContent(
+          result.lines.length === 0
+            ? `No files matched ${JSON.stringify(args.pattern)} under ${root}`
+            : [...result.lines, ...(footer === "" ? [] : ["", footer])].join("\n"),
+        ),
+        status: "complete",
+        meta: {
+          kind: "glob",
+          path: root,
+          pattern: args.pattern,
+          matches: result.matchCount,
+          truncated,
+        },
+      };
+    } catch (error) {
+      return toolError(
+        `glob failed: ${error instanceof Error ? error.message : String(error)}`,
+        { kind: "glob", path: root, pattern: args.pattern },
+      );
+    }
+  }
 
   const matches: string[] = [];
   let scanned = 0;
@@ -1155,6 +1911,7 @@ async function globResult(
       {
         includeIgnored: args.include_ignored === true,
         signal: ctx.signal,
+        isDenied: (candidate) => isReadDenied(candidate, ctx.dataDir),
       },
       inspect,
     );
@@ -1218,7 +1975,12 @@ async function globResult(
 
 async function writeFileResult(
   session: AgentSession,
-  input: { path: string; content: string },
+  input: {
+    path: string;
+    content: string;
+    sandbox_permissions?: SandboxMode;
+    justification?: string;
+  },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
   const size = Buffer.byteLength(input.content, "utf8");
@@ -1230,26 +1992,43 @@ async function writeFileResult(
   }
 
   try {
-    const target = resolveWritePath(session, input.path);
-    const { resolved } = await assertWritable(session, target, ctx.dataDir);
-    if (
-      !path.isAbsolute(input.path) &&
-      !isUnder(resolved, session.workspaceRoot)
-    ) {
-      throw new AppError(
-        "SANDBOX_DENIED",
-        `${denialMessage(session.mode)}\n[relative path resolved outside the workspace: ${resolved}]`,
-        403,
-      );
+    const { resolved, mode } = await resolveWritableTarget(
+      session,
+      input.path,
+      {
+        sandboxPermissions: input.sandbox_permissions,
+        justification: input.justification,
+      },
+      ctx,
+    );
+
+    try {
+      const info = await stat(resolved);
+      const recorded = ctx.fileVersions.get(resolved);
+      if (recorded !== undefined && recorded !== fileVersionOf(info)) {
+        return toolError(
+          `${resolved} changed since you last read it. Read the file again before overwriting it. No changes were written.`,
+          { kind: "write", path: resolved, fileVersion: fileVersionOf(info) },
+        );
+      }
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
     }
+
     const bytes = await atomicWriteFile(resolved, input.content);
+    try {
+      const after = await stat(resolved);
+      ctx.fileVersions.record(resolved, fileVersionOf(after));
+    } catch {
+      ctx.fileVersions.forget(resolved);
+    }
     await ctx.audit.append({
       type: "fs.write",
       sessionId: session.id,
       op: "write",
       path: resolved,
       bytes,
-      mode: session.mode,
+      mode,
       via: "agent",
     });
     return {
@@ -1260,7 +2039,7 @@ async function writeFileResult(
         operation: "write",
         path: resolved,
         bytes,
-        mode: session.mode,
+        mode,
       },
     };
   } catch (error) {
@@ -1280,6 +2059,8 @@ async function editFileResult(
     old_string?: string;
     new_string?: string;
     replace_all?: boolean;
+    sandbox_permissions?: SandboxMode;
+    justification?: string;
   },
   ctx: ToolExecutionContext,
 ): Promise<ToolResult> {
@@ -1294,22 +2075,26 @@ async function editFileResult(
   }
 
   try {
-    const target = resolveWritePath(session, input.path);
-    const { resolved } = await assertWritable(session, target, ctx.dataDir);
-    if (
-      !path.isAbsolute(input.path) &&
-      !isUnder(resolved, session.workspaceRoot)
-    ) {
-      throw new AppError(
-        "SANDBOX_DENIED",
-        `${denialMessage(session.mode)}\n[relative path resolved outside the workspace: ${resolved}]`,
-        403,
-      );
-    }
+    const { resolved, mode } = await resolveWritableTarget(
+      session,
+      input.path,
+      {
+        sandboxPermissions: input.sandbox_permissions,
+        justification: input.justification,
+      },
+      ctx,
+    );
 
     let original: string;
     try {
       const info = await stat(resolved);
+      const recorded = ctx.fileVersions.get(resolved);
+      if (recorded !== undefined && recorded !== fileVersionOf(info)) {
+        return toolError(
+          `${resolved} changed since you last read it. Read the file again before editing it. No changes were written.`,
+          { kind: "edit", path: resolved, fileVersion: fileVersionOf(info) },
+        );
+      }
       if (info.size > ctx.maxReadBytes) {
         return toolError(
           `File is ${info.size} bytes; the edit limit is ${ctx.maxReadBytes}.`,
@@ -1372,6 +2157,13 @@ async function editFileResult(
     }
 
     const bytes = await atomicWriteFile(resolved, updated);
+    try {
+      const after = await stat(resolved);
+      ctx.fileVersions.record(resolved, fileVersionOf(after));
+    } catch {
+      ctx.fileVersions.forget(resolved);
+    }
+    const diff = unifiedDiff(resolved, original, updated);
 
     await ctx.audit.append({
       type: "fs.write",
@@ -1381,12 +2173,17 @@ async function editFileResult(
       bytes,
       replacements: totalReplacements,
       edits: operations.length,
-      mode: session.mode,
+      mode,
       via: "agent",
     });
 
     return {
-      content: `Applied ${operations.length} edit(s) (${totalReplacements} replacement(s)) to ${resolved}`,
+      content: [
+        `Applied ${operations.length} edit(s) (${totalReplacements} replacement(s), +${diff.additions}/-${diff.deletions} lines) to ${resolved}`,
+        diff.diff === "" ? "" : `\n${diff.diff}`,
+      ]
+        .filter((part) => part !== "")
+        .join("\n"),
       status: "complete",
       meta: {
         kind: "edit",
@@ -1395,10 +2192,275 @@ async function editFileResult(
         bytes,
         replacements: totalReplacements,
         edits: operations.length,
-        mode: session.mode,
+        mode,
+        diff: diff.diff,
+        truncated: diff.truncated,
       },
     };
   } catch (error) {
+    return fileErrorResult(error, session);
+  }
+}
+
+async function applyPatchResult(
+  session: AgentSession,
+  input: {
+    input: string;
+    sandbox_permissions?: SandboxMode;
+    justification?: string;
+  },
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  let operations;
+  try {
+    operations = parsePatch(input.input);
+  } catch (error) {
+    const message =
+      error instanceof PatchParseError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return toolError(`Invalid patch: ${message}`, { kind: "patch" });
+  }
+
+  try {
+    let effectiveMode: SandboxMode = session.mode;
+    if (input.sandbox_permissions !== undefined) {
+      if (input.justification === undefined || input.justification.trim() === "") {
+        throw new AppError(
+          "INVALID_ESCALATION",
+          "a non-empty justification is required to request wider file permissions",
+          400,
+        );
+      }
+      if (!isStrictlyWider(input.sandbox_permissions, session.mode)) {
+        throw new AppError(
+          "INVALID_ESCALATION",
+          `sandbox_permissions must be strictly wider than the session mode (${session.mode})`,
+          400,
+        );
+      }
+      for (const operation of operations) {
+        await assertModeCoversTarget(
+          session,
+          resolveWritePath(session, operation.path),
+          input.sandbox_permissions,
+        );
+        if (operation.kind === "update" && operation.moveTo !== undefined) {
+          await assertModeCoversTarget(
+            session,
+            resolveWritePath(session, operation.moveTo),
+            input.sandbox_permissions,
+          );
+        }
+      }
+      const firstTarget = resolveWritePath(session, operations[0]!.path);
+      const result = await ctx.requestFileEscalation({
+        session,
+        path: firstTarget,
+        requestedMode: input.sandbox_permissions,
+        justification: input.justification,
+        toolCallId: ctx.toolCallId,
+        signal: ctx.signal,
+        emit: ctx.emit,
+      });
+      if (!result.allowed) {
+        throw new AppError(
+          "SANDBOX_DENIED",
+          `[approval ${result.reason}] patch was not approved`,
+          403,
+        );
+      }
+      effectiveMode = input.sandbox_permissions;
+    }
+
+    const fenceSession: AgentSession = { ...session, mode: effectiveMode };
+    const resolvedPaths = new Map<string, string>();
+    for (const operation of operations) {
+      if (resolvedPaths.has(operation.path)) continue;
+      const target = resolveWritePath(session, operation.path);
+      const { resolved } = await assertWritable(
+        fenceSession,
+        target,
+        ctx.dataDir,
+      );
+      resolvedPaths.set(operation.path, resolved);
+    }
+
+    const originals = new Map<string, string | null>();
+    for (const resolved of new Set(resolvedPaths.values())) {
+      try {
+        const info = await stat(resolved);
+        if (info.isDirectory()) {
+          return toolError(`Patch target is a directory: ${resolved}`, {
+            kind: "patch",
+            path: resolved,
+          });
+        }
+        const recorded = ctx.fileVersions.get(resolved);
+        if (recorded !== undefined && recorded !== fileVersionOf(info)) {
+          return toolError(
+            `${resolved} changed since you last read it. Read the file again before patching it. No changes were written.`,
+            { kind: "patch", path: resolved, fileVersion: fileVersionOf(info) },
+          );
+        }
+        if (info.size > ctx.maxReadBytes) {
+          return toolError(
+            `File is ${info.size} bytes; the patch read limit is ${ctx.maxReadBytes}.`,
+            { kind: "patch", path: resolved, bytes: info.size },
+          );
+        }
+        const buffer = await readFile(resolved);
+        if (buffer.includes(0)) {
+          return toolError(`Refusing to patch binary file: ${resolved}`, {
+            kind: "patch",
+            path: resolved,
+          });
+        }
+        originals.set(resolved, buffer.toString("utf8"));
+      } catch (error) {
+        if (isNotFound(error)) {
+          originals.set(resolved, null);
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const resolvedOperations = operations.map((operation) => ({
+      ...operation,
+      path: resolvedPaths.get(operation.path)!,
+      ...(operation.kind === "update" && operation.moveTo !== undefined
+        ? { moveTo: resolvedPaths.get(operation.path)! }
+        : {}),
+    }));
+    // Moves need the destination resolved too; the patch syntax names it
+    // separately from the source path.
+    for (let index = 0; index < operations.length; index += 1) {
+      const original = operations[index]!;
+      if (original.kind !== "update" || original.moveTo === undefined) continue;
+      const target = resolveWritePath(session, original.moveTo);
+      if (!resolvedPaths.has(original.moveTo)) {
+        const { resolved } = await assertWritable(
+          fenceSession,
+          target,
+          ctx.dataDir,
+        );
+        resolvedPaths.set(original.moveTo, resolved);
+      }
+      resolvedOperations[index] = {
+        ...original,
+        path: resolvedPaths.get(original.path)!,
+        moveTo: resolvedPaths.get(original.moveTo)!,
+      };
+      if (!originals.has(resolvedPaths.get(original.moveTo)!)) {
+        try {
+          const info = await stat(resolvedPaths.get(original.moveTo)!);
+          if (info.isDirectory()) {
+            return toolError(
+              `Patch destination is a directory: ${resolvedPaths.get(original.moveTo)}`,
+              { kind: "patch" },
+            );
+          }
+          originals.set(
+            resolvedPaths.get(original.moveTo)!,
+            (await readFile(resolvedPaths.get(original.moveTo)!)).toString("utf8"),
+          );
+        } catch (error) {
+          if (isNotFound(error)) originals.set(resolvedPaths.get(original.moveTo)!, null);
+          else throw error;
+        }
+      }
+    }
+
+    const changes = applyPatchOperations(resolvedOperations, originals);
+    if (changes.length === 0) {
+      return {
+        content: "Patch produced no file changes.",
+        status: "complete",
+        meta: { kind: "patch", filesChanged: 0 },
+      };
+    }
+
+    const diffs = changes
+      .map((change) => {
+        const result = unifiedDiff(
+          change.path,
+          change.before ?? "",
+          change.after ?? "",
+        );
+        return result.diff;
+      })
+      .filter((diff) => diff !== "");
+
+    const applied: PatchChange[] = [];
+    try {
+      for (const change of changes) {
+        if (change.after === null) {
+          await unlink(change.path);
+        } else {
+          await atomicWriteFile(change.path, change.after);
+        }
+        applied.push(change);
+      }
+    } catch (error) {
+      for (const change of applied.reverse()) {
+        try {
+          if (change.before === null) await unlink(change.path);
+          else await atomicWriteFile(change.path, change.before);
+        } catch {
+          // Best-effort rollback; the original error is more useful.
+        }
+      }
+      throw error;
+    }
+
+    for (const change of changes) {
+      if (change.after === null) {
+        ctx.fileVersions.forget(change.path);
+      } else {
+        try {
+          const info = await stat(change.path);
+          ctx.fileVersions.record(change.path, fileVersionOf(info));
+        } catch {
+          ctx.fileVersions.forget(change.path);
+        }
+      }
+      await ctx.audit.append({
+        type: "fs.write",
+        sessionId: session.id,
+        op: "patch",
+        path: change.path,
+        bytes: change.after === null ? 0 : Buffer.byteLength(change.after, "utf8"),
+        mode: effectiveMode,
+        via: "agent",
+      });
+    }
+
+    const diffText = diffs.join("\n");
+    return {
+      content: truncateContent(
+        [
+          `Applied patch to ${changes.length} file(s): +${changes.filter((change) => change.after !== null).length} written, ${changes.filter((change) => change.after === null).length} deleted`,
+          diffText === "" ? "" : `\n${diffText}`,
+        ]
+          .filter((part) => part !== "")
+          .join("\n"),
+      ),
+      status: "complete",
+      meta: {
+        kind: "patch",
+        filesChanged: changes.length,
+        diff: truncateContent(diffText),
+        mode: effectiveMode,
+        truncated: diffText.length > MAX_TOOL_CONTENT_CHARS,
+      },
+    };
+  } catch (error) {
+    if (error instanceof PatchParseError) {
+      return toolError(`Invalid patch: ${error.message}`, { kind: "patch" });
+    }
     return fileErrorResult(error, session);
   }
 }
@@ -1412,10 +2474,23 @@ async function runCommandResult(
     return toolError(parsed.message, { kind: "command" });
   }
   const args = parsed.data;
-  const timeoutMs = Math.min(
-    args.timeout_ms ?? ctx.commandTimeoutMs,
-    ctx.commandTimeoutMs,
-  );
+  const background = args.run_in_background === true;
+  const timeoutMs = background
+    ? 0
+    : Math.min(args.timeout_ms ?? ctx.commandTimeoutMs, ctx.commandTimeoutMs);
+
+  try {
+    assertCommandNetworkAllowed(args.command, ctx.session.mode);
+  } catch (error) {
+    return toolError(
+      error instanceof Error ? error.message : String(error),
+      {
+        kind: "command",
+        command: args.command,
+        mode: ctx.session.mode,
+      },
+    );
+  }
 
   let record;
   try {
@@ -1423,6 +2498,8 @@ async function runCommandResult(
       command: args.command,
       cwd: args.cwd,
       timeoutMs,
+      runInBackground: background,
+      promoteOnTimeout: !background,
       sandboxPermissions: args.sandbox_permissions,
       justification: args.justification,
     });
@@ -1439,8 +2516,63 @@ async function runCommandResult(
     );
   }
 
-  let stdout = "";
-  let stderr = "";
+  if (background) {
+    // The tool returns immediately, but a background command may still need
+    // sandbox escalation. Keep forwarding its approval events to the UI until
+    // the job settles.
+    let unsubscribe: () => void = () => undefined;
+    unsubscribe = ctx.exec.subscribe(record, (event) => {
+      if (event.type === "approval.required") {
+        ctx.emit({
+          type: "agent.approval_required",
+          approvalId: event.approvalId,
+          execId: event.execId,
+          toolCallId: ctx.toolCallId,
+          kind: "exec",
+          command: event.command,
+          currentMode: event.currentMode,
+          requestedMode: event.requestedMode,
+          justification: event.justification,
+          expiresAt: event.expiresAt,
+        });
+      } else if (event.type === "approval.decided") {
+        ctx.emit({
+          type: "agent.approval_decided",
+          approvalId: event.approvalId,
+          outcome: event.outcome,
+          reason: event.reason,
+        });
+      } else if (
+        event.type === "exec.exit" ||
+        event.type === "exec.error"
+      ) {
+        unsubscribe();
+      }
+    });
+    return {
+      content:
+        `Started background job ${record.id}: ${args.command}\n` +
+        `Use job_output with exec_id="${record.id}" to read output (pass from_seq to read incrementally), ` +
+        `write_stdin to send input, and job_kill to stop it.`,
+      status: "complete",
+      meta: {
+        kind: "command",
+        command: args.command,
+        cwd: args.cwd ?? ctx.session.workspaceRoot,
+        mode: ctx.session.mode,
+        jobId: record.id,
+        running: true,
+        startedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  let stdoutHead = "";
+  let stdoutTail = "";
+  let stdoutTotal = 0;
+  let stderrHead = "";
+  let stderrTail = "";
+  let stderrTotal = 0;
   let denialMessageText = "";
   let runner = "none";
   let startedMode: SandboxMode = ctx.session.mode;
@@ -1451,6 +2583,7 @@ async function runCommandResult(
     error: null,
   };
   let aborted = false;
+  let promoted = false;
   const startedAt = Date.now();
 
   await new Promise<void>((resolve) => {
@@ -1478,10 +2611,14 @@ async function runCommandResult(
     unsubscribe = ctx.exec.subscribe(record, (event) => {
       switch (event.type) {
         case "stdout":
-          stdout = appendCapped(stdout, event.data, MAX_TOOL_STREAM_CHARS);
+          stdoutTotal += event.data.length;
+          stdoutHead = appendCapped(stdoutHead, event.data, MAX_TOOL_STREAM_CHARS);
+          stdoutTail = appendTail(stdoutTail, event.data, MAX_TOOL_STREAM_CHARS);
           break;
         case "stderr":
-          stderr = appendCapped(stderr, event.data, MAX_TOOL_STREAM_CHARS);
+          stderrTotal += event.data.length;
+          stderrHead = appendCapped(stderrHead, event.data, MAX_TOOL_STREAM_CHARS);
+          stderrTail = appendTail(stderrTail, event.data, MAX_TOOL_STREAM_CHARS);
           break;
         case "exec.started":
           startedMode = event.mode;
@@ -1493,12 +2630,17 @@ async function runCommandResult(
         case "exec.error":
           captured.error = event;
           break;
+        case "exec.promoted":
+          promoted = true;
+          finish();
+          break;
         case "approval.required":
           ctx.emit({
             type: "agent.approval_required",
             approvalId: event.approvalId,
             execId: event.execId,
             toolCallId: ctx.toolCallId,
+            kind: "exec",
             command: event.command,
             currentMode: event.currentMode,
             requestedMode: event.requestedMode,
@@ -1532,17 +2674,49 @@ async function runCommandResult(
   const durationMs = exitEvent?.durationMs ?? Date.now() - startedAt;
   const exitCode = exitEvent?.code ?? null;
   const cancelled = aborted || exitEvent?.cancelled === true;
-  const truncated =
-    exitEvent?.truncated === true ||
-    stdout.length >= MAX_TOOL_STREAM_CHARS ||
-    stderr.length >= MAX_TOOL_STREAM_CHARS;
+  const spillPaths = exitEvent?.spillPaths ?? record.spillPaths ?? [];
+  const modelTruncated =
+    stdoutTotal > MAX_MODEL_STREAM_CHARS ||
+    stderrTotal > MAX_MODEL_STREAM_CHARS ||
+    exitEvent?.truncated === true;
+
+  if (promoted) {
+    const contentParts = [
+      `command: ${args.command}`,
+      `duration_ms: ${durationMs}`,
+      `[still running after ${timeoutMs} ms; moved to background job ${record.id}]`,
+      `stdout:\n${formatStreamForModel(stdoutHead, stdoutTail, stdoutTotal)}`,
+      `stderr:\n${formatStreamForModel(stderrHead, stderrTail, stderrTotal)}`,
+      `Use job_output with exec_id="${record.id}" to read more output (pass from_seq to read incrementally), and job_kill to stop it.`,
+    ];
+    return {
+      content: truncateContent(contentParts.join("\n")),
+      status: "complete",
+      meta: {
+        kind: "command",
+        command: args.command,
+        cwd: args.cwd ?? ctx.session.workspaceRoot,
+        exitCode: null,
+        durationMs,
+        mode: startedMode,
+        runner,
+        stdout: captureForMeta(stdoutHead, stdoutTail, stdoutTotal),
+        stderr: captureForMeta(stderrHead, stderrTail, stderrTotal),
+        jobId: record.id,
+        running: true,
+        denied: denialMessageText !== "",
+        truncated: true,
+        spillPaths,
+      },
+    };
+  }
 
   const contentParts = [
     `command: ${args.command}`,
     `exit_code: ${exitCode === null ? "(none)" : exitCode}`,
     `duration_ms: ${durationMs}`,
-    `stdout:\n${formatStreamForModel(stdout)}`,
-    `stderr:\n${formatStreamForModel(stderr)}`,
+    `stdout:\n${formatStreamForModel(stdoutHead, stdoutTail, stdoutTotal)}`,
+    `stderr:\n${formatStreamForModel(stderrHead, stderrTail, stderrTotal)}`,
   ];
   if (denialMessageText !== "") {
     contentParts.push(
@@ -1556,9 +2730,13 @@ async function runCommandResult(
     );
   }
   if (exitEvent?.timedOut) contentParts.push("\n[timeout]");
-  if (truncated) {
+  if (spillPaths.length > 0) {
     contentParts.push(
-      "\n[output truncated for the model; the UI may show more via spill paths]",
+      `\n[full output saved to: ${spillPaths.join(", ")}; use read_file or grep to inspect it]`,
+    );
+  } else if (modelTruncated) {
+    contentParts.push(
+      "\n[output truncated for the model; narrow the command or redirect output to a file]",
     );
   }
   if (cancelled) contentParts.push("\n[cancelled]");
@@ -1583,13 +2761,314 @@ async function runCommandResult(
       durationMs,
       mode: startedMode,
       runner,
-      stdout: stdout.slice(0, MAX_TOOL_STREAM_CHARS),
-      stderr: stderr.slice(0, MAX_TOOL_STREAM_CHARS),
+      stdout: captureForMeta(stdoutHead, stdoutTail, stdoutTotal),
+      stderr: captureForMeta(stderrHead, stderrTail, stderrTotal),
       denied: denialMessageText !== "",
-      truncated,
-      spillPaths: exitEvent?.spillPaths ?? [],
+      truncated: modelTruncated || spillPaths.length > 0,
+      spillPaths,
     },
   };
+}
+
+function waitForJob(
+  ctx: ToolExecutionContext,
+  execId: string,
+  waitMs: number,
+): Promise<void> {
+  if (waitMs <= 0) return Promise.resolve();
+  const record = ctx.exec.getRecord(execId);
+  if (!record || ctx.exec.isTerminal(record)) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    let unsubscribe = (): void => undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+      ctx.signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    unsubscribe = ctx.exec.subscribe(record, (event) => {
+      if (
+        event.type === "stdout" ||
+        event.type === "stderr" ||
+        event.type === "exec.exit" ||
+        event.type === "exec.promoted" ||
+        event.type === "exec.error"
+      ) {
+        finish();
+      }
+    });
+    timer = setTimeout(finish, waitMs);
+    ctx.signal.addEventListener("abort", finish, { once: true });
+    if (ctx.signal.aborted) finish();
+  });
+}
+
+async function jobOutputResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(jobOutputArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "job" });
+  const args = parsed.data;
+  try {
+    await waitForJob(ctx, args.exec_id, args.wait_ms ?? 0);
+    const output = ctx.exec.jobOutput(ctx.session.id, args.exec_id, {
+      fromSeq: args.from_seq,
+      maxChars: args.max_chars,
+    });
+    const content = [
+      `exec_id: ${output.execId}`,
+      `command: ${output.command}`,
+      `status: ${output.status}`,
+      `running: ${output.running}`,
+      `exit_code: ${output.exitCode === null ? "(none)" : output.exitCode}`,
+      `duration_ms: ${output.durationMs}`,
+      `next_seq: ${output.nextSeq}`,
+      output.spillPaths.length > 0
+        ? `spill: ${output.spillPaths.join(", ")}`
+        : "",
+      "\noutput:",
+      output.text,
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
+    return {
+      content: truncateContent(content),
+      status: "complete",
+      meta: {
+        kind: "command",
+        command: output.command,
+        jobId: output.execId,
+        running: output.running,
+        exitCode: output.exitCode,
+        durationMs: output.durationMs,
+        truncated: output.truncated,
+        spillPaths: output.spillPaths,
+      },
+    };
+  } catch (error) {
+    return toolError(
+      error instanceof Error ? error.message : String(error),
+      { kind: "job", jobId: args.exec_id },
+    );
+  }
+}
+
+function jobListResult(ctx: ToolExecutionContext): ToolResult {
+  const jobs = ctx.exec.listJobs(ctx.session.id);
+  if (jobs.length === 0) {
+    return { content: "No jobs in this session.", status: "complete", meta: { kind: "job" } };
+  }
+  const lines = jobs.map((job) => {
+    const exit =
+      job.exitCode === null ? "exit=?" : `exit=${job.exitCode}`;
+    return `${job.execId}  ${job.status}${job.running ? " (running)" : ""}  ${exit}  ${Math.round(job.durationMs / 1000)}s  ${job.command}`;
+  });
+  return {
+    content: `Jobs (newest first):\n${lines.join("\n")}`,
+    status: "complete",
+    meta: { kind: "job", data: jobs },
+  };
+}
+
+async function jobKillResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(jobKillArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "job" });
+  try {
+    const cancelled = ctx.exec.cancel(parsed.data.exec_id);
+    return {
+      content: cancelled
+        ? `Job ${parsed.data.exec_id} stopped.`
+        : `Job ${parsed.data.exec_id} had already finished.`,
+      status: "complete",
+      meta: { kind: "job", jobId: parsed.data.exec_id, running: false },
+    };
+  } catch (error) {
+    return toolError(
+      error instanceof Error ? error.message : String(error),
+      { kind: "job", jobId: parsed.data.exec_id },
+    );
+  }
+}
+
+async function writeStdinResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(writeStdinArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "job" });
+  const args = parsed.data;
+  try {
+    const before = ctx.exec.jobOutput(ctx.session.id, args.exec_id, {
+      maxChars: 1,
+    });
+    const written = ctx.exec.writeStdin(args.exec_id, args.chars);
+    if (!written) {
+      return toolError(
+        `Job ${args.exec_id} has no writable stdin (it may have finished or closed it).`,
+        { kind: "job", jobId: args.exec_id },
+      );
+    }
+    await waitForJob(ctx, args.exec_id, args.yield_ms ?? 250);
+    const output = ctx.exec.jobOutput(ctx.session.id, args.exec_id, {
+      fromSeq: before.nextSeq,
+    });
+    return {
+      content: truncateContent(
+        [
+          `exec_id: ${output.execId}`,
+          `status: ${output.status}`,
+          `next_seq: ${output.nextSeq}`,
+          "\noutput:",
+          output.text,
+        ].join("\n"),
+      ),
+      status: "complete",
+      meta: {
+        kind: "command",
+        command: output.command,
+        jobId: output.execId,
+        running: output.running,
+        exitCode: output.exitCode,
+        durationMs: output.durationMs,
+        truncated: output.truncated,
+        spillPaths: output.spillPaths,
+      },
+    };
+  } catch (error) {
+    return toolError(
+      error instanceof Error ? error.message : String(error),
+      { kind: "job", jobId: args.exec_id },
+    );
+  }
+}
+
+function todoWriteResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): ToolResult {
+  const parsed = parseArgs(todoWriteArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "todo" });
+  const todos: TodoItem[] = parsed.data.todos;
+  ctx.emit({
+    type: "agent.todo.updated",
+    messageId: ctx.messageId,
+    todos,
+  });
+
+  const lines = todos.map((todo) => {
+    const box =
+      todo.status === "completed"
+        ? "[x]"
+        : todo.status === "in_progress"
+          ? "[>]"
+          : "[ ]";
+    return `${box} ${todo.content}`;
+  });
+  const counts = {
+    pending: todos.filter((todo) => todo.status === "pending").length,
+    inProgress: todos.filter((todo) => todo.status === "in_progress").length,
+    completed: todos.filter((todo) => todo.status === "completed").length,
+  };
+  return {
+    content:
+      todos.length === 0
+        ? "Task list cleared."
+        : `Task list (${counts.completed}/${todos.length} completed):\n${lines.join("\n")}`,
+    status: "complete",
+    meta: { kind: "todo", todos, data: counts },
+  };
+}
+
+async function askUserQuestionResult(
+  rawArgs: string,
+  ctx: ToolExecutionContext,
+): Promise<ToolResult> {
+  const parsed = parseArgs(askUserQuestionArgs, rawArgs);
+  if (!parsed.ok) return toolError(parsed.message, { kind: "question" });
+  const questions: AgentQuestion[] = parsed.data.questions.map((question) => ({
+    id: question.id,
+    question: question.question,
+    ...(question.header === undefined ? {} : { header: question.header }),
+    ...(question.options === undefined ? {} : { options: question.options }),
+    ...(question.multi_select === undefined
+      ? {}
+      : { multiSelect: question.multi_select }),
+  }));
+
+  try {
+    const result = await ctx.questions.ask({
+      sessionId: ctx.session.id,
+      toolCallId: ctx.toolCallId,
+      messageId: ctx.messageId,
+      questions,
+      signal: ctx.signal,
+      emit: ctx.emit,
+    });
+
+    if (result.outcome === "timeout") {
+      return {
+        content:
+          "The user did not answer before the question timed out. Continue with your best judgment, or ask again later with a shorter question.",
+        status: "complete",
+        meta: {
+          kind: "question",
+          questions,
+          answers: result.answers,
+          questionOutcome: result.outcome,
+        },
+      };
+    }
+    if (result.outcome === "cancelled") {
+      return {
+        content: "The question was cancelled because the turn was stopped.",
+        status: "cancelled",
+        meta: {
+          kind: "question",
+          questions,
+          answers: result.answers,
+          questionOutcome: result.outcome,
+        },
+      };
+    }
+
+    const byId = new Map(result.answers.map((answer) => [answer.id, answer]));
+    const lines = questions.map((question) => {
+      const answer = byId.get(question.id);
+      if (!answer || (answer.selected.length === 0 && (answer.custom ?? "").trim() === "")) {
+        return `- ${question.id}: (skipped)`;
+      }
+      const selected =
+        answer.selected.length > 0 ? answer.selected.join(", ") : "(none)";
+      const custom =
+        answer.custom !== undefined && answer.custom.trim() !== ""
+          ? `; custom: ${answer.custom.trim()}`
+          : "";
+      return `- ${question.id}: ${selected}${custom}`;
+    });
+    return {
+      content: `User answers:\n${lines.join("\n")}`,
+      status: "complete",
+      meta: {
+        kind: "question",
+        questions,
+        answers: result.answers,
+        questionOutcome: result.outcome,
+      },
+    };
+  } catch (error) {
+    return toolError(
+      `Question failed: ${error instanceof Error ? error.message : String(error)}`,
+      { kind: "question" },
+    );
+  }
 }
 
 export interface WebSearchEndpoint {
@@ -1841,41 +3320,6 @@ async function defaultResolveHost(host: string): Promise<string[]> {
   return records.map((record) => record.address);
 }
 
-function isBlockedIpv4(address: string): boolean {
-  const parts = address.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
-  ) {
-    return true;
-  }
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 0 || a === 10 || a === 127) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 192 && b === 0) return true;
-  if (a === 198 && (b === 18 || b === 19)) return true;
-  return a >= 224;
-}
-
-function isBlockedIpv6(address: string): boolean {
-  const ip = address.toLowerCase().replace(/^\[|\]$/g, "");
-  if (ip === "::" || ip === "::1") return true;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
-  if (mapped !== null) return isBlockedIpv4(mapped[1]!);
-  if (ip.startsWith("fc") || ip.startsWith("fd")) return true;
-  if (/^fe[89ab]/.test(ip)) return true;
-  return ip.startsWith("ff");
-}
-
-function isBlockedAddress(address: string): boolean {
-  return isIP(address) === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address);
-}
-
-const BLOCKED_HOSTNAMES = /(^|\.)(localhost|local|internal|home\.arpa)$/i;
-
 /**
  * Refuses loopback, private, link-local and other non-public targets, and
  * re-checks on every redirect hop to blunt DNS-rebinding and redirect tricks.
@@ -1890,7 +3334,7 @@ async function assertPublicUrl(
   if (url.username !== "" || url.password !== "") {
     throw new Error("URLs with embedded credentials are not fetched");
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const host = bareHost(url.hostname);
   if (host === "") throw new Error("URL has no host");
   if (BLOCKED_HOSTNAMES.test(host)) {
     throw new Error(`refusing to fetch a private host: ${host}`);
@@ -2277,6 +3721,12 @@ async function readImageResult(
       path: target,
     });
   }
+  let resolved: string;
+  try {
+    resolved = await assertReadable(target, ctx.dataDir);
+  } catch (error) {
+    return fileErrorResult(error, session);
+  }
   const limit = Math.min(MAX_IMAGE_BYTES, Math.max(ctx.maxReadBytes, 0));
   if (info.size > limit) {
     return toolError(
@@ -2285,7 +3735,7 @@ async function readImageResult(
     );
   }
 
-  const buffer = await readFile(target);
+  const buffer = await readFile(resolved);
   const mime = sniffImageMime(buffer);
   if (mime === null) {
     return toolError(
@@ -2313,6 +3763,28 @@ async function readImageResult(
   };
 }
 
+/**
+ * Hides escalation-only arguments when the session cannot request approval.
+ * Advertising `sandbox_permissions` under approvalPolicy=never (or in
+ * danger-full-access) invites calls that can only fail.
+ */
+function withoutEscalationArgs(definition: LlmToolDefinition): LlmToolDefinition {
+  const clone = structuredClone(definition);
+  const parameters = clone.function.parameters as {
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+  if (parameters.properties !== undefined) {
+    delete parameters.properties.sandbox_permissions;
+    delete parameters.properties.justification;
+  }
+  if (clone.function.name === "run_command") {
+    clone.function.description =
+      `${clone.function.description} This session cannot request wider permissions.`;
+  }
+  return clone;
+}
+
 export class AgentToolExecutor implements AgentToolExecutorLike {
   private readonly searchEndpoint: () => WebSearchEndpoint | null;
   private readonly resolveHost: HostResolver;
@@ -2330,11 +3802,24 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
     }
   }
 
-  definitions(enabledTools: AgentToolName[]): LlmToolDefinition[] {
+  definitions(
+    enabledTools: AgentToolName[],
+    options: { session?: AgentSession } = {},
+  ): LlmToolDefinition[] {
     const searchReady = this.resolveSearchEndpoint() !== null;
+    const session = options.session;
+    const canEscalate =
+      session === undefined ||
+      (session.approvalPolicy === "ask" && session.mode !== "danger-full-access");
+
     return enabledTools
       .filter((name) => name !== "web_search" || searchReady)
-      .map((name) => DEFINITIONS[name])
+      .map((name) => {
+        const definition = DEFINITIONS[name];
+        if (definition === undefined) return undefined;
+        if (canEscalate) return definition;
+        return withoutEscalationArgs(definition);
+      })
       .filter((definition): definition is LlmToolDefinition => Boolean(definition));
   }
 
@@ -2364,7 +3849,7 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
       case "list_files": {
         const parsed = parseArgs(listFilesArgs, rawArguments);
         if (!parsed.ok) return toolError(parsed.message, { kind: "list" });
-        return listFilesResult(ctx.session, parsed.data.path);
+        return listFilesResult(ctx.session, parsed.data, ctx);
       }
       case "grep":
         return grepResult(rawArguments, ctx);
@@ -2381,6 +3866,26 @@ export class AgentToolExecutor implements AgentToolExecutorLike {
         if (!parsed.ok) return toolError(parsed.message, { kind: "image" });
         return readImageResult(ctx.session, parsed.data, ctx);
       }
+      case "apply_patch": {
+        const parsed = parseArgs(applyPatchArgs, rawArguments);
+        if (!parsed.ok) return toolError(parsed.message, { kind: "patch" });
+        return applyPatchResult(ctx.session, parsed.data, ctx);
+      }
+      case "job_output":
+        return jobOutputResult(rawArguments, ctx);
+      case "job_list": {
+        const parsed = parseArgs(jobListArgs, rawArguments);
+        if (!parsed.ok) return toolError(parsed.message, { kind: "job" });
+        return jobListResult(ctx);
+      }
+      case "job_kill":
+        return jobKillResult(rawArguments, ctx);
+      case "write_stdin":
+        return writeStdinResult(rawArguments, ctx);
+      case "todo_write":
+        return todoWriteResult(rawArguments, ctx);
+      case "ask_user_question":
+        return askUserQuestionResult(rawArguments, ctx);
       default:
         return toolError(`Unknown tool: ${name}`, { kind: "error" });
     }

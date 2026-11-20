@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type {
   AgentEvent,
+  AgentQuestion,
+  AgentQuestionAnswer,
   AgentSession,
   AgentSettingsInput,
   AgentSettingsPublic,
@@ -30,6 +32,7 @@ import type {
   Session,
   SessionKind,
   Settings,
+  TodoItem,
 } from "@codefly/protocol";
 import { api, asApiError, clearToken, getToken, saveToken } from "./api.js";
 import { isAbortError, streamSse } from "./sse.js";
@@ -77,6 +80,16 @@ export interface SystemMessage extends BaseMessage {
   text: string;
 }
 
+/** A blocking ask_user_question call waiting for the user's answer. */
+export interface PendingQuestion {
+  id: string;
+  sessionId: string;
+  toolCallId: string;
+  messageId: string;
+  questions: AgentQuestion[];
+  expiresAt: string;
+}
+
 export type ChatMessage =
   | UserMessage
   | AssistantMessage
@@ -112,6 +125,8 @@ export interface AppState {
   currentSessionId: string | null;
   messages: Record<string, ChatMessage[]>;
   approvals: ApprovalRequest[];
+  /** Pending ask_user_question calls across agent runs. */
+  questions: PendingQuestion[];
   settings: Settings | null;
   llmSettings: LlmSettingsPublic | null;
   searchSettings: SearchSettingsPublic | null;
@@ -159,6 +174,10 @@ export interface AppState {
   deleteSession(sessionId: string): Promise<boolean>;
   updatePermissions(mode: SandboxMode, confirmRisk?: boolean): Promise<boolean>;
   decideApproval(approvalId: string, decision: ApprovalDecision): Promise<void>;
+  answerQuestion(
+    questionId: string,
+    answers: AgentQuestionAnswer[],
+  ): Promise<void>;
   sendChat(text: string): Promise<void>;
   cancelChat(): void;
   sendAgent(text: string): Promise<void>;
@@ -562,13 +581,14 @@ export const useAppStore = create<AppState>()((set, get) => {
             case "agent.approval_required": {
               const approval: ApprovalRequest = {
                 id: event.approvalId,
-                kind: "exec",
-                toolName: "run_command",
+                kind: event.kind,
+                toolName: event.kind === "fs" ? "write_file" : "run_command",
                 sessionId,
                 execId: event.execId,
                 currentMode: event.currentMode,
                 requestedMode: event.requestedMode,
                 command: event.command,
+                path: event.path,
                 justification: event.justification,
                 createdAt: new Date().toISOString(),
                 expiresAt: event.expiresAt,
@@ -588,6 +608,50 @@ export const useAppStore = create<AppState>()((set, get) => {
               set((current) => ({
                 approvals: current.approvals.filter(
                   (candidate) => candidate.id !== event.approvalId,
+                ),
+              }));
+              break;
+            case "agent.todo.updated":
+              set((current) =>
+                withMessages(current, sessionId, (list) =>
+                  list.map((message) =>
+                    message.kind === "tool" && message.id === event.messageId
+                      ? {
+                          ...message,
+                          meta: {
+                            ...message.meta,
+                            kind: "todo",
+                            todos: event.todos as TodoItem[],
+                          },
+                        }
+                      : message,
+                  ),
+                ),
+              );
+              break;
+            case "agent.question_required": {
+              const pending: PendingQuestion = {
+                id: event.questionId,
+                sessionId,
+                toolCallId: event.toolCallId,
+                messageId: event.messageId,
+                questions: event.questions,
+                expiresAt: event.expiresAt,
+              };
+              set((current) => ({
+                questions: [
+                  ...current.questions.filter(
+                    (candidate) => candidate.id !== pending.id,
+                  ),
+                  pending,
+                ],
+              }));
+              break;
+            }
+            case "agent.question_answered":
+              set((current) => ({
+                questions: current.questions.filter(
+                  (candidate) => candidate.id !== event.questionId,
                 ),
               }));
               break;
@@ -651,6 +715,9 @@ export const useAppStore = create<AppState>()((set, get) => {
       if (kind === "agent") {
         set((current) => ({
           agentBusy: { ...current.agentBusy, [sessionId]: false },
+          questions: current.questions.filter(
+            (question) => question.sessionId !== sessionId,
+          ),
           ...(approvalsAdded.size > 0
             ? {
                 approvals: current.approvals.filter(
@@ -676,6 +743,7 @@ export const useAppStore = create<AppState>()((set, get) => {
   currentSessionId: null,
   messages: {},
   approvals: [],
+  questions: [],
   settings: null,
   llmSettings: null,
   searchSettings: null,
@@ -1028,7 +1096,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     const approval = get().approvals.find((candidate) => candidate.id === approvalId);
     if (!approval) return;
     try {
-      await api.decideApproval(approval.execId, decision);
+      await api.decideAgentApproval(approvalId, decision);
       set((state) => ({
         approvals: state.approvals.filter((candidate) => candidate.id !== approvalId),
       }));
@@ -1038,6 +1106,29 @@ export const useAppStore = create<AppState>()((set, get) => {
       if (apiError.code === "APPROVAL_NOT_PENDING") {
         set((state) => ({
           approvals: state.approvals.filter((candidate) => candidate.id !== approvalId),
+        }));
+      }
+    }
+  },
+  answerQuestion: async (
+    questionId: string,
+    answers: AgentQuestionAnswer[],
+  ) => {
+    try {
+      await api.answerQuestion(questionId, answers);
+      set((state) => ({
+        questions: state.questions.filter(
+          (candidate) => candidate.id !== questionId,
+        ),
+      }));
+    } catch (error) {
+      const apiError = asApiError(error);
+      get().notify("error", apiError.message);
+      if (apiError.code === "QUESTION_NOT_PENDING") {
+        set((state) => ({
+          questions: state.questions.filter(
+            (candidate) => candidate.id !== questionId,
+          ),
         }));
       }
     }

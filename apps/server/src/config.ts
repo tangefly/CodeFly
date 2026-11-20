@@ -39,6 +39,8 @@ export const config = {
     defaultTimeoutMs: 60_000,
     maxTimeoutMs: 600_000,
     outputLimitBytes: 2 * 1024 * 1024,
+    /** Hard cap before a spill-writing process is stopped. */
+    spillLimitBytes: num(process.env.CODEFLY_EXEC_SPILL_LIMIT_BYTES, 64 * 1024 * 1024),
     flushIntervalMs: 30,
     denialTtlMs: 10 * 60_000,
   },
@@ -51,6 +53,10 @@ export const config = {
     defaultTimeoutMs: 120_000,
     maxTimeoutMs: 600_000,
     testMaxTokens: 32,
+  },
+  agent: {
+    /** ask_user_question waits this long before returning a timeout. */
+    questionTimeoutMs: num(process.env.CODEFLY_QUESTION_TIMEOUT_MS, 300_000),
   },
   papers: {
     arxivMinIntervalMs: num(process.env.CODEFLY_ARXIV_MIN_INTERVAL_MS, 3000),

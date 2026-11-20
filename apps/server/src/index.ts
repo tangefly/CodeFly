@@ -35,6 +35,8 @@ import { SessionRunLock } from "./llm/run-lock.js";
 import { AgentConfigStore } from "./agent/config-store.js";
 import { AgentToolExecutor } from "./agent/tools.js";
 import { AgentService } from "./agent/service.js";
+import { FileVersionStore } from "./fs/file-versions.js";
+import { QuestionService } from "./interaction/questions.js";
 import { PaperLibraryStore } from "./paper/library-store.js";
 import { ArxivClient } from "./paper/arxiv-client.js";
 import { PdfExtractor } from "./paper/pdf-extractor.js";
@@ -133,6 +135,10 @@ async function main(): Promise<void> {
   ];
 
   const approvals = new ApprovalService(audit);
+  const questions = new QuestionService(audit, {
+    timeoutMs: config.agent.questionTimeoutMs,
+  });
+  const fileVersions = new FileVersionStore();
   const exec = new ExecService({
     sessions,
     approvals,
@@ -142,6 +148,7 @@ async function main(): Promise<void> {
       defaultTimeoutMs: config.exec.defaultTimeoutMs,
       maxTimeoutMs: config.exec.maxTimeoutMs,
       outputLimitBytes: config.exec.outputLimitBytes,
+      spillLimitBytes: config.exec.spillLimitBytes,
       flushIntervalMs: config.exec.flushIntervalMs,
       approvalTimeoutMs: config.approvalTimeoutMs,
       denialTtlMs: config.exec.denialTtlMs,
@@ -163,6 +170,10 @@ async function main(): Promise<void> {
     }),
     lock: runLock,
     exec,
+    approvals,
+    questions,
+    fileVersions,
+    approvalTimeoutMs: config.approvalTimeoutMs,
     dataDir: config.dataDir,
     maxReadBytes: config.fs.maxReadBytes,
     maxWriteBytes: config.fs.maxWriteBytes,
@@ -300,6 +311,8 @@ async function main(): Promise<void> {
     sessions,
     agentConfig,
     agent,
+    approvals,
+    questions,
     titler,
     audit,
   });

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession, AuditEvent } from "@codefly/protocol";
+import type { AgentEvent, AgentSession, AuditEvent } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
 import {
@@ -17,6 +17,7 @@ describe("AgentToolExecutor tools", () => {
   let session: AgentSession;
   let audits: AuditEvent[];
   let executor: AgentToolExecutor;
+  let fileVersions: Map<string, string>;
 
   beforeEach(async () => {
     base = await mkdtemp(path.join(os.tmpdir(), "codefly-agent-tools-"));
@@ -36,6 +37,7 @@ describe("AgentToolExecutor tools", () => {
       lastDenial: null,
     };
     audits = [];
+    fileVersions = new Map();
     executor = new AgentToolExecutor();
   });
 
@@ -62,6 +64,19 @@ describe("AgentToolExecutor tools", () => {
       signal: new AbortController().signal,
       emit: () => undefined,
       toolCallId: "call_test",
+      messageId: "m_test",
+      questions: {
+        ask: async () => ({ answers: [], outcome: "skipped" as const }),
+      },
+      fileVersions: {
+        record: (target, version) => fileVersions.set(target, version),
+        get: (target) => fileVersions.get(target),
+        forget: (target) => fileVersions.delete(target),
+      },
+      requestFileEscalation: async () => ({
+        allowed: false,
+        reason: "denied",
+      }),
       ...overrides,
     };
   }
@@ -118,7 +133,7 @@ describe("AgentToolExecutor tools", () => {
       context(),
     );
     expect(escape.status).toBe("error");
-    expect(escape.content).toContain("File tools cannot request one-shot escalation");
+    expect(escape.content).toContain("retry with sandbox_permissions and justification");
 
     const protectedWrite = await executor.execute(
       "write_file",
@@ -338,6 +353,349 @@ describe("AgentToolExecutor tools", () => {
     expect(shallow.content).toContain("src/a.ts");
     expect(shallow.content).toContain("src/nested/c.ts");
     expect(shallow.content).not.toContain("src/b.js");
+  });
+
+  it("refuses to read CodeFly's own data directory", async () => {
+    const secret = path.join(dataDir, "secret.txt");
+    await writeFile(secret, "api-key\n", "utf8");
+    const result = await executor.execute(
+      "read_file",
+      JSON.stringify({ path: secret }),
+      context(),
+    );
+    expect(result.status).toBe("error");
+    expect(result.content).toContain("read denied");
+    expect(result.content).not.toContain("api-key");
+  });
+
+  it("rejects a write after the file changed since the last read", async () => {
+    const target = path.join(workspace, "versioned.txt");
+    await writeFile(target, "one\n", "utf8");
+    const ctx = context();
+    const read = await executor.execute(
+      "read_file",
+      JSON.stringify({ path: "versioned.txt" }),
+      ctx,
+    );
+    expect(read.status).toBe("complete");
+
+    await writeFile(target, "externally changed\n", "utf8");
+    const write = await executor.execute(
+      "write_file",
+      JSON.stringify({ path: "versioned.txt", content: "three\n" }),
+      ctx,
+    );
+    expect(write.status).toBe("error");
+    expect(write.content).toContain("changed since you last read");
+    expect(await readFile(target, "utf8")).toBe("externally changed\n");
+  });
+
+  it("returns a unified diff from edit_file", async () => {
+    await writeFile(path.join(workspace, "diff.txt"), "one\ntwo\n", "utf8");
+    const result = await executor.execute(
+      "edit_file",
+      JSON.stringify({
+        path: "diff.txt",
+        old_string: "two",
+        new_string: "three",
+      }),
+      context(),
+    );
+    expect(result.status).toBe("complete");
+    expect(result.content).toContain("@@");
+    expect(result.content).toContain("-two");
+    expect(result.content).toContain("+three");
+    expect(result.meta?.diff).toContain("+three");
+  });
+
+  it("applies a multi-file patch with add, update, delete and move", async () => {
+    await writeFile(path.join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+    await writeFile(path.join(workspace, "d.txt"), "bye\n", "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: a.txt",
+      "@@",
+      " one",
+      "-two",
+      "+three",
+      "*** Add File: b.txt",
+      "+hello",
+      "*** Delete File: d.txt",
+      "*** Update File: a.txt",
+      "*** Move to: moved.txt",
+      "@@",
+      " one",
+      "*** End Patch",
+    ].join("\n");
+
+    const result = await executor.execute(
+      "apply_patch",
+      JSON.stringify({ input: patch }),
+      context(),
+    );
+    expect(result.status).toBe("complete");
+    expect(result.meta?.kind).toBe("patch");
+    expect(await readFile(path.join(workspace, "b.txt"), "utf8")).toBe(
+      "hello\n",
+    );
+    expect(await readFile(path.join(workspace, "moved.txt"), "utf8")).toBe(
+      "one\nthree\n",
+    );
+    await expect(stat(path.join(workspace, "a.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(path.join(workspace, "d.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("anchors a patch hunk to the end of the file", async () => {
+    await writeFile(path.join(workspace, "eof.txt"), "one\ntwo\n", "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: eof.txt",
+      "@@",
+      " one",
+      "-two",
+      "+three",
+      "*** End of File",
+      "*** End Patch",
+    ].join("\n");
+    const result = await executor.execute(
+      "apply_patch",
+      JSON.stringify({ input: patch }),
+      context(),
+    );
+    expect(result.status).toBe("complete");
+    expect(await readFile(path.join(workspace, "eof.txt"), "utf8")).toBe(
+      "one\nthree\n",
+    );
+  });
+
+  it("writes nothing when one patch hunk is invalid", async () => {
+    await writeFile(path.join(workspace, "a.txt"), "one\ntwo\n", "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: a.txt",
+      "@@",
+      "-missing line",
+      "+replacement",
+      "*** Add File: should-not-exist.txt",
+      "+content",
+      "*** End Patch",
+    ].join("\n");
+
+    const result = await executor.execute(
+      "apply_patch",
+      JSON.stringify({ input: patch }),
+      context(),
+    );
+    expect(result.status).toBe("error");
+    expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe(
+      "one\ntwo\n",
+    );
+    await expect(
+      stat(path.join(workspace, "should-not-exist.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("paginates list_files", async () => {
+    await mkdir(path.join(workspace, "many"), { recursive: true });
+    for (const name of ["a.txt", "b.txt", "c.txt"]) {
+      await writeFile(path.join(workspace, "many", name), name, "utf8");
+    }
+    const first = await executor.execute(
+      "list_files",
+      JSON.stringify({ path: "many", limit: 2 }),
+      context(),
+    );
+    expect(first.content).toContain("a.txt");
+    expect(first.content).toContain("b.txt");
+    expect(first.content).not.toContain("c.txt");
+    expect(first.content).toContain("offset=2");
+
+    const second = await executor.execute(
+      "list_files",
+      JSON.stringify({ path: "many", offset: 2, limit: 2 }),
+      context(),
+    );
+    expect(second.content).toContain("c.txt");
+    expect(second.content).not.toContain("a.txt");
+  });
+
+  it("records todo_write in the meta and emits an update", async () => {
+    const events: AgentEvent[] = [];
+    const result = await executor.execute(
+      "todo_write",
+      JSON.stringify({
+        todos: [
+          { content: "read code", status: "completed" },
+          { content: "write fix", status: "in_progress" },
+        ],
+      }),
+      context({ emit: (event) => events.push(event) }),
+    );
+    expect(result.status).toBe("complete");
+    expect(result.meta).toMatchObject({
+      kind: "todo",
+      todos: [
+        { content: "read code", status: "completed" },
+        { content: "write fix", status: "in_progress" },
+      ],
+    });
+    expect(events[0]).toMatchObject({ type: "agent.todo.updated" });
+  });
+
+  it("returns ask_user_question answers", async () => {
+    const result = await executor.execute(
+      "ask_user_question",
+      JSON.stringify({
+        questions: [
+          {
+            id: "q1",
+            question: "Which mode?",
+            options: [{ label: "fast" }, { label: "safe" }],
+          },
+        ],
+      }),
+      context({
+        questions: {
+          ask: async () => ({
+            answers: [{ id: "q1", selected: ["safe"] }],
+            outcome: "answered" as const,
+          }),
+        },
+      }),
+    );
+    expect(result.status).toBe("complete");
+    expect(result.content).toContain("safe");
+    expect(result.meta).toMatchObject({
+      kind: "question",
+      questionOutcome: "answered",
+    });
+  });
+
+  it("blocks shell commands aimed at private network targets", async () => {
+    const loopback = await executor.execute(
+      "run_command",
+      JSON.stringify({ command: "curl http://127.0.0.1:8080/admin" }),
+      context(),
+    );
+    expect(loopback.status).toBe("error");
+    expect(loopback.content).toContain("network access denied");
+
+    const lan = await executor.execute(
+      "run_command",
+      JSON.stringify({ command: "ssh deploy@10.0.0.5" }),
+      context(),
+    );
+    expect(lan.status).toBe("error");
+    expect(lan.content).toContain("network access denied");
+  });
+
+  it("supports grep output modes and context lines", async () => {
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    await writeFile(
+      path.join(workspace, "src/a.ts"),
+      "before\nneedle\nafter\n",
+      "utf8",
+    );
+    await writeFile(path.join(workspace, "src/b.ts"), "needle\n", "utf8");
+
+    const files = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle", output_mode: "files_with_matches" }),
+      context(),
+    );
+    expect(files.content).toContain("src/a.ts");
+    expect(files.content).toContain("src/b.ts");
+    expect(files.content).not.toContain("needle");
+
+    const counts = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle", output_mode: "count" }),
+      context(),
+    );
+    expect(counts.content).toContain("src/a.ts:1");
+    expect(counts.content).toContain("src/b.ts:1");
+
+    const contextResult = await executor.execute(
+      "grep",
+      JSON.stringify({ pattern: "needle", context_lines: 1 }),
+      context(),
+    );
+    expect(contextResult.content).toContain("before");
+    expect(contextResult.content).toContain("after");
+  });
+
+  it("formats background job tools", async () => {
+    const output = {
+      execId: "e_job",
+      command: "npm run dev",
+      status: "running",
+      text: "ready on :3000",
+      nextSeq: 3,
+      running: true,
+      exitCode: null,
+      signal: null,
+      durationMs: 10,
+      truncated: false,
+      spillPaths: [],
+      promoted: false,
+    };
+    const fakeExec = {
+      getRecord: () => undefined,
+      isTerminal: () => false,
+      subscribe: () => () => undefined,
+      jobOutput: () => output,
+      listJobs: () => [
+        {
+          execId: "e_job",
+          command: "npm run dev",
+          status: "running",
+          running: true,
+          startedAt: new Date().toISOString(),
+          durationMs: 10,
+          exitCode: null,
+          runInBackground: true,
+          promoted: false,
+          truncated: false,
+        },
+      ],
+      cancel: () => true,
+      writeStdin: () => true,
+    } as unknown as ExecService;
+    const ctx = context({ exec: fakeExec });
+
+    const out = await executor.execute(
+      "job_output",
+      JSON.stringify({ exec_id: "e_job" }),
+      ctx,
+    );
+    expect(out.content).toContain("ready on :3000");
+    expect(out.meta).toMatchObject({
+      kind: "command",
+      jobId: "e_job",
+      running: true,
+    });
+
+    const list = await executor.execute("job_list", "{}", ctx);
+    expect(list.content).toContain("npm run dev");
+    expect(list.content).toContain("running");
+
+    const killed = await executor.execute(
+      "job_kill",
+      JSON.stringify({ exec_id: "e_job" }),
+      ctx,
+    );
+    expect(killed.content).toContain("stopped");
+
+    const stdin = await executor.execute(
+      "write_stdin",
+      JSON.stringify({ exec_id: "e_job", chars: "q\n", yield_ms: 0 }),
+      ctx,
+    );
+    expect(stdin.content).toContain("ready on :3000");
   });
 
   describe("web_search", () => {

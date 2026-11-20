@@ -67,14 +67,19 @@ export function ApprovalDialog() {
   if (!approval) return null;
 
   const danger = approval.requestedMode === "danger-full-access";
+  const isFs = approval.kind === "fs";
   const expired = remaining <= 0;
   const progress = Math.max(0, Math.min(100, (remaining / totalSeconds) * 100));
 
   return (
     <Modal
       open
-      title="审批请求"
-      description="一次性审批：只对本次调用生效，不提供永久允许。"
+      title={isFs ? "文件写入审批" : "审批请求"}
+      description={
+        isFs
+          ? "一次性文件权限审批：只对本次写入生效，不提供永久允许。"
+          : "一次性审批：只对本次调用生效，不提供永久允许。"
+      }
       footer={
         <>
           <span className="mr-auto text-[10px] text-muted-foreground/70">
@@ -144,6 +149,17 @@ export function ApprovalDialog() {
           </div>
         ) : null}
 
+        {approval.path ? (
+          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              目标路径
+            </p>
+            <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-all font-mono text-[12px] leading-5 text-foreground/90">
+              {approval.path}
+            </pre>
+          </div>
+        ) : null}
+
         <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
             申请理由
@@ -170,7 +186,9 @@ export function ApprovalDialog() {
           <p className="text-[11px] leading-5 text-muted-foreground">
             {danger
               ? "完全权限意味着命令可以读写工作区外的文件、访问网络并执行任意脚本。只有在你明确知道这条命令要做什么时才允许。"
-              : "工作区写权限意味着命令可以修改当前工作区与 /tmp 下的文件。"}
+              : isFs
+                ? "本次文件写入将获得所选模式的权限；只对这次调用生效。"
+                : "工作区写权限意味着命令可以修改当前工作区与 /tmp 下的文件。"}
             {expired ? " 审批已超时，命令不会执行。" : ""}
           </p>
         </div>

@@ -77,6 +77,21 @@ describe("ApprovalService", () => {
     expect(result).toEqual({ outcome: "cancelled", reason: "timeout" });
   });
 
+  it("cancels when the owning turn aborts", async () => {
+    const service = new ApprovalService(audit);
+    const controller = new AbortController();
+    const pending = service.ask(input, {
+      policy: "ask",
+      timeoutMs: 5000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).resolves.toEqual({
+      outcome: "cancelled",
+      reason: "cancelled",
+    });
+  });
+
   it("cancels pending approvals for one exec", async () => {
     const service = new ApprovalService(audit);
     const pending = service.ask(input, { policy: "ask", timeoutMs: 5000 });

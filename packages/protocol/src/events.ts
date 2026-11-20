@@ -1,4 +1,7 @@
 import type {
+  AgentQuestion,
+  AgentQuestionAnswer,
+  AgentQuestionOutcome,
   AgentToolCall,
   ApprovalKind,
   ApprovalOutcome,
@@ -8,6 +11,7 @@ import type {
   RunnerName,
   SandboxMode,
   Session,
+  TodoItem,
 } from "./types.js";
 
 /** The event union pushed over the exec SSE stream. */
@@ -63,6 +67,13 @@ export type ExecEvent =
       timedOut: boolean;
       spillPaths: string[];
     }
+  /** A foreground command hit its timeout and kept running as a job. */
+  | {
+      type: "exec.promoted";
+      execId: string;
+      timeoutMs: number;
+      spillPaths: string[];
+    }
   | { type: "exec.error"; code: string; message: string };
 
 export type ExecEventType = ExecEvent["type"];
@@ -100,7 +111,9 @@ export type AgentEvent =
       approvalId: string;
       execId: string;
       toolCallId: string;
+      kind: ApprovalKind;
       command: string;
+      path?: string;
       currentMode: SandboxMode;
       requestedMode: SandboxMode;
       justification: string;
@@ -111,6 +124,23 @@ export type AgentEvent =
       approvalId: string;
       outcome: ApprovalOutcome;
       reason: string;
+    }
+  /** todo_write replaced the session's task list. */
+  | { type: "agent.todo.updated"; messageId: string; todos: TodoItem[] }
+  /** ask_user_question is blocking while the UI collects answers. */
+  | {
+      type: "agent.question_required";
+      questionId: string;
+      toolCallId: string;
+      messageId: string;
+      questions: AgentQuestion[];
+      expiresAt: string;
+    }
+  | {
+      type: "agent.question_answered";
+      questionId: string;
+      answers: AgentQuestionAnswer[];
+      outcome: AgentQuestionOutcome;
     }
   | { type: "agent.done"; message: ChatMessageRecord }
   | { type: "agent.error"; code: string; message: string; messageId?: string }

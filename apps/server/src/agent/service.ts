@@ -5,8 +5,11 @@ import type {
   AgentToolName,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
+import type { ApprovalService } from "../approval/service.js";
 import { AppError } from "../http/errors.js";
 import type { ExecService } from "../exec/service.js";
+import type { FileVersionStore } from "../fs/file-versions.js";
+import type { QuestionService } from "../interaction/questions.js";
 import type { LlmClientLike } from "../llm/client.js";
 import {
   recordsToLlmMessages,
@@ -25,6 +28,8 @@ import { agentContextMessages } from "./context.js";
 import { toolGuidanceSection } from "./tool-guidance.js";
 import type {
   AgentToolExecutorLike,
+  FileEscalationRequest,
+  FileEscalationResult,
   ToolExecutionContext,
   ToolResult,
 } from "./tools.js";
@@ -49,6 +54,10 @@ export interface AgentServiceDeps {
   tools: AgentToolExecutorLike;
   lock: SessionRunLock;
   exec: ExecService;
+  approvals: ApprovalService;
+  questions: QuestionService;
+  fileVersions: FileVersionStore;
+  approvalTimeoutMs: number;
   dataDir: string;
   maxReadBytes: number;
   maxWriteBytes: number;
@@ -93,14 +102,18 @@ export class AgentService {
 
     const config = this.deps.llmConfig.getInternal();
     const settings = this.deps.agentConfig.getInternal();
-    const toolDefinitions = this.deps.tools.definitions(settings.enabledTools);
-    const enabledTools = new Set<string>(settings.enabledTools);
-    const prior = this.deps.messages.list(session.id);
-    const system = buildSystemPrompt(settings);
-    const contextMessages = await agentContextMessages(
+    const toolDefinitions = this.deps.tools.definitions(settings.enabledTools, {
       session,
-      settings.enabledTools,
-    );
+    });
+    const exposedTools = toolDefinitions
+      .map((definition) => definition.function.name)
+      .filter((name): name is AgentToolName =>
+        settings.enabledTools.includes(name as AgentToolName),
+      );
+    const exposedToolSet = new Set<string>(exposedTools);
+    const prior = this.deps.messages.list(session.id);
+    const system = buildSystemPrompt(settings, exposedTools);
+    const contextMessages = await agentContextMessages(session, exposedTools);
 
     await runToolLoop(
       {
@@ -117,11 +130,11 @@ export class AgentService {
         client: this.deps.client,
         priorMessages: recordsToLlmMessages(prior),
         isParallelTool: (name) =>
-          enabledTools.has(name) && READ_ONLY_TOOL_NAMES.has(name),
+          exposedToolSet.has(name) && READ_ONLY_TOOL_NAMES.has(name),
         executeTool: (call, context) =>
           this.executeToolCall(session, settings, call, context),
         auditType: "agent.run",
-        auditExtra: { enabledTools: settings.enabledTools },
+        auditExtra: { enabledTools: exposedTools },
       },
       content,
       clientSignal,
@@ -154,6 +167,16 @@ export class AgentService {
       signal: context.signal,
       emit: context.emit,
       toolCallId: context.toolCallId,
+      messageId: context.messageId,
+      questions: this.deps.questions,
+      fileVersions: {
+        record: (target, version) =>
+          this.deps.fileVersions.record(session.id, target, version),
+        get: (target) => this.deps.fileVersions.get(session.id, target),
+        forget: (target) => this.deps.fileVersions.forget(session.id, target),
+      },
+      requestFileEscalation: (input) =>
+        this.requestFileEscalation(input),
     };
 
     try {
@@ -172,19 +195,63 @@ export class AgentService {
       };
     }
   }
+
+  private async requestFileEscalation(
+    input: FileEscalationRequest,
+  ): Promise<FileEscalationResult> {
+    const result = await this.deps.approvals.ask(
+      {
+        kind: "fs",
+        toolName: "write_file",
+        sessionId: input.session.id,
+        execId: `fs_${input.toolCallId}`,
+        currentMode: input.session.mode,
+        requestedMode: input.requestedMode,
+        path: input.path,
+        justification: input.justification,
+      },
+      {
+        policy: input.session.approvalPolicy,
+        timeoutMs: this.deps.approvalTimeoutMs,
+        signal: input.signal,
+        onAsked: (request) => {
+          input.emit({
+            type: "agent.approval_required",
+            approvalId: request.id,
+            execId: request.execId,
+            toolCallId: input.toolCallId,
+            kind: "fs",
+            command: "",
+            path: request.path,
+            currentMode: request.currentMode,
+            requestedMode: request.requestedMode,
+            justification: request.justification,
+            expiresAt: request.expiresAt,
+          });
+        },
+      },
+    );
+    return {
+      allowed: result.outcome === "allowed-once",
+      reason: result.reason,
+    };
+  }
 }
 
 /**
  * Stable system prompt: user persona prefix, the harness-owned base prompt,
- * guidance for the currently enabled tools, and the persona suffix. Volatile
+ * guidance for the currently exposed tools, and the persona suffix. Volatile
  * facts (workspace, permissions, tool list) live in the per-run runtime
  * context message instead, so this prompt only changes when guidance does.
  */
-function buildSystemPrompt(settings: AgentInternalSettings): string {
+function buildSystemPrompt(
+  settings: AgentInternalSettings,
+  exposedTools: readonly AgentToolName[],
+): string {
   return [
     settings.personaPrefix.trim(),
     DEFAULT_AGENT_PROMPT,
-    toolGuidanceSection(settings.enabledTools),
+    toolGuidanceSection(exposedTools),
     settings.personaSuffix.trim(),
   ]
     .filter((part) => part !== "")

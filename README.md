@@ -16,12 +16,16 @@
 - **聊天模型**：通过 OpenAI-compatible `/chat/completions` 流式对话，支持多轮上下文、
   取消生成、Markdown / GFM / KaTeX / Shiki 渲染。
 - **Code 模式**：tool-calling loop，可调用 `run_command`、`read_file`、`write_file`、
-  `edit_file`、`list_files`、`grep`、`glob`、`web_search`、`web_fetch`、`read_image`；
-  `read_file` 支持行号与 `offset`/`limit`，`edit_file` 支持一次多处原子替换，
-  只读工具（含 `web_search`、`web_fetch`、`read_image`）并行执行；工具输出以可折叠
-  卡片展示，失败时自动展开；每轮的工具调用汇总为一张可折叠卡片，优先展示模型最终回答。
+  `edit_file`、`apply_patch`、`list_files`、`grep`、`glob`、`web_search`、`web_fetch`、
+  `read_image`、`job_output`、`job_list`、`job_kill`、`write_stdin`、`todo_write`、
+  `ask_user_question`；`read_file` 支持行号与 `offset`/`limit`，`edit_file` 支持一次多处
+  原子替换并返回 unified diff，`apply_patch` 支持多文件新增/修改/删除/移动；命令可后台
+  运行并读取/写入 stdin；只读工具（含 `web_search`、`web_fetch`、`read_image`）并行执行；
+  工具输出以可折叠卡片展示，失败时自动展开；每轮的工具调用汇总为一张可折叠卡片，
+  优先展示模型最终回答。任务清单以 checklist 展示，`ask_user_question` 会在工具调用
+  中间暂停并弹出问答对话框。
 - **抓取网页**：`web_fetch` 直接读取一个 http(s) URL 的正文（HTML 转纯文本，JSON/XML
-  原样返回），最多 5 次重定向、2 MiB、10 万字符；拒绝回环/内网/链路本地地址并在
+  原样返回），最多 5 次重定向、2 MiB、3 万字符；拒绝回环/内网/链路本地地址并在
   每次重定向后重新校验，防止 DNS rebinding 绕过。
 - **看图**：`read_image` 读取 PNG/JPEG/GIF/WebP（≤ 4 MiB），解析尺寸后把图片作为
   带图的多模态 tool result 发给模型，UI 直接渲染缩略图。
@@ -31,9 +35,14 @@
   与聊天模型互不复用。
 - **思考模式**：DeepSeek V4 默认开启，思维链流式展示在回复上方，可关闭或调整
   `low / high / max` 强度。
-- **权限与审批**：只读 / 工作区内修改 / 完全权限；越界操作可发起一次性提权审批。
+- **权限与审批**：只读 / 工作区内修改 / 完全权限；`run_command` 与
+  `write_file`/`edit_file`/`apply_patch` 都可发起一次性提权审批。
 - **沙箱**：优先 `bwrap`，否则使用 Landlock；两者都不可用时拒绝执行。写围栏限制在
-  工作区与 `/tmp`，并拒绝 `.git/`、`.claude/` 等受保护路径。
+  工作区与 `/tmp`，并拒绝 `.git/`、`.claude/` 等受保护路径。读工具额外拒绝 CodeFly
+  自己的 `data/` 目录、常见凭据文件与 `/proc/*/environ`；`run_command` 在非完全权限
+  模式下拒绝字面量私网/回环/元数据地址（`web_fetch` 的 SSRF 防护不再能被 curl 绕过）。
+- **输出与上下文**：命令输出按“头 + 尾”压缩，超限后继续写入 spill 文件并把路径回传
+  模型；工具结果有统一上限；历史中只保留最近 2 张图片，旧图片替换为文本占位符。
 - **GPU**：`workspace-write` 默认放行 GPU 设备节点、`/dev/shm` 与 `/proc`。
 - **用量统计**：会话上下文、累积上下文、累计输出、思考 token、缓存命中率。
 - **审计**：JSONL 记录审批、执行、配置变更与 Code 事件。
@@ -149,6 +158,8 @@ Key，需要在「搜索 API」中单独填写一次。
 | `CODEFLY_TOKEN` | 随机生成 | 固定访问 token（仅建议本地调试） |
 | `CODEFLY_DATA_DIR` | `<repo>/data` | 会话、消息、配置、审计与 spill 目录 |
 | `CODEFLY_APPROVAL_TIMEOUT_MS` | `120000` | 审批超时；超时视为拒绝 |
+| `CODEFLY_QUESTION_TIMEOUT_MS` | `300000` | `ask_user_question` 等待回答的超时；超时后模型继续 |
+| `CODEFLY_EXEC_SPILL_LIMIT_BYTES` | `67108864` | 输出转入 spill 后的硬上限（64 MB），超过才停止进程 |
 | `CODEFLY_ALLOW_GPU` | `1` | 是否允许 `workspace-write` 读写 GPU 设备、`/dev/shm` 与 `/proc`；设为 `0` 关闭 |
 | `CODEFLY_SANDBOX_RW_PATHS` | 无 | 逗号分隔的绝对路径，追加到 `workspace-write` 的读写授权 |
 | `CODEFLY_ARXIV_MIN_INTERVAL_MS` | `3000` | arXiv API/PDF 请求的最小间隔 |
@@ -192,8 +203,12 @@ Key，需要在「搜索 API」中单独填写一次。
   `CODEFLY_ALLOW_GPU=0` 收紧。GPU 显存不是进程间安全边界。
 - 思考 token 计入输出；Code 模式会在每步回传历史思考内容，进一步增加上下文。
 - Code 的只读工具（`read_file`、`list_files`、`grep`、`glob`）并行执行；写操作与
-  `run_command` 严格按顺序执行。不支持交互式 stdin 或后台 PTY。
-- 历史上下文按字符预算截断（默认 120k 字符），每个会话最多保存 500 条消息。
+  `run_command` 严格按顺序执行。后台命令使用管道 stdin（支持 `write_stdin`），但没有
+  PTY；需要 TTY 的程序应在 `danger-full-access` 下通过 `script` 等工具自行分配。
+- 每个会话最多保存 500 条消息；模型历史中只保留最近 2 张图片，旧图片会变成占位文本。
+- 读围栏与网络拦截只覆盖模型工具和字面量目标；`run_command` 仍以本机用户身份运行，
+  能读取用户有权访问的文件，也可能通过脚本/编码绕过地址检查。需要强隔离时请使用独立
+  系统用户或容器。
 
 ## 开发
 

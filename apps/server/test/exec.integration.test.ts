@@ -34,6 +34,7 @@ const exec = new ExecService({
     defaultTimeoutMs: 5000,
     maxTimeoutMs: 10_000,
     outputLimitBytes: 64 * 1024,
+    spillLimitBytes: 1024 * 1024,
     flushIntervalMs: 10,
     approvalTimeoutMs: 1200,
     denialTtlMs: 60_000,
@@ -52,6 +53,7 @@ const execWithDevices = new ExecService({
     defaultTimeoutMs: 5000,
     maxTimeoutMs: 10_000,
     outputLimitBytes: 64 * 1024,
+    spillLimitBytes: 1024 * 1024,
     flushIntervalMs: 10,
     approvalTimeoutMs: 1200,
     denialTtlMs: 60_000,
@@ -311,9 +313,13 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     collector.unsubscribe();
   }, 25_000);
 
-  it("kills a command on timeout", async () => {
+  it("kills a command on timeout when promotion is disabled", async () => {
     const session = await newSession("workspace-write");
-    const collector = await run(session, { command: "sleep 5", timeoutMs: 1000 });
+    const collector = await run(session, {
+      command: "sleep 5",
+      timeoutMs: 1000,
+      promoteOnTimeout: false,
+    });
     expect(
       collector.events.some(
         (event) => event.type === "exec.error" && event.code === "TIMEOUT",
@@ -326,6 +332,28 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     collector.unsubscribe();
   }, 20_000);
 
+  it("promotes a timed-out foreground command to a background job", async () => {
+    const session = await newSession("workspace-write");
+    const record = await exec.create(session, {
+      command: "sleep 2; echo finished",
+      timeoutMs: 500,
+    });
+    const collector = collect(record);
+    await collector.waitFor(
+      (event) => event.type === "exec.promoted",
+      10_000,
+    );
+    const exit = await collector.waitFor(
+      (event) => event.type === "exec.exit",
+      10_000,
+    );
+    expect(exit).toMatchObject({ type: "exec.exit", timedOut: false, code: 0 });
+    const output = exec.jobOutput(session.id, record.id, {});
+    expect(output.running).toBe(false);
+    expect(output.text).toContain("finished");
+    collector.unsubscribe();
+  }, 25_000);
+
   it("cancels a running process group", async () => {
     const session = await newSession("workspace-write");
     const record = await exec.create(session, { command: "sleep 5" });
@@ -337,19 +365,19 @@ describe.skipIf(!sandboxStatus.available)("ExecService (real Landlock)", () => {
     collector.unsubscribe();
   }, 20_000);
 
-  it("truncates output, kills the process, and writes spills", async () => {
+  it("switches to spill files and lets the process finish", async () => {
     const session = await newSession("workspace-write");
     const collector = await run(session, {
       command: "head -c 300000 /dev/zero | tr '\\0' a",
     });
 
     const exit = collector.events.at(-1);
-    expect(exit).toMatchObject({ type: "exec.exit", truncated: true });
+    expect(exit).toMatchObject({ type: "exec.exit", truncated: true, code: 0 });
     expect(
       collector.events.some(
         (event) => event.type === "exec.error" && event.code === "OUTPUT_LIMIT",
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     const spillPaths = (exit as { spillPaths: string[] }).spillPaths;
     expect(spillPaths.length).toBeGreaterThan(0);

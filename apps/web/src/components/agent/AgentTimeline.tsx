@@ -360,7 +360,7 @@ export function AgentTimeline({
             <p className="mx-auto max-w-md text-sm leading-6 text-muted-foreground">
               {mode === "agent" ? (
                 <>
-                  Code 会在 Landlock 沙箱内运行命令与文件工具，写操作被限制在工作区与{" "}
+                  Code 会在本机沙箱（bwrap / Landlock）内运行命令与文件工具，写操作被限制在工作区与{" "}
                   <code className="rounded bg-muted/60 px-1 py-0.5 font-mono text-[11px]">
                     /tmp
                   </code>

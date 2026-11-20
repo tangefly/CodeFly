@@ -464,15 +464,17 @@ async function runToolCalls(
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index]!;
     const outcome = executed[index]!;
+    const bounded = boundToolContent(outcome.result.content);
     const meta = {
       ...outcome.result.meta,
       durationMs: outcome.durationMs,
+      ...(bounded.truncated ? { truncated: true } : {}),
     };
     const finalTool = await profile.messages.update(
       profile.sessionId,
       entry.record.id,
       {
-        content: outcome.result.content,
+        content: bounded.content,
         status: outcome.result.status,
         meta,
       },
@@ -480,7 +482,7 @@ async function runToolCalls(
     const message: ChatMessageRecord =
       finalTool ?? {
         ...entry.record,
-        content: outcome.result.content,
+        content: bounded.content,
         status: outcome.result.status,
         meta,
       };
@@ -502,7 +504,11 @@ async function runToolCalls(
 
     outcomes.push({
       call: entry.call,
-      result: outcome.result,
+      result: {
+        ...outcome.result,
+        content: bounded.content,
+        meta,
+      },
       durationMs: outcome.durationMs,
     });
   }
@@ -516,6 +522,12 @@ export interface HistoryOptions {
    * this to drop stale full-text reads while keeping the UI records intact.
    */
   toolContent?: (record: ChatMessageRecord) => string | LlmContentPart[];
+  /**
+   * How many trailing image-bearing tool results keep their inline image.
+   * Older images become a text placeholder so history cannot grow without
+   * bound. Defaults to 2.
+   */
+  maxInlineImages?: number;
 }
 
 /**
@@ -533,6 +545,15 @@ export function recordsToLlmMessages(
       toolResults.add(record.toolCallId);
     }
   }
+
+  const imageIds = records
+    .filter(
+      (record) =>
+        record.role === "tool" &&
+        typeof record.meta?.imageDataUrl === "string",
+    )
+    .map((record) => record.id);
+  const keepImageIds = new Set(imageIds.slice(-(options.maxInlineImages ?? 2)));
 
   const includedCallIds = new Set<string>();
   for (const record of records) {
@@ -583,7 +604,9 @@ export function recordsToLlmMessages(
         tool_call_id: record.toolCallId,
         content: options.toolContent
           ? options.toolContent(record)
-          : toolContentForModel(record.content, record.meta),
+          : toolContentForModel(record.content, record.meta, {
+              includeImage: keepImageIds.has(record.id),
+            }),
       });
     }
   }
@@ -594,17 +617,40 @@ export function recordsToLlmMessages(
 /**
  * Tool results are text unless the tool attached an image (read_image); the
  * provider then receives a text+image content array so the model can see it.
+ * `includeImage: false` turns an old image into a text placeholder.
  */
 export function toolContentForModel(
   content: string,
   meta: AgentToolMeta | undefined,
+  options: { includeImage?: boolean } = {},
 ): string | LlmContentPart[] {
   const dataUrl = meta?.imageDataUrl;
   if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) {
+    if (options.includeImage === false) {
+      return `${content}\n\n[image omitted from history to save context; call read_image again if it is still needed]`;
+    }
     return [
       { type: "text", text: content },
       { type: "image_url", image_url: { url: dataUrl } },
     ];
   }
   return content;
+}
+
+/** Last-line bound applied to every tool result before it reaches the model. */
+const MAX_TOOL_RESULT_CHARS = 40_000;
+
+function boundToolContent(content: string): {
+  content: string;
+  truncated: boolean;
+} {
+  if (content.length <= MAX_TOOL_RESULT_CHARS) {
+    return { content, truncated: false };
+  }
+  const head = content.slice(0, 8_000);
+  const tail = content.slice(-(MAX_TOOL_RESULT_CHARS - 8_000 - 200));
+  return {
+    content: `${head}\n\n[... ${content.length - head.length - tail.length} characters omitted; showing the beginning and end ...]\n\n${tail}`,
+    truncated: true,
+  };
 }

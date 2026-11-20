@@ -8,8 +8,11 @@ import {
   Folder,
   Globe,
   Image as ImageIcon,
+  ListTodo,
   Loader2,
+  MessageCircleQuestion,
   Search,
+  SquareTerminal,
   Terminal,
 } from "lucide-react";
 import type { ToolMessage } from "../lib/store.js";
@@ -24,12 +27,19 @@ export const TOOL_LABEL: Record<string, string> = {
   read_file: "读取文件",
   write_file: "写入文件",
   edit_file: "编辑文件",
+  apply_patch: "应用补丁",
   list_files: "列出目录",
   grep: "搜索内容",
   glob: "查找文件",
   web_search: "联网搜索",
   web_fetch: "抓取网页",
   read_image: "查看图片",
+  job_output: "作业输出",
+  job_list: "作业列表",
+  job_kill: "停止作业",
+  write_stdin: "写入输入",
+  todo_write: "任务清单",
+  ask_user_question: "询问用户",
 };
 
 function parseArguments(raw: string): Record<string, unknown> {
@@ -90,6 +100,12 @@ function StandardToolCard({ message }: { message: ToolMessage }) {
   const args = parseArguments(message.arguments);
   const label = TOOL_LABEL[message.toolName] ?? message.toolName;
   const status = statusMeta(message);
+  const diff = typeof meta.diff === "string" && meta.diff !== "" ? meta.diff : undefined;
+  const todos = Array.isArray(meta.todos)
+    ? (meta.todos as Array<{ content: string; status: string }>)
+    : undefined;
+  const jobId = typeof meta.jobId === "string" ? meta.jobId : undefined;
+  const jobRunning = meta.running === true;
   const command =
     typeof meta.command === "string"
       ? meta.command
@@ -140,28 +156,38 @@ function StandardToolCard({ message }: { message: ToolMessage }) {
   };
 
   const Icon =
-    message.toolName === "run_command"
-      ? Terminal
-      : message.toolName === "web_search" || message.toolName === "web_fetch"
-        ? Globe
-        : message.toolName === "read_image"
-          ? ImageIcon
-        : message.toolName === "grep"
-          ? Search
-          : message.toolName === "list_files" ||
-              message.toolName === "glob"
-            ? Folder
-            : message.toolName === "read_file" ||
-                message.toolName === "write_file" ||
-                message.toolName === "edit_file"
-              ? FileText
-              : AlertTriangle;
+    message.toolName === "run_command" ||
+    message.toolName === "job_output" ||
+    message.toolName === "job_list" ||
+    message.toolName === "job_kill" ||
+    message.toolName === "write_stdin"
+      ? SquareTerminal
+      : message.toolName === "todo_write"
+        ? ListTodo
+        : message.toolName === "ask_user_question"
+          ? MessageCircleQuestion
+          : message.toolName === "web_search" || message.toolName === "web_fetch"
+            ? Globe
+            : message.toolName === "read_image"
+              ? ImageIcon
+              : message.toolName === "grep"
+                ? Search
+                : message.toolName === "list_files" ||
+                    message.toolName === "glob"
+                  ? Folder
+                  : message.toolName === "read_file" ||
+                      message.toolName === "write_file" ||
+                      message.toolName === "edit_file" ||
+                      message.toolName === "apply_patch"
+                    ? FileText
+                    : AlertTriangle;
 
   const showFileContent =
     message.toolName === "read_file" ||
     message.toolName === "list_files" ||
     message.toolName === "write_file" ||
     message.toolName === "edit_file" ||
+    message.toolName === "apply_patch" ||
     message.toolName === "grep" ||
     message.toolName === "glob" ||
     message.toolName === "web_search" ||
@@ -335,6 +361,37 @@ function StandardToolCard({ message }: { message: ToolMessage }) {
         </div>
       </div>
 
+      {todos ? <TodoChecklist todos={todos} /> : null}
+
+      {diff ? <DiffView diff={diff} /> : null}
+
+      {jobId ? (
+        <div className="flex items-center gap-2 border-t border-border/60 bg-[#080a0f] px-3.5 py-2 font-mono text-[10px] text-muted-foreground/80">
+          <SquareTerminal className="h-3 w-3 text-sky-300/80" />
+          <span>job {jobId}</span>
+          <span
+            className={cn(
+              "rounded-full border px-1.5 py-px text-[9px]",
+              jobRunning
+                ? "border-sky-400/30 bg-sky-400/10 text-sky-300"
+                : "border-border bg-muted/40 text-muted-foreground",
+            )}
+          >
+            {jobRunning ? "运行中" : "已结束"}
+          </span>
+          {typeof meta.exitCode === "number" ? (
+            <span>exit {meta.exitCode}</span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {message.toolName === "ask_user_question" && message.status === "running" ? (
+        <div className="flex items-center gap-2 border-t border-border/60 bg-[#080a0f] px-4 py-2 text-[11px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin text-primary/80" />
+          等待用户回答…
+        </div>
+      ) : null}
+
       {imageDataUrl ? (
         <div className="border-t border-border/60 bg-[#080a0f] p-3">
           <img
@@ -447,6 +504,85 @@ function StandardToolCard({ message }: { message: ToolMessage }) {
       message.status !== "running"
         ? renderCollapsibleResult("output")
         : null}
+    </div>
+  );
+}
+
+function TodoChecklist({
+  todos,
+}: {
+  todos: Array<{ content: string; status: string }>;
+}) {
+  const completed = todos.filter((todo) => todo.status === "completed").length;
+  return (
+    <div className="border-t border-border/60 bg-muted/10 px-3.5 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground/60">
+        <ListTodo className="h-3 w-3" />
+        todo · {completed}/{todos.length}
+      </div>
+      <ul className="space-y-1">
+        {todos.map((todo, index) => (
+          <li
+            key={`${index}-${todo.content}`}
+            className={cn(
+              "flex items-start gap-2 text-[11px] leading-5",
+              todo.status === "completed" && "text-muted-foreground/60",
+            )}
+          >
+            <span
+              className={cn(
+                "mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border text-[8px]",
+                todo.status === "completed"
+                  ? "border-primary/40 bg-primary/15 text-primary"
+                  : todo.status === "in_progress"
+                    ? "border-sky-400/50 bg-sky-400/10 text-sky-300"
+                    : "border-border text-transparent",
+              )}
+            >
+              {todo.status === "completed" ? (
+                <Check className="h-2.5 w-2.5" />
+              ) : todo.status === "in_progress" ? (
+                <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              ) : (
+                "·"
+              )}
+            </span>
+            <span
+              className={cn(
+                "min-w-0 flex-1",
+                todo.status === "completed" && "line-through",
+              )}
+            >
+              {todo.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.split("\n");
+  return (
+    <div className="max-h-72 overflow-auto border-t border-border/60 bg-[#080a0f] px-3 py-2 font-mono text-[11px] leading-5">
+      {lines.map((line, index) => {
+        const className =
+          line.startsWith("+++") || line.startsWith("---")
+            ? "text-muted-foreground/60"
+            : line.startsWith("@@")
+              ? "text-sky-300/90"
+              : line.startsWith("+")
+                ? "text-primary/90"
+                : line.startsWith("-")
+                  ? "text-danger/90"
+                  : "text-foreground/70";
+        return (
+          <div key={index} className={cn("whitespace-pre-wrap break-words", className)}>
+            {line || " "}
+          </div>
+        );
+      })}
     </div>
   );
 }
