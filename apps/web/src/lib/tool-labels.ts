@@ -17,18 +17,20 @@ export function isPaperTool(name: string): boolean {
 }
 
 export const SCHEDULE_TOOL_LABEL: Record<string, string> = {
-  memory_search: "检索记忆",
-  memory_upsert: "保存记忆",
-  memory_delete: "删除记忆",
+  preferences_get: "读取排期偏好",
+  preferences_update: "保存排期偏好",
   task_list: "任务列表",
   task_upsert: "保存任务",
   task_delete: "删除任务",
-  plan_get: "查看计划",
-  plan_schedule: "生成周计划",
-  plan_replan: "重排计划",
+  fixed_event_list: "固定安排",
+  fixed_event_upsert: "保存固定安排",
+  fixed_event_delete: "删除固定安排",
+  plan_get: "查看日程",
+  plan_schedule: "生成日程",
+  plan_replan: "重排日程",
   block_update: "更新时段",
-  plan_render: "渲染计划表",
-  plan_email: "邮件发送计划",
+  plan_render: "渲染日程图",
+  plan_email: "邮件发送日程",
 };
 
 export const SCHEDULE_TOOL_NAMES = new Set(Object.keys(SCHEDULE_TOOL_LABEL));

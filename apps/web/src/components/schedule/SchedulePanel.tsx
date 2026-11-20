@@ -3,7 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
-  Brain,
+  CalendarClock,
   CalendarDays,
   Check,
   Clock3,
@@ -13,26 +13,21 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Settings,
   Trash2,
   X,
 } from "lucide-react";
 import type {
-  ScheduleMemory,
-  ScheduleMemoryCategory,
-  ScheduleOverview,
+  ScheduleFixedEvent,
+  ScheduleFixedEventKind,
+  SchedulePreferences,
+  SchedulePreferencesUpdateInput,
   ScheduleTask,
 } from "@codefly/protocol";
 import { useAppStore } from "../../lib/store.js";
 import { cn } from "../../lib/utils.js";
 import { Button, Modal } from "../ui.js";
-
-const CATEGORY_LABEL: Record<ScheduleMemoryCategory, string> = {
-  preference: "偏好",
-  constraint: "约束",
-  routine: "习惯",
-  goal: "目标",
-  context: "背景",
-};
+import { ScheduleAgenda } from "./ScheduleAgenda.js";
 
 const PRIORITY_LABEL: Record<string, string> = {
   urgent: "紧急",
@@ -55,156 +50,378 @@ function minutesLabel(minutes: number): string {
   return rest === 0 ? `${hours}h` : `${hours}h${rest}m`;
 }
 
-function WeekTable({ overview }: { overview: ScheduleOverview }) {
-  const plan = overview.plan;
-  const days = Array.from({ length: 7 }, (_, index) => {
-    const date = addDays(overview.weekStart, index);
-    const label = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][index]!;
-    return { date, label };
-  });
-  const tasks = new Map(overview.tasks.map((task) => [task.id, task]));
-  const rows = new Map<
-    string,
-    {
-      task: ScheduleTask | undefined;
-      title: string;
-      cells: Array<Array<{ id: string; start: string; end: string; status: string }>>;
-    }
-  >();
-  for (const block of plan?.blocks ?? []) {
-    let row = rows.get(block.taskId);
-    if (row === undefined) {
-      const task = tasks.get(block.taskId);
-      row = {
-        task,
-        title: task?.title ?? "已删除任务",
-        cells: days.map(() => []),
-      };
-      rows.set(block.taskId, row);
-    }
-    const index = days.findIndex((day) => day.date === block.date);
-    if (index >= 0) {
-      row.cells[index]!.push({
-        id: block.id,
-        start: block.start,
-        end: block.end,
-        status: block.status,
-      });
-    }
-  }
+function PreferencesPanel({
+  preferences,
+  configured,
+  onSave,
+}: {
+  preferences: SchedulePreferences;
+  configured: boolean;
+  onSave: (input: SchedulePreferencesUpdateInput) => Promise<boolean>;
+}) {
+  const [workdays, setWorkdays] = useState<number[]>(preferences.workdays);
+  const [workStart, setWorkStart] = useState(preferences.workStart);
+  const [workEnd, setWorkEnd] = useState(preferences.workEnd);
+  const [timezone, setTimezone] = useState(preferences.timezone);
+  const [maxFocusMinutes, setMaxFocusMinutes] = useState(
+    String(preferences.maxFocusMinutes),
+  );
+  const [minBlockMinutes, setMinBlockMinutes] = useState(
+    String(preferences.minBlockMinutes),
+  );
+  const [dailyFocusLimitMinutes, setDailyFocusLimitMinutes] = useState(
+    String(preferences.dailyFocusLimitMinutes),
+  );
+  const [bufferPercent, setBufferPercent] = useState(
+    String(Math.round(preferences.bufferRatio * 100)),
+  );
+  const [gapMinutes, setGapMinutes] = useState(String(preferences.gapMinutes));
+  const [breaks, setBreaks] = useState(
+    preferences.breaks.map((brk) => ({ ...brk })),
+  );
+  const [rules, setRules] = useState(preferences.rules.join("\n"));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setWorkdays(preferences.workdays);
+    setWorkStart(preferences.workStart);
+    setWorkEnd(preferences.workEnd);
+    setTimezone(preferences.timezone);
+    setMaxFocusMinutes(String(preferences.maxFocusMinutes));
+    setMinBlockMinutes(String(preferences.minBlockMinutes));
+    setDailyFocusLimitMinutes(String(preferences.dailyFocusLimitMinutes));
+    setBufferPercent(String(Math.round(preferences.bufferRatio * 100)));
+    setGapMinutes(String(preferences.gapMinutes));
+    setBreaks(preferences.breaks.map((brk) => ({ ...brk })));
+    setRules(preferences.rules.join("\n"));
+  }, [preferences]);
+
+  const toggleDay = (day: number): void => {
+    setWorkdays((current) =>
+      current.includes(day)
+        ? current.filter((value) => value !== day)
+        : [...current, day].sort((a, b) => a - b),
+    );
+  };
+
+  const save = async (): Promise<void> => {
+    if (saving || workdays.length === 0) return;
+    setSaving(true);
+    await onSave({
+      timezone: timezone.trim() || preferences.timezone,
+      workdays,
+      workStart,
+      workEnd,
+      breaks: breaks.map((brk) => ({
+        label: brk.label.trim() || "休息",
+        start: brk.start,
+        end: brk.end,
+      })),
+      maxFocusMinutes: Number(maxFocusMinutes),
+      minBlockMinutes: Number(minBlockMinutes),
+      bufferRatio: Math.min(1, Math.max(0, Number(bufferPercent) / 100)),
+      gapMinutes: Number(gapMinutes),
+      dailyFocusLimitMinutes: Number(dailyFocusLimitMinutes),
+      rules: rules
+        .split(/\r?\n/)
+        .map((rule) => rule.trim())
+        .filter((rule) => rule !== ""),
+    });
+    setSaving(false);
+  };
+
+  const numberInput =
+    "h-8 w-full rounded-lg border border-border bg-background px-2 text-xs focus:border-primary/40 focus:outline-none";
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-border/80">
-      <table className="w-full min-w-[760px] border-collapse text-[11px]">
-        <thead>
-          <tr className="bg-muted/40 text-left text-muted-foreground">
-            <th className="w-[220px] border-b border-border/70 px-2.5 py-2 font-medium">
-              任务
-            </th>
-            {days.map((day) => (
-              <th
-                key={day.date}
-                className="border-b border-l border-border/70 px-2 py-2 font-medium"
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-medium">排期偏好与规则</p>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            {configured
+              ? "这些设置会直接决定排期；修改后下一次 plan_schedule 生效。"
+              : "尚未配置，当前显示默认值；保存后助手会读取这些设置。"}
+          </p>
+        </div>
+        <span className="rounded-full border border-border bg-muted/30 px-2 py-0.5 text-[9px] text-muted-foreground">
+          {preferences.timezone}
+        </span>
+      </div>
+
+      <div className="rounded-xl border border-border/70 bg-background/40 p-3">
+        <p className="mb-2 text-[10px] font-medium text-muted-foreground">工作日</p>
+        <div className="flex flex-wrap gap-1.5">
+          {["一", "二", "三", "四", "五", "六", "日"].map((label, index) => {
+            const day = index + 1;
+            const active = workdays.includes(day);
+            return (
+              <button
+                key={day}
+                type="button"
+                onClick={() => toggleDay(day)}
+                className={cn(
+                  "h-7 w-9 rounded-lg border text-[11px] transition-colors",
+                  active
+                    ? "border-primary/40 bg-primary/15 text-primary"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground",
+                )}
               >
-                {day.label}
-                <span className="ml-1 font-mono text-[9px] text-muted-foreground/50">
-                  {day.date.slice(5)}
-                </span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.size === 0 ? (
-            <tr>
-              <td
-                colSpan={8}
-                className="px-3 py-8 text-center text-[11px] text-muted-foreground/60"
-              >
-                这一周还没有计划。在对话里让助手生成，或先添加任务。
-              </td>
-            </tr>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            上班时间
+          </span>
+          <input
+            type="time"
+            value={workStart}
+            onChange={(event) => setWorkStart(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            下班时间
+          </span>
+          <input
+            type="time"
+            value={workEnd}
+            onChange={(event) => setWorkEnd(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            最长专注（分钟）
+          </span>
+          <input
+            type="number"
+            min={15}
+            max={480}
+            value={maxFocusMinutes}
+            onChange={(event) => setMaxFocusMinutes(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            最小任务块（分钟）
+          </span>
+          <input
+            type="number"
+            min={5}
+            max={600}
+            value={minBlockMinutes}
+            onChange={(event) => setMinBlockMinutes(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            每日专注上限（分钟）
+          </span>
+          <input
+            type="number"
+            min={30}
+            max={1440}
+            value={dailyFocusLimitMinutes}
+            onChange={(event) => setDailyFocusLimitMinutes(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            时区
+          </span>
+          <input
+            value={timezone}
+            onChange={(event) => setTimezone(event.target.value)}
+            className={numberInput}
+            placeholder="Asia/Shanghai"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            预估缓冲（%）· 0 = 精确按估时排
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={bufferPercent}
+            onChange={(event) => setBufferPercent(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">
+            块间隙（分钟）· 0 = 紧挨着排
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={60}
+            value={gapMinutes}
+            onChange={(event) => setGapMinutes(event.target.value)}
+            className={numberInput}
+          />
+        </label>
+      </div>
+
+      <div className="rounded-xl border border-border/70 bg-background/40 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-[10px] font-medium text-muted-foreground">休息时段</p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 text-[10px]"
+            onClick={() =>
+              setBreaks((current) => [
+                ...current,
+                { label: "休息", start: "12:00", end: "13:00" },
+              ])
+            }
+          >
+            <Plus className="h-3 w-3" />
+            添加
+          </Button>
+        </div>
+        <div className="space-y-1.5">
+          {breaks.length === 0 ? (
+            <p className="text-[10px] text-muted-foreground/60">没有休息时段。</p>
           ) : (
-            [...rows.entries()].map(([taskId, row]) => (
-              <tr key={taskId} className="align-top">
-                <td className="border-b border-border/50 px-2.5 py-2">
-                  <span className="block font-medium text-foreground/90">
-                    {row.title}
-                  </span>
-                  <span className="mt-0.5 block text-[10px] text-muted-foreground/60">
-                    {row.task
-                      ? `${PRIORITY_LABEL[row.task.priority] ?? row.task.priority} · 剩余 ${minutesLabel(
-                          row.task.remainingMinutes,
-                        )}`
-                      : "任务已删除"}
-                  </span>
-                </td>
-                {row.cells.map((cell, index) => (
-                  <td
-                    key={days[index]?.date ?? index}
-                    className="border-b border-l border-border/50 px-1.5 py-2"
-                  >
-                    {cell.length === 0 ? (
-                      <span className="text-muted-foreground/20">—</span>
-                    ) : (
-                      <span className="flex flex-col gap-0.5">
-                        {cell.map((block) => (
-                          <span
-                            key={block.id}
-                            className={cn(
-                              "font-mono text-[10px]",
-                              block.status === "done"
-                                ? "text-primary"
-                                : block.status === "skipped"
-                                  ? "text-muted-foreground/40 line-through"
-                                  : "text-foreground/80",
-                            )}
-                          >
-                            {block.status === "done"
-                              ? "✓ "
-                              : block.status === "skipped"
-                                ? "— "
-                                : ""}
-                            {block.start}-{block.end}
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </td>
-                ))}
-              </tr>
+            breaks.map((brk, index) => (
+              <div key={index} className="flex flex-wrap items-center gap-1.5">
+                <input
+                  value={brk.label}
+                  onChange={(event) =>
+                    setBreaks((current) =>
+                      current.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? { ...item, label: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                  className="h-7 w-24 rounded-lg border border-border bg-background px-2 text-[11px] focus:border-primary/40 focus:outline-none"
+                  placeholder="名称"
+                />
+                <input
+                  type="time"
+                  value={brk.start}
+                  onChange={(event) =>
+                    setBreaks((current) =>
+                      current.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? { ...item, start: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                  className="h-7 rounded-lg border border-border bg-background px-2 text-[11px] focus:border-primary/40 focus:outline-none"
+                />
+                <span className="text-[10px] text-muted-foreground">-</span>
+                <input
+                  type="time"
+                  value={brk.end}
+                  onChange={(event) =>
+                    setBreaks((current) =>
+                      current.map((item, itemIndex) =>
+                        itemIndex === index
+                          ? { ...item, end: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                  className="h-7 rounded-lg border border-border bg-background px-2 text-[11px] focus:border-primary/40 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="删除休息时段"
+                  onClick={() =>
+                    setBreaks((current) =>
+                      current.filter((_, itemIndex) => itemIndex !== index),
+                    )
+                  }
+                  className="rounded p-1 text-muted-foreground/50 hover:bg-danger/10 hover:text-danger"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
             ))
           )}
-        </tbody>
-      </table>
+        </div>
+      </div>
+
+      <label className="block">
+        <span className="mb-1 block text-[10px] text-muted-foreground">
+          规则（每行一条；用于无法结构化的约束，如“同一任务只有跨饭点才拆分”）
+        </span>
+        <textarea
+          value={rules}
+          onChange={(event) => setRules(event.target.value)}
+          rows={4}
+          className="w-full resize-y rounded-lg border border-border bg-background px-2 py-1.5 text-xs leading-5 focus:border-primary/40 focus:outline-none"
+          placeholder="同一任务同一天只在跨饭点时拆分。&#10;课程只在实际教学周生效。"
+        />
+      </label>
+
+      <div className="flex justify-end">
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => void save()}
+          disabled={saving || workdays.length === 0}
+        >
+          {saving ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Check className="h-3 w-3" />
+          )}
+          保存偏好
+        </Button>
+      </div>
     </div>
   );
 }
 
-function MemoryEditor({
+const WEEKDAY_OPTIONS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function FixedEventEditor({
   initial,
   onSave,
   onCancel,
 }: {
-  initial?: ScheduleMemory | null;
+  initial?: ScheduleFixedEvent | null;
   onSave: (value: {
     title: string;
-    key: string;
-    category: ScheduleMemoryCategory;
-    content: string;
-    tags: string;
-    pinned: boolean;
+    kind: ScheduleFixedEventKind;
+    weekday: number | null;
+    date: string | null;
+    start: string;
+    end: string;
+    location: string;
+    note: string;
   }) => Promise<void>;
   onCancel: () => void;
 }) {
   const [title, setTitle] = useState(initial?.title ?? "");
-  const [key, setKey] = useState(initial?.key ?? "");
-  const [category, setCategory] = useState<ScheduleMemoryCategory>(
-    initial?.category ?? "context",
+  const [kind, setKind] = useState<ScheduleFixedEventKind>(
+    initial?.kind ?? "weekly",
   );
-  const [content, setContent] = useState(initial?.content ?? "");
-  const [tags, setTags] = useState(initial?.tags.join(", ") ?? "");
-  const [pinned, setPinned] = useState(initial?.pinned ?? false);
+  const [weekday, setWeekday] = useState<number>(initial?.weekday ?? 1);
+  const [date, setDate] = useState(initial?.date ?? "");
+  const [start, setStart] = useState(initial?.start ?? "08:00");
+  const [end, setEnd] = useState(initial?.end ?? "09:00");
+  const [location, setLocation] = useState(initial?.location ?? "");
+  const [note, setNote] = useState(initial?.note ?? "");
   const [saving, setSaving] = useState(false);
 
   const save = async (): Promise<void> => {
@@ -212,75 +429,109 @@ function MemoryEditor({
     setSaving(true);
     await onSave({
       title: title.trim(),
-      key: key.trim(),
-      category,
-      content,
-      tags,
-      pinned,
+      kind,
+      weekday: kind === "weekly" ? weekday : null,
+      date: kind === "once" ? date : null,
+      start,
+      end,
+      location: location.trim(),
+      note,
     });
     setSaving(false);
   };
 
+  const inputClass =
+    "h-8 w-full rounded-lg border border-border bg-background px-2 text-xs focus:border-primary/40 focus:outline-none";
+
   return (
-    <div className="space-y-2 rounded-xl border border-primary/25 bg-primary/5 p-3">
+    <div className="space-y-2 rounded-xl border border-teal-500/30 bg-teal-500/5 p-3">
       <div className="grid gap-2 sm:grid-cols-2">
         <label className="block">
           <span className="mb-1 block text-[10px] text-muted-foreground">标题</span>
           <input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            className="h-8 w-full rounded-lg border border-border bg-background px-2 text-xs focus:border-primary/40 focus:outline-none"
-            placeholder="例如：上午效率最高"
+            className={inputClass}
+            placeholder="例如：组会 / 线性代数"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">重复</span>
+          <select
+            value={kind}
+            onChange={(event) =>
+              setKind(event.target.value as ScheduleFixedEventKind)
+            }
+            className="h-8 w-full rounded-lg border border-border bg-background px-2 text-[11px] focus:outline-none"
+          >
+            <option value="weekly">每周固定</option>
+            <option value="once">仅一次</option>
+          </select>
+        </label>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-4">
+        {kind === "weekly" ? (
+          <label className="block">
+            <span className="mb-1 block text-[10px] text-muted-foreground">星期</span>
+            <select
+              value={weekday}
+              onChange={(event) => setWeekday(Number(event.target.value))}
+              className="h-8 w-full rounded-lg border border-border bg-background px-2 text-[11px] focus:outline-none"
+            >
+              {WEEKDAY_OPTIONS.map((label, index) => (
+                <option key={label} value={index + 1}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label className="block">
+            <span className="mb-1 block text-[10px] text-muted-foreground">日期</span>
+            <input
+              type="date"
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+              className={inputClass}
+            />
+          </label>
+        )}
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">开始</span>
+          <input
+            type="time"
+            value={start}
+            onChange={(event) => setStart(event.target.value)}
+            className={inputClass}
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[10px] text-muted-foreground">结束</span>
+          <input
+            type="time"
+            value={end}
+            onChange={(event) => setEnd(event.target.value)}
+            className={inputClass}
           />
         </label>
         <label className="block">
           <span className="mb-1 block text-[10px] text-muted-foreground">
-            唯一 key（可选）
+            地点（可选）
           </span>
           <input
-            value={key}
-            onChange={(event) => setKey(event.target.value)}
-            disabled={initial !== undefined && initial !== null}
-            className="h-8 w-full rounded-lg border border-border bg-background px-2 font-mono text-xs focus:border-primary/40 focus:outline-none disabled:opacity-50"
-            placeholder="morning_focus"
+            value={location}
+            onChange={(event) => setLocation(event.target.value)}
+            className={inputClass}
+            placeholder="如 3-130 / 线上"
           />
-        </label>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={category}
-          onChange={(event) =>
-            setCategory(event.target.value as ScheduleMemoryCategory)
-          }
-          className="h-8 rounded-lg border border-border bg-background px-2 text-[11px] focus:outline-none"
-        >
-          {Object.entries(CATEGORY_LABEL).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <input
-          value={tags}
-          onChange={(event) => setTags(event.target.value)}
-          className="h-8 min-w-[10rem] flex-1 rounded-lg border border-border bg-background px-2 text-[11px] focus:border-primary/40 focus:outline-none"
-          placeholder="标签，用逗号分隔"
-        />
-        <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={pinned}
-            onChange={(event) => setPinned(event.target.checked)}
-          />
-          置顶
         </label>
       </div>
       <textarea
-        value={content}
-        onChange={(event) => setContent(event.target.value)}
-        rows={3}
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        rows={2}
         className="w-full resize-y rounded-lg border border-border bg-background px-2 py-1.5 text-xs leading-5 focus:border-primary/40 focus:outline-none"
-        placeholder="用一两句话描述这条记忆，助手会在排期时参考。"
+        placeholder="备注（可选）"
       />
       <div className="flex justify-end gap-1.5">
         <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
@@ -290,7 +541,11 @@ function MemoryEditor({
           variant="primary"
           size="sm"
           onClick={() => void save()}
-          disabled={saving || title.trim() === ""}
+          disabled={
+            saving ||
+            title.trim() === "" ||
+            (kind === "weekly" ? false : date === "")
+          }
         >
           {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
           保存
@@ -307,9 +562,12 @@ export function SchedulePanel() {
   const loading = useAppStore((state) => state.scheduleLoading);
   const emailSettings = useAppStore((state) => state.scheduleEmailSettings);
   const loadOverview = useAppStore((state) => state.loadScheduleOverview);
-  const createMemory = useAppStore((state) => state.createScheduleMemory);
-  const updateMemory = useAppStore((state) => state.updateScheduleMemory);
-  const deleteMemory = useAppStore((state) => state.deleteScheduleMemory);
+  const updatePreferences = useAppStore(
+    (state) => state.updateSchedulePreferences,
+  );
+  const createFixedEvent = useAppStore((state) => state.createScheduleFixedEvent);
+  const updateFixedEvent = useAppStore((state) => state.updateScheduleFixedEvent);
+  const deleteFixedEvent = useAppStore((state) => state.deleteScheduleFixedEvent);
   const updateTask = useAppStore((state) => state.updateScheduleTask);
   const deleteTask = useAppStore((state) => state.deleteScheduleTask);
   const sendScheduleEmail = useAppStore((state) => state.sendScheduleEmailNow);
@@ -317,12 +575,14 @@ export function SchedulePanel() {
     (state) => state.openScheduleEmailSettings,
   );
 
-  const [tab, setTab] = useState<"plan" | "memories" | "tasks">("plan");
-  const [weekStart, setWeekStart] = useState<string | undefined>(undefined);
-  const [memoryEditor, setMemoryEditor] = useState<
-    { id: string | null; initial: ScheduleMemory | null } | null
+  const [tab, setTab] = useState<"plan" | "fixed" | "preferences" | "tasks">(
+    "plan",
+  );
+  const [rangeStart, setRangeStart] = useState<string | undefined>(undefined);
+  const [fixedEditor, setFixedEditor] = useState<
+    { id: string | null; initial: ScheduleFixedEvent | null } | null
   >(null);
-  const [pendingMemoryDelete, setPendingMemoryDelete] = useState<string | null>(
+  const [pendingFixedDelete, setPendingFixedDelete] = useState<string | null>(
     null,
   );
   const [pendingTaskDelete, setPendingTaskDelete] = useState<string | null>(
@@ -332,8 +592,8 @@ export function SchedulePanel() {
 
   useEffect(() => {
     if (!open) return;
-    void loadOverview(weekStart);
-  }, [open, weekStart]); // eslint-disable-line react-hooks/exhaustive-deps
+    void loadOverview(rangeStart);
+  }, [open, rangeStart]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeTasks = useMemo(
     () =>
@@ -349,44 +609,29 @@ export function SchedulePanel() {
     [overview],
   );
 
-  const saveMemory = async (value: {
+  const saveFixedEvent = async (value: {
     title: string;
-    key: string;
-    category: ScheduleMemoryCategory;
-    content: string;
-    tags: string;
-    pinned: boolean;
+    kind: ScheduleFixedEventKind;
+    weekday: number | null;
+    date: string | null;
+    start: string;
+    end: string;
+    location: string;
+    note: string;
   }): Promise<void> => {
-    const tags = value.tags
-      .split(",")
-      .map((tag) => tag.trim())
-      .filter((tag) => tag !== "");
-    if (memoryEditor?.id) {
-      const ok = await updateMemory(memoryEditor.id, {
-        title: value.title,
-        category: value.category,
-        content: value.content,
-        tags,
-        pinned: value.pinned,
-      });
-      if (ok) setMemoryEditor(null);
+    if (fixedEditor?.id) {
+      const ok = await updateFixedEvent(fixedEditor.id, value);
+      if (ok) setFixedEditor(null);
     } else {
-      const ok = await createMemory({
-        title: value.title,
-        key: value.key || undefined,
-        category: value.category,
-        content: value.content,
-        tags,
-        pinned: value.pinned,
-      });
-      if (ok) setMemoryEditor(null);
+      const ok = await createFixedEvent(value);
+      if (ok) setFixedEditor(null);
     }
   };
 
   const sendEmail = async (): Promise<void> => {
-    if (!overview?.plan || emailing) return;
+    if (!overview?.window || emailing) return;
     setEmailing(true);
-    await sendScheduleEmail(overview.plan.weekStart);
+    await sendScheduleEmail(overview.rangeStart, 7);
     setEmailing(false);
   };
 
@@ -395,7 +640,7 @@ export function SchedulePanel() {
       open={open}
       onClose={close}
       title="日程面板"
-      description="本周计划、结构化记忆与任务；删除和编辑会同步到助手使用的全局数据。"
+      description="未来 7 天日程、排期偏好与任务；删除和编辑会同步到助手使用的全局数据。"
       className="max-w-6xl"
     >
       <div className="flex min-h-[30rem] flex-col gap-3">
@@ -403,9 +648,10 @@ export function SchedulePanel() {
           <div className="flex rounded-lg border border-border bg-background p-0.5">
             {(
               [
-                ["plan", "本周计划", CalendarDays],
-                ["memories", "记忆", Brain],
+                ["plan", "7 天日程", CalendarDays],
+                ["fixed", "固定", CalendarClock],
                 ["tasks", "任务", ListTodo],
+                ["preferences", "偏好", Settings],
               ] as const
             ).map(([value, label, Icon]) => (
               <button
@@ -430,27 +676,37 @@ export function SchedulePanel() {
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label="上一周"
-                onClick={() => setWeekStart(addDays(overview.weekStart, -7))}
+                aria-label="前 7 天"
+                onClick={() => setRangeStart(addDays(overview.rangeStart, -7))}
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
               </Button>
               <span className="font-mono text-[10px] text-muted-foreground">
-                {overview.weekStart} ~ {overview.weekEnd}
+                {overview.rangeStart} ~ {overview.rangeEnd}
               </span>
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label="下一周"
-                onClick={() => setWeekStart(addDays(overview.weekStart, 7))}
+                aria-label="后 7 天"
+                onClick={() => setRangeStart(addDays(overview.rangeStart, 7))}
               >
                 <ArrowRight className="h-3.5 w-3.5" />
               </Button>
+              {overview.rangeStart !== overview.today ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-1.5 text-[10px]"
+                  onClick={() => setRangeStart(undefined)}
+                >
+                  回到今天
+                </Button>
+              ) : null}
               <Button
                 variant="ghost"
                 size="icon"
                 aria-label="刷新"
-                onClick={() => void loadOverview(weekStart)}
+                onClick={() => void loadOverview(rangeStart)}
               >
                 {loading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -497,11 +753,15 @@ export function SchedulePanel() {
                 {!overview.preferencesConfigured ? (
                   <p className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] leading-5 text-warning">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    还没有配置排期偏好。在对话里告诉助手你的工作时段、工作日和休息时间，它会写入
-                    <code className="mx-1 rounded bg-muted/50 px-1 font-mono text-[10px]">
-                      scheduling_preferences
-                    </code>
-                    记忆。
+                    还没有配置排期偏好。在对话里告诉助手你的工作时段、工作日和休息时间，或直接到
+                    <button
+                      type="button"
+                      onClick={() => setTab("preferences")}
+                      className="mx-1 rounded bg-muted/50 px-1 font-mono text-[10px] underline-offset-2 hover:underline"
+                    >
+                      偏好
+                    </button>
+                    页编辑。
                   </p>
                 ) : null}
 
@@ -518,6 +778,9 @@ export function SchedulePanel() {
                   </span>
                   <span>最长专注 {overview.preferences.maxFocusMinutes}m</span>
                   <span>每日上限 {overview.preferences.dailyFocusLimitMinutes}m</span>
+                  <span>缓冲 {Math.round(overview.preferences.bufferRatio * 100)}%</span>
+                  <span>块间隙 {overview.preferences.gapMinutes}m</span>
+                  <span>规则 {overview.preferences.rules.length} 条</span>
                   <span className="font-mono text-muted-foreground/50">
                     {overview.timezone}
                   </span>
@@ -525,11 +788,12 @@ export function SchedulePanel() {
 
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-lg border border-border/70 bg-background/40 px-2 py-1 text-[10px] text-muted-foreground">
-                    {overview.summary.taskCount} 项任务 · 计划{" "}
+                    {overview.summary.taskCount} 项任务 ·{" "}
+                    {overview.fixedEvents.length} 项固定安排 · 计划{" "}
                     {minutesLabel(overview.summary.totalPlannedMinutes)} · 已完成{" "}
                     {minutesLabel(overview.summary.doneMinutes)}
                   </span>
-                  {overview.plan ? (
+                  {overview.window ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -537,7 +801,7 @@ export function SchedulePanel() {
                       disabled={emailing || !emailSettings?.configured}
                       title={
                         emailSettings?.configured
-                          ? "发送计划表图片"
+                          ? "发送日程图片"
                           : "请先配置邮件设置"
                       }
                       onClick={() => void sendEmail()}
@@ -560,18 +824,18 @@ export function SchedulePanel() {
                       配置邮件
                     </Button>
                   ) : null}
-                  {overview.plan?.warnings.length ? (
+                  {overview.window?.warnings.length ? (
                     <span className="rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[9px] text-warning">
-                      {overview.plan.warnings.length} 条提醒
+                      {overview.window.warnings.length} 条提醒
                     </span>
                   ) : null}
                 </div>
 
-                <WeekTable overview={overview} />
+                <ScheduleAgenda agenda={overview.agenda} />
 
-                {overview.plan?.warnings.length ? (
+                {overview.window?.warnings.length ? (
                   <div className="rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
-                    {overview.plan.warnings.map((warning) => (
+                    {overview.window.warnings.map((warning) => (
                       <p
                         key={warning}
                         className="text-[10px] leading-5 text-warning"
@@ -582,12 +846,12 @@ export function SchedulePanel() {
                   </div>
                 ) : null}
 
-                {overview.plan?.unscheduled.length ? (
+                {overview.window?.unscheduled.length ? (
                   <div className="rounded-lg border border-border/70 bg-background/30 px-3 py-2">
                     <p className="text-[10px] font-medium text-foreground/80">
                       未排期任务
                     </p>
-                    {overview.plan.unscheduled.map((item) => (
+                    {overview.window.unscheduled.map((item) => (
                       <p
                         key={item.taskId}
                         className="text-[10px] leading-5 text-muted-foreground"
@@ -601,133 +865,116 @@ export function SchedulePanel() {
               </div>
             ) : null}
 
-            {tab === "memories" ? (
+            {tab === "fixed" ? (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <p className="text-[10px] text-muted-foreground">
-                    {overview.memories.length} 条结构化记忆 · 助手会按 key 精确读取
+                    {overview.fixedEvents.length} 项固定安排（课程、例会等） ·
+                    助手排期时会自动避开这些时段
                   </p>
                   <Button
                     variant="outline"
                     size="sm"
                     className="h-7 text-[10px]"
-                    onClick={() => setMemoryEditor({ id: null, initial: null })}
+                    onClick={() => setFixedEditor({ id: null, initial: null })}
                   >
                     <Plus className="h-3 w-3" />
-                    新增记忆
+                    新增固定安排
                   </Button>
                 </div>
 
-                {memoryEditor ? (
-                  <MemoryEditor
-                    initial={memoryEditor.initial}
-                    onSave={saveMemory}
-                    onCancel={() => setMemoryEditor(null)}
+                {fixedEditor ? (
+                  <FixedEventEditor
+                    initial={fixedEditor.initial}
+                    onSave={saveFixedEvent}
+                    onCancel={() => setFixedEditor(null)}
                   />
                 ) : null}
 
-                <div className="space-y-1.5">
-                  {overview.memories.length === 0 ? (
+                <div className="space-y-1">
+                  {overview.fixedEvents.length === 0 ? (
                     <p className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-xs text-muted-foreground">
-                      还没有记忆。可以在对话里让助手保存偏好，或点击「新增记忆」。
+                      还没有固定安排。可以在对话里把课程表发给助手，或点击「新增固定安排」。
                     </p>
                   ) : (
-                    overview.memories.map((memory) => (
+                    overview.fixedEvents.map((event) => (
                       <div
-                        key={memory.id}
-                        className="rounded-xl border border-border/70 bg-background/40 px-3 py-2.5"
+                        key={event.id}
+                        className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-2.5 py-1.5"
                       >
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-xs font-medium">
-                            {memory.title}
+                        <span className="min-w-0 flex-1 truncate text-[11px]">
+                          {event.title}
+                        </span>
+                        <span className="rounded bg-teal-500/15 px-1 py-px text-[8px] text-teal-600">
+                          {event.kind === "weekly" ? "每周" : "单次"}
+                        </span>
+                        <span className="font-mono text-[9px] text-muted-foreground/70">
+                          {event.kind === "weekly"
+                            ? `${WEEKDAY_OPTIONS[(event.weekday ?? 1) - 1]}`
+                            : (event.date ?? "")}
+                          {" "}
+                          {event.start}-{event.end}
+                        </span>
+                        {event.location.trim() !== "" ? (
+                          <span className="text-[9px] text-muted-foreground/60">
+                            {event.location.trim()}
                           </span>
-                          <span className="rounded bg-muted/50 px-1 py-px text-[8px] text-muted-foreground">
-                            {CATEGORY_LABEL[memory.category]}
-                          </span>
-                          {memory.pinned ? (
-                            <span className="text-[8px] text-warning">置顶</span>
-                          ) : null}
-                          <span className="font-mono text-[8px] text-muted-foreground/50">
-                            {memory.key}
-                          </span>
-                          <span className="ml-auto flex items-center gap-1">
-                            <button
-                              type="button"
-                              aria-label="编辑记忆"
-                              onClick={() =>
-                                setMemoryEditor({
-                                  id: memory.id,
-                                  initial: memory,
-                                })
-                              }
-                              className="rounded p-1 text-muted-foreground/50 hover:bg-muted/50 hover:text-foreground"
-                            >
-                              <Pencil className="h-3 w-3" />
-                            </button>
-                            {pendingMemoryDelete === memory.id ? (
-                              <span className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    void deleteMemory(memory.id);
-                                    setPendingMemoryDelete(null);
-                                  }}
-                                  className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] text-danger"
-                                >
-                                  确认删除
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setPendingMemoryDelete(null)}
-                                  className="rounded px-1 py-0.5 text-[9px] text-muted-foreground"
-                                >
-                                  取消
-                                </button>
-                              </span>
-                            ) : (
+                        ) : null}
+                        <span className="ml-auto flex items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label="编辑固定安排"
+                            onClick={() =>
+                              setFixedEditor({ id: event.id, initial: event })
+                            }
+                            className="rounded p-1 text-muted-foreground/50 hover:bg-muted/50 hover:text-foreground"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                          {pendingFixedDelete === event.id ? (
+                            <span className="flex items-center gap-1">
                               <button
                                 type="button"
-                                aria-label="删除记忆"
-                                onClick={() => setPendingMemoryDelete(memory.id)}
-                                className="rounded p-1 text-muted-foreground/50 hover:bg-danger/10 hover:text-danger"
+                                onClick={() => {
+                                  void deleteFixedEvent(event.id);
+                                  setPendingFixedDelete(null);
+                                }}
+                                className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] text-danger"
                               >
-                                <Trash2 className="h-3 w-3" />
+                                确认删除
                               </button>
-                            )}
-                          </span>
-                        </div>
-                        {memory.content.trim() !== "" ? (
-                          <p className="mt-1 whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">
-                            {memory.content}
-                          </p>
-                        ) : null}
-                        {memory.data !== null ? (
-                          <details className="mt-1">
-                            <summary className="cursor-pointer text-[9px] text-muted-foreground/60">
-                              结构化字段
-                            </summary>
-                            <pre className="mt-1 max-h-40 overflow-auto rounded bg-background/60 p-2 font-mono text-[9px] leading-4 text-muted-foreground">
-                              {JSON.stringify(memory.data, null, 2)}
-                            </pre>
-                          </details>
-                        ) : null}
-                        {memory.tags.length > 0 ? (
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {memory.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded bg-muted/40 px-1 py-px text-[8px] text-muted-foreground/70"
+                              <button
+                                type="button"
+                                onClick={() => setPendingFixedDelete(null)}
+                                className="rounded px-1 py-0.5 text-[9px] text-muted-foreground"
                               >
-                                #{tag}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
+                                取消
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              aria-label="删除固定安排"
+                              onClick={() => setPendingFixedDelete(event.id)}
+                              className="rounded p-1 text-muted-foreground/50 hover:bg-danger/10 hover:text-danger"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          )}
+                        </span>
                       </div>
                     ))
                   )}
                 </div>
               </div>
+            ) : null}
+
+            {tab === "preferences" ? (
+              <PreferencesPanel
+                preferences={overview.preferences}
+                configured={overview.preferencesConfigured}
+                onSave={updatePreferences}
+              />
             ) : null}
 
             {tab === "tasks" ? (
@@ -822,6 +1069,19 @@ function TaskRow({
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-2.5 py-1.5">
       <span className="min-w-0 flex-1 truncate text-[11px]">{task.title}</span>
+      {task.steps.length > 0 ? (
+        <span
+          className="rounded bg-primary/10 px-1 py-px text-[8px] text-primary"
+          title={task.steps
+            .map(
+              (step, index) =>
+                `${index + 1}. ${step.title}（${minutesLabel(step.minutes)}）`,
+            )
+            .join("\n")}
+        >
+          拆解 {task.steps.length} 步
+        </span>
+      ) : null}
       <span className="font-mono text-[9px] text-muted-foreground/60">
         剩余 {minutesLabel(task.remainingMinutes)} / 预估{" "}
         {minutesLabel(task.estimatedMinutes)}

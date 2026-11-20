@@ -1,7 +1,6 @@
 import { useState } from "react";
 import {
   AlertTriangle,
-  Brain,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
@@ -10,73 +9,30 @@ import {
   ListTodo,
   Loader2,
   Mail,
+  Settings,
 } from "lucide-react";
 import type {
-  ScheduleConfidence,
-  ScheduleMemory,
+  ScheduleAgendaModel,
+  SchedulePreferences,
   SchedulePriority,
   ScheduleTask,
+  ScheduleTaskAllocation,
 } from "@codefly/protocol";
 import type { ToolMessage } from "../../lib/store.js";
 import { useAppStore } from "../../lib/store.js";
 import { SCHEDULE_TOOL_LABEL } from "../../lib/tool-labels.js";
 import { cn, formatDuration } from "../../lib/utils.js";
 import { Button } from "../ui.js";
-
-interface CellBlock {
-  id: string;
-  start: string;
-  end: string;
-  status: "planned" | "done" | "skipped";
-  actualMinutes: number | null;
-  note: string;
-}
-
-interface TableRow {
-  taskId: string;
-  title: string;
-  priority: SchedulePriority;
-  confidence: ScheduleConfidence;
-  status: ScheduleTask["status"];
-  estimatedMinutes: number;
-  remainingMinutes: number;
-  actualMinutes: number;
-  totalMinutes: number;
-  days: CellBlock[][];
-}
-
-interface TableDay {
-  date: string;
-  label: string;
-}
-
-interface ScheduleTable {
-  weekStart: string;
-  weekEnd: string;
-  timezone: string;
-  days: TableDay[];
-  rows: TableRow[];
-  summary?: {
-    totalPlannedMinutes: number;
-    doneMinutes: number;
-    taskCount: number;
-  };
-  unscheduled?: Array<{
-    taskId: string;
-    title: string;
-    remainingMinutes: number;
-    reason: string;
-  }>;
-  warnings?: string[];
-  notes?: string;
-}
+import { ScheduleAgenda } from "./ScheduleAgenda.js";
 
 interface ScheduleToolData {
   view?: string;
-  table?: ScheduleTable | null;
-  weekStart?: string;
-  weekEnd?: string;
-  memories?: ScheduleMemory[];
+  agenda?: ScheduleAgendaModel | null;
+  rangeStart?: string;
+  rangeEnd?: string;
+  preferences?: SchedulePreferences;
+  configured?: boolean;
+  taskAllocations?: ScheduleTaskAllocation[];
   tasks?: ScheduleTask[];
   deletedId?: string;
   block?: {
@@ -102,12 +58,6 @@ const PRIORITY_LABEL: Record<SchedulePriority, string> = {
   high: "高",
   medium: "中",
   low: "低",
-};
-
-const CONFIDENCE_LABEL: Record<ScheduleConfidence, string> = {
-  low: "置信低",
-  medium: "置信中",
-  high: "置信高",
 };
 
 const PRIORITY_CLASS: Record<SchedulePriority, string> = {
@@ -153,155 +103,79 @@ function statusMeta(message: ToolMessage): {
   };
 }
 
-function PlanTable({ table }: { table: ScheduleTable }) {
+function PreferencesSummary({
+  preferences,
+  configured,
+}: {
+  preferences: SchedulePreferences;
+  configured: boolean;
+}) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-border/80">
-      <table className="w-full min-w-[720px] border-collapse text-[10px]">
-        <thead>
-          <tr className="bg-muted/40 text-left text-muted-foreground">
-            <th className="w-[220px] border-b border-border/70 px-2 py-1.5 font-medium">
-              任务
-            </th>
-            {table.days.map((day) => (
-              <th
-                key={day.date}
-                className="border-b border-l border-border/70 px-1.5 py-1.5 font-medium"
-              >
-                <span className="block">{day.label}</span>
-                <span className="block font-mono text-[8px] text-muted-foreground/60">
-                  {day.date.slice(5)}
-                </span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {table.rows.length === 0 ? (
-            <tr>
-              <td
-                colSpan={table.days.length + 1}
-                className="px-3 py-6 text-center text-[11px] text-muted-foreground/60"
-              >
-                这一周还没有已排入的任务
-              </td>
-            </tr>
-          ) : (
-            table.rows.map((row) => (
-              <tr key={row.taskId} className="align-top">
-                <td className="border-b border-border/50 px-2 py-1.5">
-                  <div className="flex items-start gap-1.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium text-foreground/90">
-                        {row.title}
-                      </span>
-                      <span className="mt-0.5 block text-[9px] text-muted-foreground/60">
-                        {PRIORITY_LABEL[row.priority]} · {CONFIDENCE_LABEL[row.confidence]} · 剩余{" "}
-                        {minutesLabel(row.remainingMinutes)}
-                      </span>
-                    </span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded border px-1 py-px text-[8px]",
-                        PRIORITY_CLASS[row.priority],
-                      )}
-                    >
-                      {PRIORITY_LABEL[row.priority]}
-                    </span>
-                  </div>
-                </td>
-                {row.days.map((cell, index) => (
-                  <td
-                    key={table.days[index]?.date ?? index}
-                    className="border-b border-l border-border/50 px-1.5 py-1.5"
-                  >
-                    {cell.length === 0 ? (
-                      <span className="text-muted-foreground/25">—</span>
-                    ) : (
-                      <span className="flex flex-col gap-0.5">
-                        {cell.map((block) => (
-                          <span
-                            key={block.id}
-                            className={cn(
-                              "font-mono text-[9px]",
-                              block.status === "done"
-                                ? "text-primary"
-                                : block.status === "skipped"
-                                  ? "text-muted-foreground/40 line-through"
-                                  : "text-foreground/80",
-                            )}
-                            title={block.note}
-                          >
-                            {block.status === "done"
-                              ? "✓ "
-                              : block.status === "skipped"
-                                ? "— "
-                                : ""}
-                            {block.start}-{block.end}
-                            {block.actualMinutes !== null
-                              ? ` (${block.actualMinutes}m)`
-                              : ""}
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </td>
-                ))}
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+    <div className="rounded-lg border border-border/70 bg-background/40 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+        <Settings className="h-3 w-3 shrink-0 text-primary" />
+        <span className="font-medium text-foreground/80">
+          排期偏好{configured ? "" : "（默认值）"}
+        </span>
+        <span>
+          工作日 {preferences.workdays.join(",")} · {preferences.workStart}-
+          {preferences.workEnd}
+        </span>
+        <span>最长专注 {minutesLabel(preferences.maxFocusMinutes)}</span>
+        <span>每日上限 {minutesLabel(preferences.dailyFocusLimitMinutes)}</span>
+        <span>缓冲 {Math.round(preferences.bufferRatio * 100)}%</span>
+        <span>块间隙 {preferences.gapMinutes}m</span>
+        <span className="font-mono text-muted-foreground/50">
+          {preferences.timezone}
+        </span>
+      </div>
+      {preferences.rules.length > 0 ? (
+        <div className="mt-1 space-y-0.5">
+          {preferences.rules.map((rule) => (
+            <p
+              key={rule}
+              className="line-clamp-2 text-[10px] leading-4 text-muted-foreground/80"
+            >
+              • {rule}
+            </p>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function MemoryList({ memories }: { memories: ScheduleMemory[] }) {
-  if (memories.length === 0) {
-    return (
-      <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted-foreground/60">
-        没有匹配的记忆
-      </p>
-    );
-  }
+function TaskAllocations({
+  allocations,
+}: {
+  allocations: ScheduleTaskAllocation[];
+}) {
   return (
-    <div className="space-y-1.5">
-      {memories.map((memory) => (
-        <div
-          key={memory.id}
-          className="rounded-lg border border-border/70 bg-background/40 px-2.5 py-2"
-        >
-          <div className="flex items-center gap-1.5">
-            <Brain className="h-3 w-3 shrink-0 text-primary" />
-            <span className="truncate text-[11px] font-medium">{memory.title}</span>
-            <span className="shrink-0 rounded bg-muted/50 px-1 py-px text-[8px] text-muted-foreground">
-              {memory.category}
+    <div className="space-y-1 rounded-lg border border-border/70 bg-background/40 px-2.5 py-2">
+      <p className="text-[10px] font-medium text-foreground/80">排期汇总</p>
+      {allocations.map((item) => {
+        const over =
+          item.estimatedMinutes > 0 &&
+          item.scheduledMinutes > item.estimatedMinutes;
+        return (
+          <div
+            key={item.taskId}
+            className="flex items-center gap-2 text-[10px] text-muted-foreground"
+          >
+            <span className="min-w-0 flex-1 truncate">{item.title}</span>
+            <span className="shrink-0 font-mono">
+              已排 {minutesLabel(item.scheduledMinutes)} / 预估{" "}
+              {minutesLabel(item.estimatedMinutes)}
             </span>
-            {memory.pinned ? (
-              <span className="shrink-0 text-[8px] text-warning">置顶</span>
+            <span className="shrink-0 text-muted-foreground/50">
+              {item.blockCount} 段
+            </span>
+            {over ? (
+              <span className="shrink-0 text-warning">超出预估</span>
             ) : null}
-            <span className="ml-auto shrink-0 font-mono text-[8px] text-muted-foreground/50">
-              {memory.key}
-            </span>
           </div>
-          {memory.content.trim() !== "" ? (
-            <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[10px] leading-4 text-muted-foreground">
-              {memory.content}
-            </p>
-          ) : null}
-          {memory.tags.length > 0 ? (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {memory.tags.map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded bg-muted/40 px-1 py-px text-[8px] text-muted-foreground/70"
-                >
-                  #{tag}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -353,19 +227,21 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
   const [outputOpen, setOutputOpen] = useState(false);
   const [emailing, setEmailing] = useState(false);
 
-  const table = data.table ?? null;
+  const agenda = data.agenda ?? null;
   const imageDataUrl =
     typeof meta.imageDataUrl === "string" ? meta.imageDataUrl : undefined;
-  const weekStart = table?.weekStart ?? data.weekStart;
-  const hasPlan = table !== null;
-  const hasMemories = Array.isArray(data.memories);
+  const rangeStart = agenda?.startDate ?? data.rangeStart;
+  const hasPlan = agenda !== null;
+  const hasPreferences = data.preferences !== undefined;
+  const hasAllocations =
+    Array.isArray(data.taskAllocations) && data.taskAllocations.length > 0;
   const hasTasks = Array.isArray(data.tasks);
   const hasBlock = data.block !== undefined;
 
   const sendEmail = async (): Promise<void> => {
-    if (weekStart === undefined || emailing) return;
+    if (rangeStart === undefined || emailing) return;
     setEmailing(true);
-    await sendScheduleEmailNow(weekStart);
+    await sendScheduleEmailNow(rangeStart, 7);
     setEmailing(false);
   };
 
@@ -375,8 +251,8 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
         <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
           {hasPlan ? (
             <CalendarDays className="h-3.5 w-3.5" />
-          ) : hasMemories ? (
-            <Brain className="h-3.5 w-3.5" />
+          ) : hasPreferences ? (
+            <Settings className="h-3.5 w-3.5" />
           ) : (
             <ListTodo className="h-3.5 w-3.5" />
           )}
@@ -392,9 +268,9 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
             >
               {status.label}
             </span>
-            {table !== null ? (
+            {agenda !== null ? (
               <span className="font-mono text-[9px] text-muted-foreground/60">
-                {table.weekStart} ~ {table.weekEnd}
+                {agenda.startDate} ~ {agenda.endDate}
               </span>
             ) : null}
             {data.emailedTo ? (
@@ -408,13 +284,13 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
               </span>
             ) : null}
           </div>
-          {table !== null && table.summary ? (
+          {agenda !== null ? (
             <p className="mt-0.5 text-[10px] text-muted-foreground/70">
-              {table.summary.taskCount} 项任务 · 计划{" "}
-              {minutesLabel(table.summary.totalPlannedMinutes)} · 已完成{" "}
-              {minutesLabel(table.summary.doneMinutes)}
-              {table.unscheduled && table.unscheduled.length > 0
-                ? ` · 未排期 ${table.unscheduled.length} 项`
+              {agenda.summary.taskCount} 项任务 · 计划{" "}
+              {minutesLabel(agenda.summary.totalPlannedMinutes)} · 已完成{" "}
+              {minutesLabel(agenda.summary.doneMinutes)}
+              {agenda.unscheduled.length > 0
+                ? ` · 未排期 ${agenda.unscheduled.length} 项`
                 : " · 全部已排入"}
             </p>
           ) : null}
@@ -422,9 +298,17 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
       </div>
 
       <div className="space-y-2.5 px-3.5 pb-3">
-        {table !== null ? <PlanTable table={table} /> : null}
+        {agenda !== null ? <ScheduleAgenda agenda={agenda} compact /> : null}
 
-        {hasMemories ? <MemoryList memories={data.memories ?? []} /> : null}
+        {hasAllocations ? (
+          <TaskAllocations allocations={data.taskAllocations ?? []} />
+        ) : null}
+        {hasPreferences && data.preferences ? (
+          <PreferencesSummary
+            preferences={data.preferences}
+            configured={data.configured === true}
+          />
+        ) : null}
         {hasTasks ? <TaskList tasks={data.tasks ?? []} /> : null}
 
         {hasBlock && data.block ? (
@@ -449,9 +333,9 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
           </div>
         ) : null}
 
-        {table !== null && table.warnings && table.warnings.length > 0 ? (
+        {agenda !== null && agenda.warnings.length > 0 ? (
           <div className="rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-2">
-            {table.warnings.map((warning) => (
+            {agenda.warnings.map((warning) => (
               <p
                 key={warning}
                 className="flex items-start gap-1.5 text-[10px] leading-4 text-warning"
@@ -463,10 +347,10 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
           </div>
         ) : null}
 
-        {table !== null && table.unscheduled && table.unscheduled.length > 0 ? (
+        {agenda !== null && agenda.unscheduled.length > 0 ? (
           <div className="rounded-lg border border-border/70 bg-background/30 px-2.5 py-2">
             <p className="text-[10px] font-medium text-foreground/80">未排期任务</p>
-            {table.unscheduled.map((item) => (
+            {agenda.unscheduled.map((item) => (
               <p
                 key={item.taskId}
                 className="mt-1 text-[10px] leading-4 text-muted-foreground"
@@ -477,9 +361,9 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
           </div>
         ) : null}
 
-        {table !== null && (table.notes ?? "").trim() !== "" ? (
+        {agenda !== null && agenda.notes.trim() !== "" ? (
           <p className="rounded-lg bg-muted/20 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground">
-            备注：{table.notes}
+            备注：{agenda.notes}
           </p>
         ) : null}
 
@@ -487,25 +371,25 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
           <div className="overflow-hidden rounded-lg border border-border/70 bg-white">
             <img
               src={imageDataUrl}
-              alt="周计划表格"
+              alt="未来 7 天日程"
               className="max-h-[340px] w-full object-contain"
             />
           </div>
         ) : null}
 
-        {(hasPlan || imageDataUrl || hasMemories || hasTasks) ? (
+        {(hasPlan || imageDataUrl || hasPreferences || hasTasks) ? (
           <div className="flex flex-wrap items-center gap-1.5">
             {imageDataUrl ? (
               <a
                 href={imageDataUrl}
-                download={`codefly-week-${weekStart ?? "plan"}.png`}
+                download={`codefly-agenda-${rangeStart ?? "plan"}.png`}
                 className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-background px-2 text-[10px] text-foreground/80 transition-colors hover:border-primary/30 hover:text-primary"
               >
                 <Download className="h-3 w-3" />
                 下载 PNG
               </a>
             ) : null}
-            {table !== null && weekStart ? (
+            {agenda !== null && rangeStart ? (
               <Button
                 variant="outline"
                 size="sm"

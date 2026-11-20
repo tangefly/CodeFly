@@ -180,6 +180,7 @@ export interface AgentToolMeta {
     | "paper"
     | "library"
     | "schedule"
+    | "preferences"
     | "memory"
     | "error";
   command?: string;
@@ -460,18 +461,21 @@ export interface PaperOutline {
 
 /** Tools available to schedule sessions. Kept separate from other modes. */
 export const SCHEDULE_TOOL_NAMES = [
-  "memory_search",
-  "memory_upsert",
-  "memory_delete",
+  "preferences_get",
+  "preferences_update",
   "task_list",
   "task_upsert",
   "task_delete",
+  "fixed_event_list",
+  "fixed_event_upsert",
+  "fixed_event_delete",
   "plan_get",
   "plan_schedule",
   "plan_replan",
   "block_update",
   "plan_render",
   "plan_email",
+  "ask_user_question",
 ] as const;
 
 export type ScheduleToolName = (typeof SCHEDULE_TOOL_NAMES)[number];
@@ -486,7 +490,11 @@ export const SCHEDULE_MEMORY_CATEGORIES = [
 export type ScheduleMemoryCategory =
   (typeof SCHEDULE_MEMORY_CATEGORIES)[number];
 
-/** One structured memory document maintained by the schedule assistant. */
+/**
+ * Legacy persisted document shape. The schedule assistant now keeps only the
+ * single `scheduling_preferences` document; other memories are migrated into
+ * `SchedulePreferences.rules` on startup.
+ */
 export interface ScheduleMemory {
   id: string;
   /** Stable unique slug used for deterministic lookups. */
@@ -527,6 +535,56 @@ export const SCHEDULE_TIMES_OF_DAY = [
 ] as const;
 export type ScheduleTimeOfDay = (typeof SCHEDULE_TIMES_OF_DAY)[number];
 
+export const SCHEDULE_FIXED_EVENT_KINDS = ["weekly", "once"] as const;
+export type ScheduleFixedEventKind =
+  (typeof SCHEDULE_FIXED_EVENT_KINDS)[number];
+
+/**
+ * A commitment that occupies wall-clock time every week (courses, meetings)
+ * or on one specific day. Fixed events are not tasks: they need no estimate
+ * and can form a valid weekly plan on their own.
+ */
+export interface ScheduleFixedEvent {
+  id: string;
+  title: string;
+  kind: ScheduleFixedEventKind;
+  /** ISO weekday 1 (Monday) … 7 (Sunday); set when kind="weekly". */
+  weekday: number | null;
+  /** YYYY-MM-DD; set when kind="once". */
+  date: string | null;
+  /** Local wall-clock HH:mm. */
+  start: string;
+  end: string;
+  location: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleFixedEventInput {
+  title?: string;
+  kind?: ScheduleFixedEventKind;
+  weekday?: number | null;
+  date?: string | null;
+  start?: string;
+  end?: string;
+  location?: string;
+  note?: string;
+}
+
+/**
+ * One ordered piece of a task's work. Steps are optional: simple tasks keep an
+ * empty list and are scheduled as before. When present, the planner uses each
+ * step as the note of the block(s) covering it.
+ */
+export interface ScheduleTaskStep {
+  id: string;
+  /** Short, concrete description, e.g. "精读 3 篇基线论文并整理对比表". */
+  title: string;
+  /** Planned minutes for this piece; usually close to one focus block. */
+  minutes: number;
+}
+
 /** A unit of work the user wants to finish. Tasks are global across weeks. */
 export interface ScheduleTask {
   id: string;
@@ -545,6 +603,8 @@ export interface ScheduleTask {
   splittable: boolean;
   minBlockMinutes: number;
   preferredTimeOfDay: ScheduleTimeOfDay;
+  /** Optional ordered breakdown of the work; empty when no decomposition needed. */
+  steps: ScheduleTaskStep[];
   createdAt: string;
   updatedAt: string;
 }
@@ -560,6 +620,11 @@ export interface ScheduleBlock {
   status: ScheduleBlockStatus;
   actualMinutes: number | null;
   note: string;
+  /**
+   * Step covered by this block when the task was decomposed. Undefined/null
+   * for undecomposed tasks and for blocks created before steps existed.
+   */
+  stepId?: string | null;
 }
 
 export const SCHEDULE_PLAN_STATUSES = ["draft", "active", "archived"] as const;
@@ -588,7 +653,7 @@ export interface ScheduleBreak {
   end: string;
 }
 
-/** Normalized scheduling preferences stored in a special memory document. */
+/** Normalized scheduling preferences stored in the single preference document. */
 export interface SchedulePreferences {
   timezone: string;
   /** ISO weekdays, Monday = 1 … Sunday = 7. */
@@ -598,8 +663,16 @@ export interface SchedulePreferences {
   breaks: ScheduleBreak[];
   maxFocusMinutes: number;
   minBlockMinutes: number;
+  /**
+   * Extra time added to every estimate. 0 means the planner schedules exactly
+   * the remaining minutes; there is no hidden confidence buffer.
+   */
   bufferRatio: number;
+  /** Wall-clock minutes left between adjacent blocks (0 = back-to-back). */
+  gapMinutes: number;
   dailyFocusLimitMinutes: number;
+  /** Free-form rules the planner cannot model structurally, one per entry. */
+  rules: string[];
 }
 
 export interface ScheduleUnscheduledTask {
@@ -609,9 +682,20 @@ export interface ScheduleUnscheduledTask {
   reason: string;
 }
 
+/** How much of one task is actually placed in a planning window. */
+export interface ScheduleTaskAllocation {
+  taskId: string;
+  title: string;
+  estimatedMinutes: number;
+  remainingMinutes: number;
+  /** Non-skipped block minutes inside the window. */
+  scheduledMinutes: number;
+  blockCount: number;
+}
+
 export interface SchedulePlanSummary {
-  weekStart: string;
-  weekEnd: string;
+  rangeStart: string;
+  rangeEnd: string;
   timezone: string;
   planId: string | null;
   totalPlannedMinutes: number;
@@ -621,17 +705,78 @@ export interface SchedulePlanSummary {
   warnings: string[];
 }
 
+/**
+ * A rolling planning window assembled from the stored per-ISO-week plans.
+ * Blocks are always date-sorted. A window may contain zero blocks: a window
+ * with only fixed commitments (courses, meetings) is still a valid plan.
+ */
+export interface ScheduleWindow {
+  startDate: string;
+  endDate: string;
+  timezone: string;
+  blocks: ScheduleBlock[];
+  unscheduled: ScheduleUnscheduledTask[];
+  warnings: string[];
+  notes: string;
+}
+
+/** One chronological entry in a day agenda: a fixed event or a task block. */
+export interface ScheduleAgendaItem {
+  id: string;
+  kind: "fixed" | "task";
+  title: string;
+  /** Local wall-clock HH:mm. */
+  start: string;
+  end: string;
+  status: ScheduleBlockStatus;
+  actualMinutes: number | null;
+  priority: SchedulePriority | null;
+  location: string;
+  note: string;
+}
+
+export interface ScheduleAgendaDay {
+  date: string;
+  /** Localized weekday label, e.g. 周五. */
+  weekday: string;
+  items: ScheduleAgendaItem[];
+  /** Fixed events plus non-skipped task blocks. */
+  plannedMinutes: number;
+  /** Free minutes inside working hours; null on non-working days. */
+  freeMinutes: number | null;
+}
+
+/**
+ * Day-by-day presentation model shared by the UI, tool cards and the PNG
+ * renderer so all three surfaces stay consistent.
+ */
+export interface ScheduleAgendaModel {
+  startDate: string;
+  endDate: string;
+  timezone: string;
+  today: string;
+  generatedAt: string;
+  days: ScheduleAgendaDay[];
+  summary: SchedulePlanSummary;
+  unscheduled: ScheduleUnscheduledTask[];
+  warnings: string[];
+  notes: string;
+}
+
 /** GET /api/schedule/overview response and tool card payload. */
 export interface ScheduleOverview {
   timezone: string;
   today: string;
-  weekStart: string;
-  weekEnd: string;
+  /** First day of the rolling window (inclusive). */
+  rangeStart: string;
+  /** Last day of the rolling window (inclusive). */
+  rangeEnd: string;
   preferences: SchedulePreferences;
   preferencesConfigured: boolean;
-  memories: ScheduleMemory[];
   tasks: ScheduleTask[];
-  plan: SchedulePlan | null;
+  fixedEvents: ScheduleFixedEvent[];
+  window: ScheduleWindow | null;
+  agenda: ScheduleAgendaModel;
   summary: SchedulePlanSummary;
   calibration: ScheduleCalibration;
 }
@@ -692,14 +837,11 @@ export interface ScheduleEmailSendResult {
   imagePath: string;
 }
 
-export interface ScheduleMemoryInput {
-  key?: string;
-  category?: ScheduleMemoryCategory;
-  title?: string;
-  content?: string;
-  data?: Record<string, unknown> | null;
-  tags?: string[];
-  pinned?: boolean;
+/** One step accepted when creating or updating a task. */
+export interface ScheduleTaskStepInput {
+  id?: string;
+  title: string;
+  minutes: number;
 }
 
 export interface ScheduleTaskInput {
@@ -716,6 +858,8 @@ export interface ScheduleTaskInput {
   splittable?: boolean;
   minBlockMinutes?: number;
   preferredTimeOfDay?: ScheduleTimeOfDay;
+  /** Replaces the full step list. Empty array or null clears it. */
+  steps?: ScheduleTaskStepInput[] | null;
 }
 
 export interface AgentSettingsPublic {
@@ -901,8 +1045,10 @@ export type AuditType =
   | "paper.extracted"
   | "paper.context.changed"
   | "schedule.run"
+  | "schedule.preferences.changed"
   | "schedule.memory.changed"
   | "schedule.task.changed"
+  | "schedule.fixed_event.changed"
   | "schedule.plan.changed"
   | "schedule.email.sent";
 

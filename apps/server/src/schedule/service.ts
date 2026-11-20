@@ -17,10 +17,11 @@ import {
 import { loadPromptFile } from "../prompt-file.js";
 import type { SessionStore } from "../session/store.js";
 import type { ToolResult } from "../agent/tools.js";
+import type { QuestionServiceLike } from "../interaction/ask-user-question.js";
 import type { ScheduleEmailConfigStore } from "./email.js";
 import type { ScheduleStore } from "./store.js";
 import type { ScheduleToolContext, ScheduleToolExecutor } from "./tools.js";
-import { todayInTimezone, weekdayLabel } from "./time.js";
+import { nowClockInTimezone, todayInTimezone, weekdayLabel } from "./time.js";
 
 export const DEFAULT_SCHEDULE_PROMPT = loadPromptFile(import.meta.url);
 
@@ -34,12 +35,14 @@ export interface ScheduleServiceDeps {
   store: ScheduleStore;
   email: ScheduleEmailConfigStore;
   tools: ScheduleToolExecutor;
+  questions: QuestionServiceLike;
   maxSteps: number;
 }
 
 const READ_ONLY_SCHEDULE_TOOLS = new Set<string>([
-  "memory_search",
+  "preferences_get",
   "task_list",
+  "fixed_event_list",
   "plan_get",
 ]);
 
@@ -126,6 +129,8 @@ export class ScheduleService {
       emit: context.emit,
       progress: context.progress,
       toolCallId: context.toolCallId,
+      messageId: context.messageId,
+      questions: this.deps.questions,
     };
     try {
       return await this.deps.tools.execute(
@@ -147,7 +152,8 @@ export class ScheduleService {
 
 /**
  * Volatile facts refreshed every turn: current date/timezone, preference
- * status, backlog size and this week's plan. The system prompt stays stable.
+ * status, registered fixed events, backlog size and this week's plan. The
+ * system prompt stays stable.
  */
 function runtimeContextMessage(
   store: ScheduleStore,
@@ -171,20 +177,55 @@ function runtimeContextMessage(
     .sort((a, b) => (a.deadline ?? "").localeCompare(b.deadline ?? ""))
     .slice(0, 5)
     .map((task) => `${task.title}（${task.deadline}）`);
-  const planBlocks = overview.plan?.blocks.length ?? 0;
-  const unscheduled = overview.plan?.unscheduled.length ?? 0;
+  const planBlocks = overview.window?.blocks.length ?? 0;
+  const unscheduled = overview.window?.unscheduled.length ?? 0;
+  const fixedEvents = overview.fixedEvents;
+  const weeklyFixed = fixedEvents.filter((event) => event.kind === "weekly");
+  const onceFixed = fixedEvents.filter((event) => event.kind === "once");
+  const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const MAX_LISTED_EVENTS = 15;
+  const fixedList = fixedEvents
+    .slice()
+    .sort((a, b) => a.start.localeCompare(b.start))
+    .slice(0, MAX_LISTED_EVENTS)
+    .map((event) => {
+      const when =
+        event.kind === "weekly"
+          ? (WEEKDAY_LABELS[(event.weekday ?? 1) - 1] ?? "")
+          : `${event.date ?? ""}`;
+      const location =
+        event.location.trim() === "" ? "" : ` @${event.location.trim()}`;
+      return `${when} ${event.start}-${event.end} ${event.title}${location}`;
+    });
 
   const lines = [
     `<runtime_context>`,
     `Current environment (refreshed every turn, never persisted):`,
-    `- Now: ${new Date().toISOString()} · local date ${today} (${weekdayLabel(
+    `- Now: ${new Date().toISOString()} · local ${today} ${weekdayLabel(
       today,
-    )}) · timezone ${preferences.timezone}`,
-    `- This week: ${overview.weekStart} ~ ${overview.weekEnd}`,
+    )} ${nowClockInTimezone(preferences.timezone)} · timezone ${preferences.timezone}`,
+    `- Rolling window (today → +6 days): ${overview.rangeStart} ~ ${overview.rangeEnd}`,
     `- Scheduling preferences: ${
       overview.preferencesConfigured
-        ? `configured · workdays ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · max focus ${preferences.maxFocusMinutes}m · daily limit ${preferences.dailyFocusLimitMinutes}m`
-        : "NOT CONFIGURED — ask the user and save memory key=scheduling_preferences"
+        ? `configured · workdays ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · max focus ${preferences.maxFocusMinutes}m · daily limit ${preferences.dailyFocusLimitMinutes}m · buffer ${Math.round(
+            preferences.bufferRatio * 100,
+          )}% · gap ${preferences.gapMinutes}m`
+        : "NOT CONFIGURED — ask the user with ask_user_question and save with preferences_update"
+    }`,
+    `- Scheduling rules (${
+      preferences.rules.length
+    }): ${
+      preferences.rules.length === 0
+        ? "none"
+        : preferences.rules.join("; ")
+    }`,
+    `- Fixed events (${fixedEvents.length} total · ${weeklyFixed.length} weekly · ${onceFixed.length} one-off): ${
+      fixedList.length === 0
+        ? "none registered — register courses/meetings with fixed_event_upsert; a week with only fixed events can still be planned"
+        : fixedList.join("; ") +
+          (fixedEvents.length > MAX_LISTED_EVENTS
+            ? `; …and ${fixedEvents.length - MAX_LISTED_EVENTS} more`
+            : "")
     }`,
     `- Active tasks: ${activeTasks.length} · remaining ${Math.round(
       remaining / 6,
@@ -192,11 +233,10 @@ function runtimeContextMessage(
     upcoming.length > 0
       ? `- Upcoming deadlines: ${upcoming.join("; ")}`
       : `- Upcoming deadlines: none`,
-    `- Memories: ${overview.memories.length} documents`,
-    `- This week's plan: ${
-      overview.plan === null
+    `- This window's plan: ${
+      overview.window === null
         ? "none"
-        : `${planBlocks} blocks · ${unscheduled} unscheduled · warnings ${overview.plan.warnings.length}`
+        : `${planBlocks} blocks · ${unscheduled} unscheduled · warnings ${overview.window.warnings.length}`
     }`,
     `- Estimate calibration: ${
       overview.calibration.ratio === null

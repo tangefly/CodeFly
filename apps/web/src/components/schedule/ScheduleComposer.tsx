@@ -60,7 +60,7 @@ export function ScheduleComposer() {
           </span>
           <span className="hidden text-[10px] text-muted-foreground/60 sm:inline">
             {ready
-              ? "偏好记忆 · 任务排期 · 动态重排 · PNG / 邮件"
+              ? "排期偏好 · 任务排期 · 动态重排 · PNG / 邮件"
               : "日程助手需要先配置模型 API"}
           </span>
         </div>
@@ -118,7 +118,7 @@ export function ScheduleComposer() {
               className="max-h-[200px] min-h-[44px] w-full resize-none bg-transparent py-1 font-mono text-[13px] leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground/45 focus:outline-none disabled:cursor-not-allowed"
               placeholder={
                 session
-                  ? "例如：这周要写完论文初稿、准备组会 slides，周三没空。帮我排一下；或者：今天的任务没做完，往后挪。"
+                  ? "例如：把我的课程表和每周例会排成未来 7 天日程；或：这周要写完论文初稿，帮我排一下；或：今天的任务没做完，往后挪。"
                   : "请先选择或新建一个日程会话"
               }
             />

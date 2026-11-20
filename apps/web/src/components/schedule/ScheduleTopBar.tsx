@@ -54,14 +54,14 @@ export function ScheduleTopBar() {
             {overview ? (
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground/70">
                 <span className="font-mono">
-                  {overview.weekStart} ~ {overview.weekEnd}
+                  {overview.rangeStart} ~ {overview.rangeEnd}
                 </span>
                 <span>·</span>
                 <span>{activeTasks} 项待办</span>
                 <span>·</span>
                 <span>
-                  {overview.plan
-                    ? `${overview.plan.blocks.length} 个时段`
+                  {overview.window
+                    ? `${overview.window.blocks.length} 个时段`
                     : "尚未生成计划"}
                 </span>
                 <span>·</span>
@@ -77,7 +77,7 @@ export function ScheduleTopBar() {
               </div>
             ) : (
               <p className="mt-0.5 text-[10px] text-muted-foreground/70">
-                偏好记忆 · 周计划 · 动态重排 · PNG / 邮件
+                排期偏好 · 7 天日程 · 动态重排 · PNG / 邮件
               </p>
             )}
           </>

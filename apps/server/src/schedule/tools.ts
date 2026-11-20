@@ -1,38 +1,50 @@
 import { z } from "zod";
 import {
   SCHEDULE_CONFIDENCE,
-  SCHEDULE_MEMORY_CATEGORIES,
+  SCHEDULE_FIXED_EVENT_KINDS,
   SCHEDULE_PRIORITIES,
   SCHEDULE_TASK_STATUSES,
   SCHEDULE_TIMES_OF_DAY,
+  schedulePreferencesPatchSchema,
   type ScheduleBlock,
-  type ScheduleMemory,
+  type ScheduleFixedEvent,
   type SchedulePlan,
+  type SchedulePlanSummary,
   type SchedulePreferences,
   type ScheduleSession,
   type ScheduleTask,
+  type ScheduleTaskAllocation,
   type ScheduleTaskInput,
+  type ScheduleWindow,
 } from "@codefly/protocol";
 import type { AgentEvent } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
 import type { ToolResult } from "../agent/tools.js";
+import {
+  ASK_USER_QUESTION_DEFINITION,
+  askUserQuestionResult,
+  type QuestionServiceLike,
+} from "../interaction/ask-user-question.js";
 import type { LlmToolDefinition } from "../llm/client.js";
+import { buildScheduleAgenda } from "./agenda.js";
 import type { ScheduleEmailService } from "./email.js";
-import { buildScheduleTable, CONFIDENCE_LABEL, PRIORITY_LABEL, renderWeekPng } from "./render.js";
+import { CONFIDENCE_LABEL, PRIORITY_LABEL, renderAgendaPng } from "./render.js";
 import { generateSchedule } from "./scheduler.js";
 import type { ScheduleStore } from "./store.js";
 import {
   addDays,
   compareDates,
+  daysBetween,
   durationMinutes,
   maxDate,
   mondayOf,
+  nowClockInTimezone,
+  rangeEndOf,
   todayInTimezone,
-  weekEndOf,
+  weekdayOf,
 } from "./time.js";
 
 const MAX_TOOL_CONTENT_CHARS = 30_000;
-const MAX_CONTENT_PER_MEMORY = 6_000;
 const DEFAULT_TASK_LIMIT = 100;
 
 export interface ScheduleToolContext {
@@ -41,6 +53,8 @@ export interface ScheduleToolContext {
   emit: (event: AgentEvent) => void;
   progress: (text: string) => void;
   toolCallId: string;
+  messageId: string;
+  questions: QuestionServiceLike;
 }
 
 export interface ScheduleToolExecutorOptions {
@@ -90,21 +104,6 @@ function formatMinutes(minutes: number): string {
   return rest === 0 ? `${hours}h` : `${hours}h${rest}m`;
 }
 
-function formatMemory(memory: ScheduleMemory, includeContent = true): string {
-  const data =
-    memory.data === null ? "" : `\n   data: ${JSON.stringify(memory.data)}`;
-  return [
-    `[${memory.id}] ${memory.key} · ${memory.category} · ${memory.title}${memory.pinned ? " · pinned" : ""}`,
-    memory.tags.length > 0 ? `   tags: ${memory.tags.join(", ")}` : null,
-    includeContent && memory.content.trim() !== ""
-      ? `   ${memory.content.trim().slice(0, MAX_CONTENT_PER_MEMORY)}`
-      : null,
-    data.trim() !== "" ? data : null,
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
-}
-
 function formatTask(task: ScheduleTask): string {
   return [
     `[${task.id}] ${task.title} · ${PRIORITY_LABEL[task.priority]} · ${task.status}`,
@@ -114,6 +113,17 @@ function formatTask(task: ScheduleTask): string {
     task.deadline === null ? null : `   截止 ${task.deadline}`,
     task.project === null ? null : `   项目 ${task.project}`,
     `   ${task.splittable ? "可拆分" : "不可拆分"} · 最小时段 ${task.minBlockMinutes}m · 偏好 ${task.preferredTimeOfDay}`,
+    task.steps.length === 0
+      ? null
+      : `   拆解 ${task.steps.length} 步（合计 ${formatMinutes(
+          task.steps.reduce((total, step) => total + step.minutes, 0),
+        )}，剩余 ${formatMinutes(task.remainingMinutes)}）：${task.steps
+          .map(
+            (step, index) =>
+              `${index + 1}. ${step.title} ${formatMinutes(step.minutes)}`,
+          )
+          .join(" · ")
+          .slice(0, 1200)}`,
     task.notes.trim() === "" ? null : `   ${task.notes.trim().slice(0, 1000)}`,
   ]
     .filter((line): line is string => line !== null)
@@ -127,37 +137,132 @@ function weekdayName(date: string): string {
   return names[(value === 0 ? 7 : value) - 1] ?? "";
 }
 
-function formatPlan(
-  plan: SchedulePlan | null,
+const WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function weekdayNumberName(weekday: number): string {
+  return WEEKDAY_NAMES[weekday - 1] ?? "";
+}
+
+/** Filters a fixed-event list to those occupying time on the given date. */
+function fixedEventsForDateOf(
+  events: ScheduleFixedEvent[],
+  date: string,
+): ScheduleFixedEvent[] {
+  const weekday = weekdayOf(date);
+  return events
+    .filter(
+      (event) =>
+        (event.kind === "weekly" && event.weekday === weekday) ||
+        (event.kind === "once" && event.date === date),
+    )
+    .sort((a, b) => a.start.localeCompare(b.start));
+}
+
+function formatFixedEvent(event: ScheduleFixedEvent): string {
+  const when =
+    event.kind === "weekly"
+      ? `每周${weekdayNumberName(event.weekday ?? 1)}`
+      : `${event.date}（${weekdayName(event.date ?? "")}）`;
+  return [
+    `[${event.id}] ${event.title} · ${when} ${event.start}-${event.end}`,
+    event.location.trim() !== "" ? `   地点 ${event.location}` : null,
+    event.note.trim() !== "" ? `   ${event.note.trim().slice(0, 1000)}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
+/** Per-task totals over one planning window, used in tool output and UI. */
+function taskAllocationsFor(
+  window: ScheduleWindow | null,
   tasks: ScheduleTask[],
+): ScheduleTaskAllocation[] {
+  if (window === null) return [];
+  const totals = new Map<string, { minutes: number; blocks: number }>();
+  for (const block of window.blocks) {
+    if (block.status === "skipped") continue;
+    const entry = totals.get(block.taskId) ?? { minutes: 0, blocks: 0 };
+    entry.minutes += durationMinutes(block.start, block.end);
+    entry.blocks += 1;
+    totals.set(block.taskId, entry);
+  }
+  const taskIndex = new Map(tasks.map((task) => [task.id, task]));
+  return [...totals.entries()]
+    .map(([taskId, total]) => {
+      const task = taskIndex.get(taskId);
+      return {
+        taskId,
+        title: task?.title ?? "已删除任务",
+        estimatedMinutes: task?.estimatedMinutes ?? 0,
+        remainingMinutes: task?.remainingMinutes ?? 0,
+        scheduledMinutes: total.minutes,
+        blockCount: total.blocks,
+      };
+    })
+    .sort((a, b) => b.scheduledMinutes - a.scheduledMinutes);
+}
+
+function formatPreferences(
   preferences: SchedulePreferences,
-  summary: {
-    totalPlannedMinutes: number;
-    taskCount: number;
-    doneMinutes: number;
-  },
+  configured: boolean,
 ): string {
-  if (plan === null) {
-    return `这一周还没有计划。可用 plan_schedule 生成，或先添加任务。`;
+  const breaks =
+    preferences.breaks.length === 0
+      ? "无"
+      : preferences.breaks
+          .map((brk) => `${brk.label} ${brk.start}-${brk.end}`)
+          .join("、");
+  const buffer = Math.round(preferences.bufferRatio * 100);
+  const lines = [
+    `排期偏好${configured ? "" : "（未配置，以下为默认值）"}：`,
+    `  工作日 ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · 休息 ${breaks}`,
+    `  最长专注 ${preferences.maxFocusMinutes}m · 每日上限 ${preferences.dailyFocusLimitMinutes}m · 缓冲 ${buffer}% · 块间隙 ${preferences.gapMinutes}m · 时区 ${preferences.timezone}`,
+  ];
+  if (preferences.rules.length === 0) {
+    lines.push("  规则：暂无");
+  } else {
+    lines.push("  规则：");
+    for (const rule of preferences.rules) lines.push(`    - ${rule}`);
+  }
+  return lines.join("\n");
+}
+
+function formatPlan(
+  window: ScheduleWindow | null,
+  tasks: ScheduleTask[],
+  fixedEvents: ScheduleFixedEvent[],
+  preferences: SchedulePreferences,
+  summary: SchedulePlanSummary,
+): string {
+  if (window === null) {
+    return `这个时间窗口还没有计划。可用 plan_schedule 生成（只有固定课程/会议没有任务也可以生成），或先添加任务。`;
   }
   const taskIndex = new Map(tasks.map((task) => [task.id, task]));
   const lines: string[] = [
-    `计划 ${plan.weekStart} ~ ${plan.weekEnd}（${plan.timezone}）`,
+    `计划 ${window.startDate} ~ ${window.endDate}（${window.timezone}）`,
     `共 ${summary.taskCount} 项任务 · 计划 ${formatMinutes(summary.totalPlannedMinutes)} · 已完成 ${formatMinutes(summary.doneMinutes)}`,
   ];
   const days = new Map<string, ScheduleBlock[]>();
-  for (const block of plan.blocks) {
+  for (const block of window.blocks) {
     const list = days.get(block.date) ?? [];
     list.push(block);
     days.set(block.date, list);
   }
-  for (let index = 0; index < 7; index += 1) {
-    const date = addDays(plan.weekStart, index);
+  const dayCount = daysBetween(window.startDate, window.endDate) + 1;
+  for (let index = 0; index < dayCount; index += 1) {
+    const date = addDays(window.startDate, index);
     const blocks = (days.get(date) ?? []).sort((a, b) =>
       a.start.localeCompare(b.start),
     );
-    if (blocks.length === 0) continue;
+    const dayEvents = fixedEventsForDateOf(fixedEvents, date);
+    if (blocks.length === 0 && dayEvents.length === 0) continue;
     lines.push("", `${weekdayName(date)} ${date}`);
+    for (const event of dayEvents) {
+      const location = event.location.trim() === "" ? "" : ` @${event.location}`;
+      lines.push(
+        `  ▣ ${event.start}-${event.end} ${event.title}${location}（固定）`,
+      );
+    }
     for (const block of blocks) {
       const task = taskIndex.get(block.taskId);
       const status =
@@ -167,13 +272,37 @@ function formatPlan(
             ? "—"
             : "·";
       lines.push(
-        `  ${status} ${block.start}-${block.end} [${block.id}] ${task?.title ?? "已删除任务"} (${block.taskId})`,
+        `  ${status} ${block.start}-${block.end} [${block.id}] ${task?.title ?? "已删除任务"} (${block.taskId})${
+          block.note.trim() === ""
+            ? ""
+            : ` — ${block.note.trim().slice(0, 200)}`
+        }`,
       );
     }
   }
-  if (plan.unscheduled.length > 0) {
+  const allocations = taskAllocationsFor(window, tasks);
+  if (allocations.length > 0) {
+    lines.push("", "排期汇总（任务维度）：");
+    for (const item of allocations) {
+      const extra =
+        item.estimatedMinutes > 0 &&
+        item.scheduledMinutes > item.estimatedMinutes
+          ? ` · 超出预估 ${formatMinutes(
+              item.scheduledMinutes - item.estimatedMinutes,
+            )}`
+          : "";
+      lines.push(
+        `  - ${item.title}：已排 ${formatMinutes(
+          item.scheduledMinutes,
+        )}（${item.blockCount} 段） · 预估 ${formatMinutes(
+          item.estimatedMinutes,
+        )} · 剩余 ${formatMinutes(item.remainingMinutes)}${extra}`,
+      );
+    }
+  }
+  if (window.unscheduled.length > 0) {
     lines.push("", "未排期：");
-    for (const item of plan.unscheduled) {
+    for (const item of window.unscheduled) {
       lines.push(
         `  - ${item.title} (${item.taskId}) · 剩余 ${formatMinutes(
           item.remainingMinutes,
@@ -181,82 +310,82 @@ function formatPlan(
       );
     }
   }
-  if (plan.warnings.length > 0) {
+  if (window.warnings.length > 0) {
     lines.push("", "提醒：");
-    for (const warning of plan.warnings) lines.push(`  - ${warning}`);
+    for (const warning of window.warnings) lines.push(`  - ${warning}`);
   }
-  if (plan.notes.trim() !== "") lines.push("", `备注：${plan.notes.trim()}`);
+  if (window.notes.trim() !== "") lines.push("", `备注：${window.notes.trim()}`);
   lines.push(
     "",
-    `偏好：工作日 ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · 最长专注 ${preferences.maxFocusMinutes}m · 每日上限 ${preferences.dailyFocusLimitMinutes}m`,
+    `偏好：工作日 ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · 最长专注 ${preferences.maxFocusMinutes}m · 每日上限 ${preferences.dailyFocusLimitMinutes}m · 缓冲 ${Math.round(
+      preferences.bufferRatio * 100,
+    )}% · 块间隙 ${preferences.gapMinutes}m · 规则 ${preferences.rules.length} 条`,
   );
   return lines.join("\n");
 }
 
-function planResultMeta(
-  plan: SchedulePlan | null,
-  tasks: ScheduleTask[],
-  preferences: SchedulePreferences,
-  summary: ReturnType<ScheduleStore["summarize"]>,
-  extra: Record<string, unknown> & { data?: Record<string, unknown> },
-): Record<string, unknown> {
-  const table = buildScheduleTable({
-    plan,
-    tasks,
-    preferences,
-    weekStart: plan?.weekStart ?? String(extra.weekStart ?? ""),
-    weekEnd: plan?.weekEnd ?? String(extra.weekEnd ?? ""),
-    summary,
+function planResultMeta(input: {
+  window: ScheduleWindow | null;
+  tasks: ScheduleTask[];
+  fixedEvents: ScheduleFixedEvent[];
+  preferences: SchedulePreferences;
+  summary: SchedulePlanSummary;
+  startDate: string;
+  endDate: string;
+  extra: Record<string, unknown> & { data?: Record<string, unknown> };
+}): Record<string, unknown> {
+  const agenda = buildScheduleAgenda({
+    window: input.window,
+    tasks: input.tasks,
+    fixedEvents: input.fixedEvents,
+    preferences: input.preferences,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    today: todayInTimezone(input.preferences.timezone),
+    nowClock: nowClockInTimezone(input.preferences.timezone),
+    summary: input.summary,
   });
+  const taskAllocations = taskAllocationsFor(input.window, input.tasks);
   return {
     kind: "schedule",
     view: "plan",
-    weekStart: table.weekStart,
-    weekEnd: table.weekEnd,
-    summary,
-    ...extra,
+    rangeStart: input.startDate,
+    rangeEnd: input.endDate,
+    summary: input.summary,
+    taskAllocations,
+    ...input.extra,
     data: {
       view: "plan",
-      table,
-      plan,
-      summary,
-      ...extra.data,
+      agenda,
+      window: input.window,
+      summary: input.summary,
+      taskAllocations,
+      ...input.extra.data,
     },
   };
 }
 
-const memorySearchArgs = z
-  .object({
-    query: z.string().trim().max(2000).optional(),
-    key: z.string().trim().max(120).optional(),
-    category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
-    tags: z.array(z.string().trim().min(1).max(64)).max(32).optional(),
-    limit: z.number().int().min(1).max(200).optional(),
-  })
-  .strict();
+function emptySummary(
+  startDate: string,
+  endDate: string,
+  timezone: string,
+): SchedulePlanSummary {
+  return {
+    rangeStart: startDate,
+    rangeEnd: endDate,
+    timezone,
+    planId: null,
+    totalPlannedMinutes: 0,
+    taskCount: 0,
+    doneMinutes: 0,
+    unscheduled: [],
+    warnings: [],
+  };
+}
 
-const memoryUpsertArgs = z
-  .object({
-    memory_id: z.string().trim().min(1).max(200).optional(),
-    key: z.string().trim().min(1).max(120).optional(),
-    category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
-    title: z.string().trim().min(1).max(300).optional(),
-    content: z.string().max(200_000).optional(),
-    data: z.record(z.string(), z.unknown()).nullable().optional(),
-    tags: z.array(z.string().trim().min(1).max(64)).max(64).optional(),
-    pinned: z.boolean().optional(),
-  })
-  .strict();
+const preferencesGetArgs = z.object({}).strict();
 
-const memoryDeleteArgs = z
-  .object({
-    memory_id: z.string().trim().min(1).max(200).optional(),
-    key: z.string().trim().min(1).max(120).optional(),
-  })
-  .strict()
-  .refine((value) => value.memory_id !== undefined || value.key !== undefined, {
-    message: "provide memory_id or key",
-  });
+const preferencesUpdateArgs = schedulePreferencesPatchSchema;
 
 const taskListArgs = z
   .object({
@@ -285,6 +414,16 @@ const taskUpsertArgs = z
     splittable: z.boolean().optional(),
     min_block_minutes: z.number().int().min(5).max(600).optional(),
     preferred_time_of_day: z.enum(SCHEDULE_TIMES_OF_DAY).optional(),
+    steps: z
+      .array(
+        z.object({
+          title: z.string().trim().min(1).max(200),
+          minutes: z.number().int().min(5).max(600),
+        }),
+      )
+      .max(100)
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -294,15 +433,46 @@ const taskDeleteArgs = z
   })
   .strict();
 
+const fixedEventListArgs = z
+  .object({
+    kind: z.enum(SCHEDULE_FIXED_EVENT_KINDS).optional(),
+    weekday: z.number().int().min(1).max(7).optional(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    query: z.string().trim().max(2000).optional(),
+  })
+  .strict();
+
+const fixedEventUpsertArgs = z
+  .object({
+    event_id: z.string().trim().min(1).max(200).optional(),
+    title: z.string().trim().min(1).max(300).optional(),
+    kind: z.enum(SCHEDULE_FIXED_EVENT_KINDS).optional(),
+    weekday: z.number().int().min(1).max(7).nullable().optional(),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+    end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+    location: z.string().trim().max(120).optional(),
+    note: z.string().max(10_000).optional(),
+  })
+  .strict();
+
+const fixedEventDeleteArgs = z
+  .object({
+    event_id: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
 const planGetArgs = z
   .object({
-    week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    days: z.number().int().min(1).max(21).optional(),
   })
   .strict();
 
 const planScheduleArgs = z
   .object({
-    week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    days: z.number().int().min(1).max(21).optional(),
     task_ids: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
     allow_spill: z.boolean().optional(),
     notes: z.string().max(20_000).optional(),
@@ -333,13 +503,15 @@ const blockUpdateArgs = z
 
 const planRenderArgs = z
   .object({
-    week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    days: z.number().int().min(1).max(21).optional(),
   })
   .strict();
 
 const planEmailArgs = z
   .object({
-    week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    days: z.number().int().min(1).max(21).optional(),
     note: z.string().max(10_000).optional(),
   })
   .strict();
@@ -361,65 +533,88 @@ function taskInputFromArgs(
     splittable: args.splittable,
     minBlockMinutes: args.min_block_minutes,
     preferredTimeOfDay: args.preferred_time_of_day,
+    steps: args.steps,
   };
 }
 
 const DEFINITIONS: Record<string, LlmToolDefinition> = {
-  memory_search: {
+  preferences_get: {
     type: "function",
     function: {
-      name: "memory_search",
+      name: "preferences_get",
       description:
-        "Search the user's structured schedule memories (preferences, constraints, routines, goals, context). Use key='scheduling_preferences' to read the structured scheduling preferences.",
+        "Read the user's scheduling preferences and free-form rules. Call this on first contact and before planning; do not guess working hours, breaks, buffer or rules.",
       parameters: {
         type: "object",
-        properties: {
-          query: { type: "string", description: "Free-text search." },
-          key: { type: "string", description: "Exact memory key." },
-          category: { type: "string", enum: [...SCHEDULE_MEMORY_CATEGORIES] },
-          tags: { type: "array", items: { type: "string" } },
-          limit: { type: "integer", minimum: 1, maximum: 200 },
-        },
+        properties: {},
         additionalProperties: false,
       },
     },
   },
-  memory_upsert: {
+  preferences_update: {
     type: "function",
     function: {
-      name: "memory_upsert",
+      name: "preferences_update",
       description:
-        "Create or update one structured memory document. Use a stable, descriptive key. For scheduling_preferences, put workdays/workStart/workEnd/breaks/maxFocusMinutes/minBlockMinutes/bufferRatio/dailyFocusLimitMinutes/timezone into data.",
+        "Update scheduling preferences. Only include fields the user confirmed. bufferRatio and gapMinutes control all padding: 0 means exact back-to-back scheduling with no hidden buffer. Use add_rules/remove_rules to maintain a short list of constraints that cannot be represented structurally (e.g. split rules, semester week rules).",
       parameters: {
         type: "object",
         properties: {
-          memory_id: { type: "string", description: "Existing memory id." },
-          key: { type: "string", description: "Unique stable key." },
-          category: { type: "string", enum: [...SCHEDULE_MEMORY_CATEGORIES] },
-          title: { type: "string" },
-          content: { type: "string", description: "Human-readable memory text." },
-          data: {
-            type: "object",
-            description: "Optional structured fields.",
-            additionalProperties: true,
+          timezone: { type: "string", description: "IANA timezone." },
+          workdays: {
+            type: "array",
+            items: { type: "integer", minimum: 1, maximum: 7 },
+            description: "ISO weekdays, Monday=1 … Sunday=7.",
           },
-          tags: { type: "array", items: { type: "string" } },
-          pinned: { type: "boolean" },
-        },
-        additionalProperties: false,
-      },
-    },
-  },
-  memory_delete: {
-    type: "function",
-    function: {
-      name: "memory_delete",
-      description: "Delete one memory by id or key.",
-      parameters: {
-        type: "object",
-        properties: {
-          memory_id: { type: "string" },
-          key: { type: "string" },
+          workStart: { type: "string", description: "HH:mm." },
+          workEnd: { type: "string", description: "HH:mm; must be after workStart." },
+          breaks: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                start: { type: "string", description: "HH:mm." },
+                end: { type: "string", description: "HH:mm; must be after start." },
+              },
+              required: ["start", "end"],
+              additionalProperties: false,
+            },
+          },
+          maxFocusMinutes: { type: "integer", minimum: 15, maximum: 480 },
+          minBlockMinutes: { type: "integer", minimum: 5, maximum: 600 },
+          bufferRatio: {
+            type: "number",
+            minimum: 0,
+            maximum: 1,
+            description: "Extra fraction added to estimates; 0 = exact.",
+          },
+          gapMinutes: {
+            type: "integer",
+            minimum: 0,
+            maximum: 60,
+            description: "Wall-clock minutes between blocks; 0 = back-to-back.",
+          },
+          dailyFocusLimitMinutes: {
+            type: "integer",
+            minimum: 30,
+            maximum: 1440,
+          },
+          rules: {
+            type: "array",
+            items: { type: "string" },
+            description: "Replace the full rules list.",
+          },
+          add_rules: {
+            type: "array",
+            items: { type: "string" },
+            description: "Append rules without replacing existing ones.",
+          },
+          remove_rules: {
+            type: "array",
+            items: { type: "string" },
+            description: "Remove rules by exact text.",
+          },
         },
         additionalProperties: false,
       },
@@ -449,7 +644,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "task_upsert",
       description:
-        "Create or update a task. New tasks require title and estimated_minutes. Use add_actual_minutes when the user reports progress; it reduces remaining time and closes the task at zero.",
+        "Create or update a task. New tasks require title and estimated_minutes. If the estimate, priority or deadline is unclear, ask the user with ask_user_question instead of inventing one. Use add_actual_minutes when the user reports progress; it reduces remaining time and closes the task at zero. Steps are optional: only decompose large or multi-day work where a concrete breakdown helps; omit steps (or pass []) for simple tasks. Each step becomes the note of the block(s) covering it.",
       parameters: {
         type: "object",
         properties: {
@@ -474,6 +669,24 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
             type: "string",
             enum: [...SCHEDULE_TIMES_OF_DAY],
           },
+          steps: {
+            type: "array",
+            description:
+              "Optional ordered breakdown of the task's work; replaces the current list, [] clears it. Only include when decomposition helps (large or multi-day tasks). Each step is a short concrete action of 5-600 minutes and becomes the note of the block(s) covering it.",
+            items: {
+              type: "object",
+              properties: {
+                title: {
+                  type: "string",
+                  description:
+                    "Short concrete action, e.g. 精读 3 篇基线论文并整理对比表.",
+                },
+                minutes: { type: "integer", minimum: 5, maximum: 600 },
+              },
+              required: ["title", "minutes"],
+              additionalProperties: false,
+            },
+          },
         },
         additionalProperties: false,
       },
@@ -484,11 +697,81 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "task_delete",
       description:
-        "Delete a task and all of its scheduled blocks. Ask the user before deleting work history.",
+        "Delete a task and all of its scheduled blocks. Ask the user with ask_user_question before deleting work history.",
       parameters: {
         type: "object",
         properties: { task_id: { type: "string" } },
         required: ["task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  fixed_event_list: {
+    type: "function",
+    function: {
+      name: "fixed_event_list",
+      description:
+        "List fixed commitments (weekly courses/meetings or one-off events). Fixed events occupy wall-clock time, need no estimate, and a week containing only fixed events is a valid plan.",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: [...SCHEDULE_FIXED_EVENT_KINDS] },
+          weekday: {
+            type: "integer",
+            minimum: 1,
+            maximum: 7,
+            description: "Filter weekly events by ISO weekday (1=Monday).",
+          },
+          date: {
+            type: "string",
+            description: "Filter one-off events by date (YYYY-MM-DD).",
+          },
+          query: { type: "string", description: "Free-text search." },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  fixed_event_upsert: {
+    type: "function",
+    function: {
+      name: "fixed_event_upsert",
+      description:
+        "Create or update a fixed commitment (course, meeting, appointment). New events require title, kind (weekly|once), start and end, plus weekday 1-7 (weekly) or date YYYY-MM-DD (once). If any of those are missing or ambiguous, ask the user with ask_user_question instead of guessing. Use this for courses and recurring meetings instead of creating tasks; do not re-create events that fixed_event_list already shows.",
+      parameters: {
+        type: "object",
+        properties: {
+          event_id: { type: "string", description: "Existing event id to update." },
+          title: { type: "string" },
+          kind: { type: "string", enum: [...SCHEDULE_FIXED_EVENT_KINDS] },
+          weekday: {
+            type: "integer",
+            minimum: 1,
+            maximum: 7,
+            description: "ISO weekday 1=Monday … 7=Sunday; required for kind=weekly.",
+          },
+          date: {
+            type: "string",
+            description: "YYYY-MM-DD; required for kind=once.",
+          },
+          start: { type: "string", description: "HH:mm." },
+          end: { type: "string", description: "HH:mm; must be after start." },
+          location: { type: "string" },
+          note: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  fixed_event_delete: {
+    type: "function",
+    function: {
+      name: "fixed_event_delete",
+      description: "Delete one fixed event by id.",
+      parameters: {
+        type: "object",
+        properties: { event_id: { type: "string" } },
+        required: ["event_id"],
         additionalProperties: false,
       },
     },
@@ -498,13 +781,19 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_get",
       description:
-        "Read one week's plan with block ids, daily grouping, unscheduled tasks, warnings and preferences.",
+        "Read one rolling planning window with block ids, daily grouping, unscheduled tasks, warnings and preferences. Defaults to today through the next 6 days.",
       parameters: {
         type: "object",
         properties: {
-          week_start: {
+          from_date: {
             type: "string",
-            description: "Any date in the week; defaults to the current week.",
+            description: "First day of the window (YYYY-MM-DD); defaults to today.",
+          },
+          days: {
+            type: "integer",
+            minimum: 1,
+            maximum: 21,
+            description: "Window length in days (default 7).",
           },
         },
         additionalProperties: false,
@@ -516,13 +805,19 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_schedule",
       description:
-        "Generate or regenerate a weekly plan. Preserves completed blocks, replaces future planned blocks for the selected tasks, respects working hours/breaks and buffers uncertain estimates. Renders and saves a PNG table automatically.",
+        "Generate or regenerate a rolling N-day plan starting from today (default) or from_date. Preserves completed blocks, replaces future planned blocks for the selected tasks, respects working hours/breaks, never schedules into time that already passed today, carves out fixed events (courses/meetings) and buffers uncertain estimates. Works with zero tasks: a window with only fixed events still produces an agenda. Renders and saves a PNG automatically.",
       parameters: {
         type: "object",
         properties: {
-          week_start: {
+          from_date: {
             type: "string",
-            description: "Any date in the target week; defaults to the current week.",
+            description: "First day of the window (YYYY-MM-DD); defaults to today and cannot be in the past.",
+          },
+          days: {
+            type: "integer",
+            minimum: 1,
+            maximum: 21,
+            description: "Window length in days (default 7).",
           },
           task_ids: {
             type: "array",
@@ -531,7 +826,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
           },
           allow_spill: {
             type: "boolean",
-            description: "Allow overflow into the following week (default true).",
+            description: "Allow overflow beyond the window (default true).",
           },
           notes: { type: "string" },
         },
@@ -544,7 +839,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_replan",
       description:
-        "Replan from a date (default today). Marks overdue planned blocks as skipped, keeps completed blocks, and moves unfinished work into free slots, optionally spilling into the next week. Renders and saves a PNG table automatically.",
+        "Replan a rolling window from a date (default today). Marks overdue planned blocks as skipped, keeps completed blocks, and moves unfinished work into free slots around fixed events, optionally spilling beyond the window. Renders and saves a PNG agenda automatically.",
       parameters: {
         type: "object",
         properties: {
@@ -593,26 +888,45 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_render",
       description:
-        "Render the weekly table to a PNG in data/schedule/exports and return a preview. Use when the user wants the image again or after manual edits.",
+        "Render the rolling agenda to a PNG in data/schedule/exports and return a preview. Defaults to today through the next 6 days. Use when the user wants the image again or after manual edits.",
       parameters: {
         type: "object",
         properties: {
-          week_start: { type: "string" },
+          from_date: {
+            type: "string",
+            description: "First day of the window (YYYY-MM-DD); defaults to today.",
+          },
+          days: {
+            type: "integer",
+            minimum: 1,
+            maximum: 21,
+            description: "Window length in days (default 7).",
+          },
         },
         additionalProperties: false,
       },
     },
   },
+  ask_user_question: ASK_USER_QUESTION_DEFINITION,
   plan_email: {
     type: "function",
     function: {
       name: "plan_email",
       description:
-        "Email the weekly plan PNG to the user's configured mailbox. Only call when the user explicitly asks to send it. The recipient is fixed in settings and cannot be supplied here.",
+        "Email the rolling agenda PNG to the user's configured mailbox. Defaults to today through the next 6 days. Only call when the user explicitly asks to send it. The recipient is fixed in settings and cannot be supplied here.",
       parameters: {
         type: "object",
         properties: {
-          week_start: { type: "string" },
+          from_date: {
+            type: "string",
+            description: "First day of the window (YYYY-MM-DD); defaults to today.",
+          },
+          days: {
+            type: "integer",
+            minimum: 1,
+            maximum: 21,
+            description: "Window length in days (default 7).",
+          },
           note: { type: "string", description: "Optional note included in the email." },
         },
         additionalProperties: false,
@@ -639,18 +953,22 @@ export class ScheduleToolExecutor {
     ctx: ScheduleToolContext,
   ): Promise<ToolResult> {
     switch (name) {
-      case "memory_search":
-        return this.memorySearch(rawArguments);
-      case "memory_upsert":
-        return this.memoryUpsert(rawArguments, ctx);
-      case "memory_delete":
-        return this.memoryDelete(rawArguments, ctx);
+      case "preferences_get":
+        return this.preferencesGet(rawArguments);
+      case "preferences_update":
+        return this.preferencesUpdate(rawArguments, ctx);
       case "task_list":
         return this.taskList(rawArguments);
       case "task_upsert":
         return this.taskUpsert(rawArguments, ctx);
       case "task_delete":
         return this.taskDelete(rawArguments, ctx);
+      case "fixed_event_list":
+        return this.fixedEventList(rawArguments);
+      case "fixed_event_upsert":
+        return this.fixedEventUpsert(rawArguments, ctx);
+      case "fixed_event_delete":
+        return this.fixedEventDelete(rawArguments, ctx);
       case "plan_get":
         return this.planGet(rawArguments);
       case "plan_schedule":
@@ -663,6 +981,15 @@ export class ScheduleToolExecutor {
         return this.planRender(rawArguments, ctx);
       case "plan_email":
         return this.planEmail(rawArguments, ctx);
+      case "ask_user_question":
+        return askUserQuestionResult(rawArguments, {
+          sessionId: ctx.session.id,
+          toolCallId: ctx.toolCallId,
+          messageId: ctx.messageId,
+          signal: ctx.signal,
+          emit: ctx.emit,
+          questions: ctx.questions,
+        });
       default:
         return toolError(`Unknown schedule tool: ${name}`);
     }
@@ -672,123 +999,80 @@ export class ScheduleToolExecutor {
     return todayInTimezone(this.options.store.getPreferences().timezone);
   }
 
-  private memorySearch(raw: string): ToolResult {
-    const parsed = parseArgs(memorySearchArgs, raw);
-    if (!parsed.ok) return toolError(parsed.message, { view: "memory" });
-    const memories = this.options.store.listMemories({
-      query: parsed.data.query,
-      key: parsed.data.key,
-      category: parsed.data.category,
-      tags: parsed.data.tags,
-      limit: parsed.data.limit,
-    });
-    if (memories.length === 0) {
-      return {
-        content:
-          "No matching memories. If this is a first-time setup, ask the user for their scheduling preferences and save them with memory_upsert key='scheduling_preferences'.",
-        status: "complete",
-        meta: { kind: "memory", view: "memory", data: { view: "memory", memories: [] } },
-      };
-    }
+  private preferencesGet(raw: string): ToolResult {
+    const parsed = parseArgs(preferencesGetArgs, raw);
+    if (!parsed.ok) return toolError(parsed.message, { view: "preferences" });
+    const preferences = this.options.store.getPreferences();
+    const configured = this.options.store.getPreferencesMemory() !== undefined;
     return {
-      content: truncate(memories.map((memory) => formatMemory(memory)).join("\n\n")),
+      content: formatPreferences(preferences, configured),
       status: "complete",
       meta: {
-        kind: "memory",
-        view: "memory",
-        resultCount: memories.length,
-        data: { view: "memory", memories },
+        kind: "preferences",
+        view: "preferences",
+        data: { view: "preferences", preferences, configured },
       },
     };
   }
 
-  private async memoryUpsert(
+  private async preferencesUpdate(
     raw: string,
     ctx: ScheduleToolContext,
   ): Promise<ToolResult> {
-    const parsed = parseArgs(memoryUpsertArgs, raw);
-    if (!parsed.ok) return toolError(parsed.message, { view: "memory" });
+    const parsed = parseArgs(preferencesUpdateArgs, raw);
+    if (!parsed.ok) return toolError(parsed.message, { view: "preferences" });
     const args = parsed.data;
+    const current = this.options.store.getPreferences();
+    let rules = args.rules ?? current.rules;
+    if (args.add_rules !== undefined && args.add_rules.length > 0) {
+      rules = [...rules, ...args.add_rules];
+    }
+    if (args.remove_rules !== undefined && args.remove_rules.length > 0) {
+      const remove = new Set(args.remove_rules);
+      rules = rules.filter((rule) => !remove.has(rule));
+    }
     try {
-      const existing =
-        args.memory_id !== undefined
-          ? this.options.store.getMemory(args.memory_id)
-          : args.key !== undefined
-            ? this.options.store.getMemoryByKey(args.key)
-            : undefined;
-      if (existing === undefined && args.title === undefined) {
-        return toolError("Creating a memory requires a title.", { view: "memory" });
-      }
-      const { memory, created } = await this.options.store.upsertMemory({
-        id: args.memory_id,
-        key: args.key,
-        category: args.category,
-        title: args.title,
-        content: args.content,
-        data: args.data,
-        tags: args.tags,
-        pinned: args.pinned,
+      const preferences = await this.options.store.updatePreferences({
+        timezone: args.timezone,
+        workdays: args.workdays,
+        workStart: args.workStart,
+        workEnd: args.workEnd,
+        breaks: args.breaks,
+        maxFocusMinutes: args.maxFocusMinutes,
+        minBlockMinutes: args.minBlockMinutes,
+        bufferRatio: args.bufferRatio,
+        gapMinutes: args.gapMinutes,
+        dailyFocusLimitMinutes: args.dailyFocusLimitMinutes,
+        rules:
+          args.rules !== undefined ||
+          args.add_rules !== undefined ||
+          args.remove_rules !== undefined
+            ? rules
+            : undefined,
       });
       void this.options.audit.append({
-        type: "schedule.memory.changed",
+        type: "schedule.preferences.changed",
         sessionId: ctx.session.id,
-        action: created ? "created" : "updated",
-        memoryId: memory.id,
-        key: memory.key,
+        action: "updated",
+        rules: preferences.rules.length,
+        bufferRatio: preferences.bufferRatio,
+        gapMinutes: preferences.gapMinutes,
       });
-      const preferencesNote =
-        memory.key === "scheduling_preferences"
-          ? `\nNormalized preferences: ${JSON.stringify(this.options.store.getPreferences())}`
-          : "";
       return {
-        content: `${created ? "Created" : "Updated"} memory:\n${formatMemory(memory)}${preferencesNote}`,
+        content: `已保存排期偏好。\n${formatPreferences(preferences, true)}`,
         status: "complete",
         meta: {
-          kind: "memory",
-          view: "memory",
-          data: { view: "memory", memories: [memory], created },
+          kind: "preferences",
+          view: "preferences",
+          data: { view: "preferences", preferences, configured: true },
         },
       };
     } catch (error) {
       return toolError(
         error instanceof Error ? error.message : String(error),
-        { view: "memory" },
+        { view: "preferences" },
       );
     }
-  }
-
-  private async memoryDelete(
-    raw: string,
-    ctx: ScheduleToolContext,
-  ): Promise<ToolResult> {
-    const parsed = parseArgs(memoryDeleteArgs, raw);
-    if (!parsed.ok) return toolError(parsed.message, { view: "memory" });
-    const target = parsed.data.memory_id ?? parsed.data.key!;
-    const existing =
-      parsed.data.memory_id !== undefined
-        ? this.options.store.getMemory(parsed.data.memory_id)
-        : this.options.store.getMemoryByKey(parsed.data.key!);
-    if (existing === undefined) {
-      return toolError(`Memory not found: ${target}`, { view: "memory" });
-    }
-    const deleted = await this.options.store.deleteMemory(existing.id);
-    if (!deleted) return toolError(`Memory not found: ${target}`, { view: "memory" });
-    void this.options.audit.append({
-      type: "schedule.memory.changed",
-      sessionId: ctx.session.id,
-      action: "deleted",
-      memoryId: existing.id,
-      key: existing.key,
-    });
-    return {
-      content: `Deleted memory ${existing.key} (${existing.id}).`,
-      status: "complete",
-      meta: {
-        kind: "memory",
-        view: "memory",
-        data: { view: "memory", memories: [], deletedId: existing.id },
-      },
-    };
   }
 
   private taskList(raw: string): ToolResult {
@@ -922,30 +1206,167 @@ export class ScheduleToolExecutor {
     };
   }
 
+  private fixedEventList(raw: string): ToolResult {
+    const parsed = parseArgs(fixedEventListArgs, raw);
+    if (!parsed.ok) return toolError(parsed.message, { view: "fixed" });
+    const args = parsed.data;
+    const query = args.query?.trim().toLowerCase();
+    const events = this.options.store
+      .listFixedEvents()
+      .filter((event) => {
+        if (args.kind !== undefined && event.kind !== args.kind) return false;
+        if (args.weekday !== undefined && event.weekday !== args.weekday) {
+          return false;
+        }
+        if (args.date !== undefined && event.date !== args.date) return false;
+        if (query !== undefined && query !== "") {
+          const haystack = [event.title, event.location, event.note]
+            .join("\n")
+            .toLowerCase();
+          if (!haystack.includes(query)) return false;
+        }
+        return true;
+      });
+    if (events.length === 0) {
+      return {
+        content:
+          "没有固定安排。用户提到的固定课程、例会或预约请用 fixed_event_upsert 登记（weekly 需要 weekday 1-7，once 需要 date）。",
+        status: "complete",
+        meta: {
+          kind: "schedule",
+          view: "fixed",
+          resultCount: 0,
+          data: { view: "fixed", fixedEvents: [] },
+        },
+      };
+    }
+    return {
+      content: truncate(events.map((event) => formatFixedEvent(event)).join("\n\n")),
+      status: "complete",
+      meta: {
+        kind: "schedule",
+        view: "fixed",
+        resultCount: events.length,
+        data: { view: "fixed", fixedEvents: events },
+      },
+    };
+  }
+
+  private async fixedEventUpsert(
+    raw: string,
+    ctx: ScheduleToolContext,
+  ): Promise<ToolResult> {
+    const parsed = parseArgs(fixedEventUpsertArgs, raw);
+    if (!parsed.ok) return toolError(parsed.message, { view: "fixed" });
+    const args = parsed.data;
+    try {
+      const { event, created } = await this.options.store.upsertFixedEvent({
+        id: args.event_id,
+        title: args.title,
+        kind: args.kind,
+        weekday: args.weekday,
+        date: args.date,
+        start: args.start,
+        end: args.end,
+        location: args.location,
+        note: args.note,
+      });
+      void this.options.audit.append({
+        type: "schedule.fixed_event.changed",
+        sessionId: ctx.session.id,
+        action: created ? "created" : "updated",
+        fixedEventId: event.id,
+        title: event.title,
+      });
+      const hint = created
+        ? "\n固定安排会占用对应时段；用 plan_schedule 重新生成日程即可生效。"
+        : "";
+      return {
+        content: `${created ? "Created" : "Updated"} fixed event:\n${formatFixedEvent(event)}${hint}`,
+        status: "complete",
+        meta: {
+          kind: "schedule",
+          view: "fixed",
+          data: { view: "fixed", fixedEvents: [event], created },
+        },
+      };
+    } catch (error) {
+      return toolError(
+        error instanceof Error ? error.message : String(error),
+        { view: "fixed" },
+      );
+    }
+  }
+
+  private async fixedEventDelete(
+    raw: string,
+    ctx: ScheduleToolContext,
+  ): Promise<ToolResult> {
+    const parsed = parseArgs(fixedEventDeleteArgs, raw);
+    if (!parsed.ok) return toolError(parsed.message, { view: "fixed" });
+    const existing = this.options.store.getFixedEvent(parsed.data.event_id);
+    if (existing === undefined) {
+      return toolError(
+        `Fixed event not found: ${parsed.data.event_id}`,
+        { view: "fixed" },
+      );
+    }
+    const deleted = await this.options.store.deleteFixedEvent(existing.id);
+    if (!deleted) {
+      return toolError(
+        `Fixed event not found: ${parsed.data.event_id}`,
+        { view: "fixed" },
+      );
+    }
+    void this.options.audit.append({
+      type: "schedule.fixed_event.changed",
+      sessionId: ctx.session.id,
+      action: "deleted",
+      fixedEventId: existing.id,
+      title: existing.title,
+    });
+    return {
+      content: `Deleted fixed event ${existing.title} (${existing.id}).`,
+      status: "complete",
+      meta: {
+        kind: "schedule",
+        view: "fixed",
+        data: { view: "fixed", fixedEvents: [], deletedId: existing.id },
+      },
+    };
+  }
+
   private planGet(raw: string): ToolResult {
     const parsed = parseArgs(planGetArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const preferences = this.options.store.getPreferences();
+    const store = this.options.store;
+    const preferences = store.getPreferences();
     const today = this.today();
-    const weekStart = mondayOf(parsed.data.week_start ?? today);
-    const plan = this.options.store.getPlan(weekStart) ?? null;
-    const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-    const summary = this.options.store.summarize(plan, preferences);
-    if (plan === null) {
-      summary.weekStart = weekStart;
-      summary.weekEnd = weekEndOf(weekStart);
-    }
+    const startDate = parsed.data.from_date ?? today;
+    const days = parsed.data.days ?? 7;
+    const endDate = rangeEndOf(startDate, days);
+    const window = store.getWindow(startDate, days);
+    const tasks = store.listTasks({ includeDone: true, limit: 200 });
+    const fixedEvents = store.listFixedEvents();
+    const summary =
+      window === null
+        ? emptySummary(startDate, endDate, preferences.timezone)
+        : store.summarizeWindow(window);
     return {
       content: truncate(
-        formatPlan(plan, tasks, preferences, summary) +
-          `\n\n历史校准：${JSON.stringify(this.options.store.getCalibration())}`,
+        formatPlan(window, tasks, fixedEvents, preferences, summary) +
+          `\n\n历史校准：${JSON.stringify(store.getCalibration())}`,
       ),
       status: "complete",
-      meta: planResultMeta(plan, tasks, preferences, summary, {
-        weekStart,
-        weekEnd: weekEndOf(weekStart),
-        today,
-        data: {},
+      meta: planResultMeta({
+        window,
+        tasks,
+        fixedEvents,
+        preferences,
+        summary,
+        startDate,
+        endDate,
+        extra: { today, data: {} },
       }),
     };
   }
@@ -957,8 +1378,9 @@ export class ScheduleToolExecutor {
     const parsed = parseArgs(planScheduleArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
     return this.runPlanner({
-      mode: "week",
-      weekStartInput: parsed.data.week_start,
+      mode: "schedule",
+      fromDate: parsed.data.from_date,
+      days: parsed.data.days ?? 7,
       taskIds: parsed.data.task_ids,
       allowSpill: parsed.data.allow_spill !== false,
       notes: parsed.data.notes,
@@ -984,10 +1406,9 @@ export class ScheduleToolExecutor {
   }
 
   private async runPlanner(input: {
-    mode: "week" | "replan";
-    weekStartInput?: string;
+    mode: "schedule" | "replan";
     fromDate?: string;
-    days?: number;
+    days: number;
     taskIds?: string[];
     allowSpill: boolean;
     notes?: string;
@@ -998,34 +1419,11 @@ export class ScheduleToolExecutor {
     const preferences = store.getPreferences();
     const today = this.today();
 
-    const targetWeekStart =
-      input.mode === "week"
-        ? mondayOf(input.weekStartInput ?? today)
-        : mondayOf(input.fromDate ?? today);
-    if (
-      input.mode === "week" &&
-      compareDates(targetWeekStart, mondayOf(today)) < 0
-    ) {
-      return toolError(
-        `该周已经过去（${targetWeekStart} ~ ${weekEndOf(targetWeekStart)}），请指定当前或未来的周。`,
-        { view: "plan" },
-      );
-    }
-    const startDate =
-      input.mode === "week"
-        ? maxDate(targetWeekStart, today)
-        : maxDate(input.fromDate ?? today, today);
-    const endDate =
-      input.mode === "week"
-        ? addDays(weekEndOf(targetWeekStart), input.allowSpill ? 7 : 0)
-        : addDays(startDate, (input.days ?? 7) - 1 + (input.allowSpill ? 7 : 0));
-
-    if (compareDates(startDate, endDate) > 0) {
-      return toolError(
-        `该周已经过去（${targetWeekStart} ~ ${weekEndOf(targetWeekStart)}），请指定当前或未来的周。`,
-        { view: "plan" },
-      );
-    }
+    // A rolling window always starts now or later. Requested past dates are
+    // clamped to today instead of erroring so the model can recover.
+    const startDate = maxDate(input.fromDate ?? today, today);
+    const windowEnd = rangeEndOf(startDate, input.days);
+    const endDate = addDays(windowEnd, input.allowSpill ? 7 : 0);
 
     let tasks: ScheduleTask[];
     if (input.taskIds !== undefined && input.taskIds.length > 0) {
@@ -1044,22 +1442,39 @@ export class ScheduleToolExecutor {
         (task.status === "todo" || task.status === "in_progress") &&
         task.remainingMinutes > 0,
     );
-    if (active.length === 0) {
-      return {
-        content:
-          "没有需要排期的任务（没有 todo/in_progress 且剩余时间大于 0 的任务）。先用 task_upsert 添加任务。",
-        status: "complete",
-        meta: {
-          kind: "schedule",
-          view: "plan",
-          data: { view: "plan", table: null, plan: null },
-        },
-      };
+    // A window containing only fixed commitments (courses, meetings) is a
+    // valid plan: generate the fixed-only agenda instead of refusing.
+    const fixedOnlyWindow = active.length === 0;
+    if (fixedOnlyWindow) {
+      let hasFixedEvents = false;
+      for (
+        let date = startDate;
+        compareDates(date, windowEnd) <= 0;
+        date = addDays(date, 1)
+      ) {
+        if (store.fixedEventsForDate(date).length > 0) {
+          hasFixedEvents = true;
+          break;
+        }
+      }
+      if (!hasFixedEvents) {
+        return {
+          content:
+            "没有需要排期的任务，这个时间窗口也没有登记固定安排。可以先用 fixed_event_upsert 登记固定课程/会议（无需估时），或用 task_upsert 添加需要排期的任务。",
+          status: "complete",
+          meta: {
+            kind: "schedule",
+            view: "plan",
+            data: { view: "plan", agenda: null, window: null },
+          },
+        };
+      }
     }
 
     const included = new Set(active.map((task) => task.id));
     const removeFromDate = startDate;
-    const allBlocks = store.listPlans().flatMap((plan) => plan.blocks);
+    const storedPlans = store.listPlans();
+    const allBlocks = storedPlans.flatMap((plan) => plan.blocks);
     const existingBlocks: ScheduleBlock[] = [];
     const committedMinutesByTask = new Map<string, number>();
     for (const block of allBlocks) {
@@ -1086,37 +1501,40 @@ export class ScheduleToolExecutor {
       startDate,
       endDate,
       today,
+      nowClock: nowClockInTimezone(preferences.timezone),
       tasks: active,
       existingBlocks,
+      fixedEvents: store.listFixedEvents(),
       preferences,
       committedMinutesByTask,
     });
 
     if (store.getPreferencesMemory() === undefined) {
       result.warnings.unshift(
-        "尚未配置排期偏好，已使用默认的工作日与工作时段。请向用户确认工作时段、休息时间和每日专注上限，并用 memory_upsert 保存 key=scheduling_preferences。",
+        "尚未配置排期偏好，已使用默认的工作日与工作时段。请向用户确认工作时段、休息时间和每日专注上限，并用 preferences_update 保存。",
       );
     }
     const weeks = new Set<string>();
     for (const block of result.blocks) weeks.add(mondayOf(block.date));
-    // If the requested week has no usable workday left (e.g. planning on a
-    // weekend), present and annotate the first week that actually got blocks.
-    const primaryWeek =
-      result.blocks.length > 0
-        ? mondayOf(result.blocks[0]!.date)
-        : mondayOf(startDate);
-    weeks.add(primaryWeek);
+    const startWeek = mondayOf(startDate);
+    weeks.add(startWeek);
+    // Attach the window-level metadata to every ISO week the planning range
+    // touches. A rolling window can start on any weekday, so anchoring it to a
+    // single week would hide unscheduled work when the user looks at a window
+    // that starts in the other week. getWindow dedupes repeated entries.
     const planMeta = new Map<
       string,
       { unscheduled?: typeof result.unscheduled; warnings?: string[]; notes?: string }
     >();
-    for (const week of weeks) {
-      planMeta.set(week, {
-        unscheduled: week === primaryWeek ? result.unscheduled : [],
+    for (
+      let date = startDate;
+      compareDates(date, endDate) <= 0;
+      date = addDays(date, 1)
+    ) {
+      planMeta.set(mondayOf(date), {
+        unscheduled: result.unscheduled,
         warnings: result.warnings,
-        ...(week === primaryWeek && input.notes !== undefined
-          ? { notes: input.notes }
-          : {}),
+        ...(input.notes !== undefined ? { notes: input.notes } : {}),
       });
     }
 
@@ -1131,51 +1549,69 @@ export class ScheduleToolExecutor {
     void this.options.audit.append({
       type: "schedule.plan.changed",
       sessionId: ctx.session.id,
-      action: input.mode === "week" ? "scheduled" : "replanned",
+      action: input.mode === "schedule" ? "scheduled" : "replanned",
       weeks: [...weeks],
       blocks: result.blocks.length,
       unscheduled: result.unscheduled.length,
     });
 
-    const renderWeek = primaryWeek;
-    const render = await this.tryRender(renderWeek, ctx, input.notes);
-    const plan = store.getPlan(renderWeek) ?? null;
+    const render = await this.tryRender(startDate, input.days, ctx);
+    const window = store.getWindow(startDate, input.days);
     const latestTasks = store.listTasks({ includeDone: true, limit: 200 });
-    const summary = store.summarize(plan, preferences);
+    const fixedEvents = store.listFixedEvents();
+    const summary =
+      window === null
+        ? emptySummary(startDate, windowEnd, preferences.timezone)
+        : store.summarizeWindow(window);
+    const spillBlocks = result.blocks.filter(
+      (block) => compareDates(block.date, windowEnd) > 0,
+    ).length;
     const affected = updatedPlans
       .map((candidate) => `${candidate.weekStart}(${candidate.blocks.length} blocks)`)
       .join(", ");
     const content = [
-      input.mode === "week"
-        ? targetWeekStart === primaryWeek
-          ? `已生成 ${targetWeekStart} 开始的周计划。`
-          : `目标周 ${targetWeekStart} 已没有可用工作日，计划从 ${primaryWeek} 开始排入。`
-        : startDate === primaryWeek
-          ? `已从 ${startDate} 开始重排未完成工作。`
-          : `从 ${startDate} 起没有可用工作日，重排结果从 ${primaryWeek} 开始。`,
-      `生成 ${result.blocks.length} 个 block，涉及 ${weeks.size} 周：${affected}。`,
+      fixedOnlyWindow
+        ? `这个时间窗口没有需要排期的科研任务；已生成仅含固定安排（课程/会议）的议程，科研任务补充后用 plan_schedule 重新生成即可排入空闲时段。`
+        : input.mode === "schedule"
+          ? `已生成 ${startDate} 起的 ${input.days} 天滚动日程。`
+          : `已从 ${startDate} 起重排未完成工作（${input.days} 天窗口）。`,
+      `生成 ${result.blocks.length} 个 block，涉及 ${weeks.size} 个 ISO 周：${affected}。`,
+      spillBlocks > 0
+        ? `其中 ${spillBlocks} 个 block 排在 ${windowEnd} 之后（窗口外溢出）。`
+        : "",
       render !== null
-        ? `计划表 PNG 已保存：${render.filePath}`
+        ? `日程 PNG 已保存：${render.filePath}`
         : "计划已保存，但 PNG 渲染失败；可稍后用 plan_render 重试。",
       "",
-      formatPlan(plan, latestTasks, preferences, summary),
-    ].join("\n");
+      formatPlan(window, latestTasks, fixedEvents, preferences, summary),
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
 
     return {
       content: truncate(content),
       status: "complete",
       meta: {
-        ...planResultMeta(plan, latestTasks, preferences, summary, {
-          weekStart: renderWeek,
-          weekEnd: weekEndOf(renderWeek),
-          today,
-          filePath: render?.filePath,
-          width: render?.width,
-          height: render?.height,
-          affectedWeeks: [...weeks],
-          data: {
-            affectedWeeks: [...weeks],
+        ...planResultMeta({
+          window,
+          tasks: latestTasks,
+          fixedEvents,
+          preferences,
+          summary,
+          startDate,
+          endDate: windowEnd,
+          extra: {
+            today,
             filePath: render?.filePath,
+            width: render?.width,
+            height: render?.height,
+            affectedWeeks: [...weeks],
+            spillBlocks,
+            data: {
+              affectedWeeks: [...weeks],
+              spillBlocks,
+              filePath: render?.filePath,
+            },
           },
         }),
         ...(render?.dataUrl ? { imageDataUrl: render.dataUrl } : {}),
@@ -1244,19 +1680,37 @@ export class ScheduleToolExecutor {
 
       const preferences = this.options.store.getPreferences();
       const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-      const summary = this.options.store.summarize(plan, preferences);
+      const fixedEvents = this.options.store.listFixedEvents();
+      const today = this.today();
+      const days = 7;
+      const todayWindowEnd = rangeEndOf(today, days);
+      const windowStart =
+        compareDates(block.date, today) < 0 ||
+        compareDates(block.date, todayWindowEnd) <= 0
+          ? today
+          : addDays(block.date, -(days - 1));
+      const windowEnd = rangeEndOf(windowStart, days);
+      const window = this.options.store.getWindow(windowStart, days);
+      const summary =
+        window === null
+          ? emptySummary(windowStart, windowEnd, preferences.timezone)
+          : this.options.store.summarizeWindow(window);
       return {
         content: `Updated block ${block.id}: ${block.date} ${block.start}-${block.end} · ${block.status}${
           task === undefined
             ? ""
-            : `\nTask: ${formatTask(task)}\nRemaining work changed; call plan_replan if the rest of the week should be compacted or pushed back.`
+            : `\nTask: ${formatTask(task)}\nRemaining work changed; call plan_replan if the rest of the window should be compacted or pushed back.`
         }`,
         status: "complete",
-        meta: planResultMeta(plan, tasks, preferences, summary, {
-          weekStart: plan.weekStart,
-          weekEnd: plan.weekEnd,
-          today: this.today(),
-          data: { block, previous: before.block },
+        meta: planResultMeta({
+          window,
+          tasks,
+          fixedEvents,
+          preferences,
+          summary,
+          startDate: windowStart,
+          endDate: windowEnd,
+          extra: { today, data: { block, previous: before.block } },
         }),
       };
     } catch (error) {
@@ -1273,26 +1727,44 @@ export class ScheduleToolExecutor {
   ): Promise<ToolResult> {
     const parsed = parseArgs(planRenderArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const preferences = this.options.store.getPreferences();
-    const weekStart = mondayOf(parsed.data.week_start ?? this.today());
-    const render = await this.tryRender(weekStart, ctx, undefined);
+    const store = this.options.store;
+    const preferences = store.getPreferences();
+    const startDate = parsed.data.from_date ?? this.today();
+    const days = parsed.data.days ?? 7;
+    const endDate = rangeEndOf(startDate, days);
+    const render = await this.tryRender(startDate, days, ctx);
     if (render === null) {
       return toolError("渲染 PNG 失败。", { view: "plan" });
     }
-    const plan = this.options.store.getPlan(weekStart) ?? null;
-    const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-    const summary = this.options.store.summarize(plan, preferences);
+    const tasks = store.listTasks({ includeDone: true, limit: 200 });
+    const fixedEvents = store.listFixedEvents();
+    const window = store.getWindow(startDate, days);
+    const summary =
+      window === null
+        ? emptySummary(startDate, endDate, preferences.timezone)
+        : store.summarizeWindow(window);
     return {
-      content: `Rendered ${render.width}×${render.height} PNG for ${weekStart}:\n${render.filePath}`,
+      content: `Rendered ${render.width}×${render.height} PNG for ${startDate} ~ ${endDate}:\n${render.filePath}`,
       status: "complete",
       meta: {
-        ...planResultMeta(plan, tasks, preferences, summary, {
-          weekStart,
-          weekEnd: weekEndOf(weekStart),
-          filePath: render.filePath,
-          width: render.width,
-          height: render.height,
-          data: { filePath: render.filePath, width: render.width, height: render.height },
+        ...planResultMeta({
+          window,
+          tasks,
+          fixedEvents,
+          preferences,
+          summary,
+          startDate,
+          endDate,
+          extra: {
+            filePath: render.filePath,
+            width: render.width,
+            height: render.height,
+            data: {
+              filePath: render.filePath,
+              width: render.width,
+              height: render.height,
+            },
+          },
         }),
         imageDataUrl: render.dataUrl ?? undefined,
       },
@@ -1305,52 +1777,65 @@ export class ScheduleToolExecutor {
   ): Promise<ToolResult> {
     const parsed = parseArgs(planEmailArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const preferences = this.options.store.getPreferences();
-    const weekStart = mondayOf(parsed.data.week_start ?? this.today());
-    const plan = this.options.store.getPlan(weekStart) ?? null;
-    if (plan === null) {
+    const store = this.options.store;
+    const preferences = store.getPreferences();
+    const startDate = parsed.data.from_date ?? this.today();
+    const days = parsed.data.days ?? 7;
+    const endDate = rangeEndOf(startDate, days);
+    const window = store.getWindow(startDate, days);
+    if (window === null) {
       return toolError(
-        `这一周还没有计划：${weekStart}。先用 plan_schedule 生成计划。`,
+        `这个时间窗口还没有计划：${startDate} ~ ${endDate}。先用 plan_schedule 生成计划。`,
         { view: "plan" },
       );
     }
-    const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-    const summary = this.options.store.summarize(plan, preferences);
-    const render = await this.tryRender(weekStart, ctx, undefined);
+    const tasks = store.listTasks({ includeDone: true, limit: 200 });
+    const fixedEvents = store.listFixedEvents();
+    const summary = store.summarizeWindow(window);
+    const render = await this.tryRender(startDate, days, ctx);
     if (render === null) {
-      return toolError("渲染计划表 PNG 失败，未发送邮件。", { view: "plan" });
+      return toolError("渲染日程 PNG 失败，未发送邮件。", { view: "plan" });
     }
     try {
       const result = await this.options.email.sendPlan({
-        plan,
+        window,
+        agenda: render.agenda,
         summary,
         png: render.buffer,
-        fileName: `codefly-week-${weekStart}.png`,
+        fileName: `codefly-agenda-${startDate}.png`,
         note: parsed.data.note,
       });
       void this.options.audit.append({
         type: "schedule.email.sent",
         sessionId: ctx.session.id,
-        weekStart,
+        rangeStart: startDate,
+        rangeEnd: endDate,
         to: result.to,
         messageId: result.messageId,
         imagePath: render.filePath,
       });
       return {
-        content: `已把 ${weekStart} 的计划表发送到 ${result.to}（messageId: ${
+        content: `已把 ${startDate} ~ ${endDate} 的日程发送到 ${result.to}（messageId: ${
           result.messageId ?? "n/a"
         }）。附件：${render.filePath}`,
         status: "complete",
         meta: {
-          ...planResultMeta(plan, tasks, preferences, summary, {
-            weekStart,
-            weekEnd: weekEndOf(weekStart),
-            filePath: render.filePath,
-            emailedTo: result.to,
-            data: {
+          ...planResultMeta({
+            window,
+            tasks,
+            fixedEvents,
+            preferences,
+            summary,
+            startDate,
+            endDate,
+            extra: {
               filePath: render.filePath,
               emailedTo: result.to,
-              messageId: result.messageId,
+              data: {
+                filePath: render.filePath,
+                emailedTo: result.to,
+                messageId: result.messageId,
+              },
             },
           }),
           imageDataUrl: render.dataUrl ?? undefined,
@@ -1365,25 +1850,36 @@ export class ScheduleToolExecutor {
   }
 
   private async tryRender(
-    weekStart: string,
+    startDate: string,
+    days: number,
     ctx: ScheduleToolContext,
-    notes: string | undefined,
-  ): Promise<Awaited<ReturnType<typeof renderWeekPng>> | null> {
+  ): Promise<Awaited<ReturnType<typeof renderAgendaPng>> | null> {
     try {
-      ctx.progress("正在渲染周计划表格…");
-      const preferences = this.options.store.getPreferences();
-      const plan = this.options.store.getPlan(weekStart) ?? null;
-      const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-      const summary = this.options.store.summarize(plan, preferences);
-      return await renderWeekPng({
-        plan,
+      ctx.progress("正在渲染日程议程…");
+      const store = this.options.store;
+      const preferences = store.getPreferences();
+      const endDate = rangeEndOf(startDate, days);
+      const window = store.getWindow(startDate, days);
+      const tasks = store.listTasks({ includeDone: true, limit: 200 });
+      const fixedEvents = store.listFixedEvents();
+      const summary =
+        window === null
+          ? emptySummary(startDate, endDate, preferences.timezone)
+          : store.summarizeWindow(window);
+      const agenda = buildScheduleAgenda({
+        window,
         tasks,
+        fixedEvents,
         preferences,
-        weekStart,
-        weekEnd: weekEndOf(weekStart),
+        startDate,
+        endDate,
+        today: this.today(),
+        nowClock: nowClockInTimezone(preferences.timezone),
         summary,
-        outputDir: this.options.store.getExportsDir(),
-        notes,
+      });
+      return await renderAgendaPng({
+        agenda,
+        outputDir: store.getExportsDir(),
       });
     } catch (error) {
       console.error("[schedule] render failed", error);

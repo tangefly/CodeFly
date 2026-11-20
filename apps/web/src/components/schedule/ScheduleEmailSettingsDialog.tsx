@@ -148,7 +148,7 @@ export function ScheduleEmailSettingsDialog() {
       open={open}
       onClose={saving ? undefined : close}
       title="日程邮件设置"
-      description="SMTP 只用于把周计划图片发到你自己的邮箱；助手不能修改收件人。"
+      description="SMTP 只用于把日程图片发到你自己的邮箱；助手不能修改收件人。"
       className="max-w-xl"
       footer={
         <>

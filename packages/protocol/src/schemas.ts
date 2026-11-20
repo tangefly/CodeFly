@@ -7,7 +7,7 @@ import {
   REASONING_EFFORTS,
   SANDBOX_MODES,
   SCHEDULE_CONFIDENCE,
-  SCHEDULE_MEMORY_CATEGORIES,
+  SCHEDULE_FIXED_EVENT_KINDS,
   SCHEDULE_PRIORITIES,
   SCHEDULE_TASK_STATUSES,
   SCHEDULE_TIMES_OF_DAY,
@@ -232,34 +232,58 @@ const clockSchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "expected HH:mm");
 
-const scheduleTagsSchema = z
-  .array(z.string().trim().min(1).max(64))
-  .max(64)
-  .optional();
-
-export const scheduleMemoryCreateSchema = z.object({
-  key: z.string().trim().min(1).max(120).optional(),
-  category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
-  title: z.string().trim().min(1).max(300),
-  content: z.string().max(200_000).optional(),
-  data: z.record(z.string(), z.unknown()).nullable().optional(),
-  tags: scheduleTagsSchema,
-  pinned: z.boolean().optional(),
+const scheduleBreakSchema = z.object({
+  label: z.string().trim().min(1).max(40).optional(),
+  start: clockSchema,
+  end: clockSchema,
 });
 
-export const scheduleMemoryUpdateSchema = z
+export const schedulePreferencesUpdateSchema = z
   .object({
-    key: z.string().trim().min(1).max(120).optional(),
-    category: z.enum(SCHEDULE_MEMORY_CATEGORIES).optional(),
-    title: z.string().trim().min(1).max(300).optional(),
-    content: z.string().max(200_000).optional(),
-    data: z.record(z.string(), z.unknown()).nullable().optional(),
-    tags: scheduleTagsSchema,
-    pinned: z.boolean().optional(),
+    timezone: z.string().trim().min(1).max(100).optional(),
+    workdays: z.array(z.number().int().min(1).max(7)).min(1).max(7).optional(),
+    workStart: clockSchema.optional(),
+    workEnd: clockSchema.optional(),
+    breaks: z.array(scheduleBreakSchema).max(12).optional(),
+    maxFocusMinutes: z.number().int().min(15).max(480).optional(),
+    minBlockMinutes: z.number().int().min(5).max(600).optional(),
+    bufferRatio: z.number().min(0).max(1).optional(),
+    gapMinutes: z.number().int().min(0).max(60).optional(),
+    dailyFocusLimitMinutes: z.number().int().min(30).max(1440).optional(),
+    rules: z.array(z.string().trim().min(1).max(2000)).max(50).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "no fields to update",
   });
+
+/** Arguments accepted by the assistant's preferences_update tool. */
+export const schedulePreferencesPatchSchema = schedulePreferencesUpdateSchema
+  .extend({
+    add_rules: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
+    remove_rules: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
+  })
+  .refine(
+    (value) =>
+      Object.keys(value).some(
+        (key) => key !== "add_rules" && key !== "remove_rules",
+      ) ||
+      value.add_rules !== undefined ||
+      value.remove_rules !== undefined,
+    { message: "no fields to update" },
+  );
+
+export type SchedulePreferencesUpdateInput = z.infer<
+  typeof schedulePreferencesUpdateSchema
+>;
+export type SchedulePreferencesPatchInput = z.infer<
+  typeof schedulePreferencesPatchSchema
+>;
+
+export const scheduleTaskStepInputSchema = z.object({
+  id: z.string().trim().min(1).max(200).optional(),
+  title: z.string().trim().min(1).max(200),
+  minutes: z.number().int().min(5).max(600),
+});
 
 export const scheduleTaskUpdateSchema = z
   .object({
@@ -276,13 +300,55 @@ export const scheduleTaskUpdateSchema = z
     splittable: z.boolean().optional(),
     minBlockMinutes: z.number().int().min(5).max(600).optional(),
     preferredTimeOfDay: z.enum(SCHEDULE_TIMES_OF_DAY).optional(),
+    steps: z.array(scheduleTaskStepInputSchema).max(100).nullable().optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "no fields to update",
+  });
+
+const weekdaySchema = z.number().int().min(1).max(7);
+
+export const scheduleFixedEventCreateSchema = z
+  .object({
+    title: z.string().trim().min(1).max(300),
+    kind: z.enum(SCHEDULE_FIXED_EVENT_KINDS),
+    weekday: weekdaySchema.nullable().optional(),
+    date: dateSchema.nullable().optional(),
+    start: clockSchema,
+    end: clockSchema,
+    location: z.string().trim().max(120).optional(),
+    note: z.string().max(10_000).optional(),
+  })
+  .refine((value) => value.kind === "weekly" || value.date !== undefined, {
+    path: ["date"],
+    message: 'kind="once" requires a date',
+  })
+  .refine((value) => value.kind === "once" || value.weekday !== undefined, {
+    path: ["weekday"],
+    message: 'kind="weekly" requires a weekday (1=Monday … 7=Sunday)',
+  })
+  .refine((value) => value.end > value.start, {
+    path: ["end"],
+    message: "end must be after start",
+  });
+
+export const scheduleFixedEventUpdateSchema = z
+  .object({
+    title: z.string().trim().min(1).max(300).optional(),
+    kind: z.enum(SCHEDULE_FIXED_EVENT_KINDS).optional(),
+    weekday: weekdaySchema.nullable().optional(),
+    date: dateSchema.nullable().optional(),
+    start: clockSchema.optional(),
+    end: clockSchema.optional(),
+    location: z.string().trim().max(120).optional(),
+    note: z.string().max(10_000).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "no fields to update",
   });
 
 export const scheduleOverviewQuerySchema = z.object({
-  week_start: dateSchema.optional(),
+  start_date: dateSchema.optional(),
 });
 
 export const scheduleEmailSettingsSchema = z.object({
@@ -308,7 +374,8 @@ export const scheduleEmailTestSchema = z.object({
 });
 
 export const scheduleEmailSendSchema = z.object({
-  week_start: dateSchema.optional(),
+  start_date: dateSchema.optional(),
+  days: z.number().int().min(1).max(21).optional(),
 });
 
 export type CreateSessionInput = z.infer<typeof createSessionSchema>;
@@ -323,13 +390,13 @@ export type PaperCreateInputSchema = z.infer<typeof paperCreateSchema>;
 export type PaperUpdateInputSchema = z.infer<typeof paperUpdateSchema>;
 export type PaperQueryInput = z.infer<typeof paperQuerySchema>;
 export type PaperContextInputSchema = z.infer<typeof paperContextSchema>;
-export type ScheduleMemoryCreateInput = z.infer<
-  typeof scheduleMemoryCreateSchema
->;
-export type ScheduleMemoryUpdateInput = z.infer<
-  typeof scheduleMemoryUpdateSchema
->;
 export type ScheduleTaskUpdateInput = z.infer<typeof scheduleTaskUpdateSchema>;
+export type ScheduleFixedEventCreateInput = z.infer<
+  typeof scheduleFixedEventCreateSchema
+>;
+export type ScheduleFixedEventUpdateInput = z.infer<
+  typeof scheduleFixedEventUpdateSchema
+>;
 export type ScheduleEmailSettingsInputSchema = z.infer<
   typeof scheduleEmailSettingsSchema
 >;

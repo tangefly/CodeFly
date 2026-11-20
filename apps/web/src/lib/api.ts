@@ -20,9 +20,11 @@ import type {
   ScheduleEmailSettingsPublic,
   ScheduleEmailTestInput,
   ScheduleEmailTestResult,
-  ScheduleMemory,
-  ScheduleMemoryInput,
+  ScheduleFixedEvent,
+  ScheduleFixedEventInput,
   ScheduleOverview,
+  SchedulePreferences,
+  SchedulePreferencesUpdateInput,
   ScheduleTask,
   ScheduleTaskInput,
   SearchSettingsInput,
@@ -369,35 +371,46 @@ export const api = {
     return response.blob();
   },
 
-  scheduleOverview(weekStart?: string): Promise<{ overview: ScheduleOverview }> {
+  scheduleOverview(startDate?: string): Promise<{ overview: ScheduleOverview }> {
     const suffix =
-      weekStart === undefined || weekStart === ""
+      startDate === undefined || startDate === ""
         ? ""
-        : `?week_start=${encodeURIComponent(weekStart)}`;
+        : `?start_date=${encodeURIComponent(startDate)}`;
     return request(`/api/schedule/overview${suffix}`);
   },
 
-  createScheduleMemory(
-    input: ScheduleMemoryInput,
-  ): Promise<{ memory: ScheduleMemory }> {
-    return request("/api/schedule/memories", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  },
-
-  updateScheduleMemory(
-    memoryId: string,
-    input: ScheduleMemoryInput,
-  ): Promise<{ memory: ScheduleMemory }> {
-    return request(`/api/schedule/memories/${memoryId}`, {
+  updateSchedulePreferences(
+    input: SchedulePreferencesUpdateInput,
+  ): Promise<{ preferences: SchedulePreferences }> {
+    return request("/api/schedule/preferences", {
       method: "PATCH",
       body: JSON.stringify(input),
     });
   },
 
-  deleteScheduleMemory(memoryId: string): Promise<void> {
-    return request(`/api/schedule/memories/${memoryId}`, { method: "DELETE" });
+  createScheduleFixedEvent(
+    input: ScheduleFixedEventInput,
+  ): Promise<{ event: ScheduleFixedEvent }> {
+    return request("/api/schedule/fixed-events", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  updateScheduleFixedEvent(
+    eventId: string,
+    input: ScheduleFixedEventInput,
+  ): Promise<{ event: ScheduleFixedEvent }> {
+    return request(`/api/schedule/fixed-events/${eventId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  deleteScheduleFixedEvent(eventId: string): Promise<void> {
+    return request(`/api/schedule/fixed-events/${eventId}`, {
+      method: "DELETE",
+    });
   },
 
   updateScheduleTask(
@@ -437,7 +450,8 @@ export const api = {
   },
 
   sendScheduleEmail(
-    weekStart?: string,
+    startDate?: string,
+    days?: number,
   ): Promise<{
     ok: boolean;
     to: string;
@@ -446,9 +460,10 @@ export const api = {
   }> {
     return request("/api/schedule/email/send", {
       method: "POST",
-      body: JSON.stringify(
-        weekStart === undefined ? {} : { week_start: weekStart },
-      ),
+      body: JSON.stringify({
+        ...(startDate === undefined ? {} : { start_date: startDate }),
+        ...(days === undefined ? {} : { days }),
+      }),
     });
   },
 

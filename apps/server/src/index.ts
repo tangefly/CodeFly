@@ -231,6 +231,7 @@ async function main(): Promise<void> {
     store: scheduleStore,
     email: scheduleEmailConfig,
     tools: scheduleTools,
+    questions,
     maxSteps: config.schedule.maxSteps,
   });
 
@@ -443,8 +444,10 @@ async function main(): Promise<void> {
   const scheduleOverview = scheduleStore.overview();
   console.log(
     `  schedule: ${scheduleOverview.tasks.length} tasks · ${
-      scheduleOverview.memories.length
-    } memories · email ${
+      scheduleOverview.preferences.rules.length
+    } rules · buffer ${Math.round(
+      scheduleOverview.preferences.bufferRatio * 100,
+    )}% · gap ${scheduleOverview.preferences.gapMinutes}m · email ${
       scheduleEmailConfig.isConfigured() ? "configured" : "not configured"
     } · ${paths.scheduleDir}`,
   );

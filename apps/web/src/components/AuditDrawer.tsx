@@ -53,6 +53,12 @@ function summarize(event: AuditEvent): string {
       return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
     case "schedule.run":
       return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
+    case "schedule.preferences.changed":
+      return `${String(event.action ?? "")} · buffer ${String(
+        event.bufferRatio ?? "",
+      )} · gap ${String(event.gapMinutes ?? "")}m · rules ${String(
+        event.rules ?? 0,
+      )}`;
     case "schedule.memory.changed":
       return `${String(event.action ?? "")} · ${String(event.key ?? event.memoryId ?? "")}`;
     case "schedule.task.changed":
@@ -62,7 +68,9 @@ function summarize(event: AuditEvent): string {
         Array.isArray(event.weeks) ? (event.weeks as string[]).join(", ") : "",
       )} · ${String(event.blocks ?? 0)} blocks`;
     case "schedule.email.sent":
-      return `→ ${String(event.to ?? "")} · ${String(event.weekStart ?? "")}`;
+      return `→ ${String(event.to ?? "")} · ${String(
+        event.rangeStart ?? event.weekStart ?? "",
+      )}`;
     case "agent.run":
       return `${String(event.outcome ?? "")} · ${String(event.steps ?? 0)} 步`;
     case "agent.tool":

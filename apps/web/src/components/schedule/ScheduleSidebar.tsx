@@ -183,13 +183,13 @@ export function ScheduleSidebar() {
           >
             <CalendarDays className="h-4 w-4 shrink-0 text-primary" />
             <span className="min-w-0 flex-1">
-              <span className="text-[11px] font-medium">本周计划</span>
+              <span className="text-[11px] font-medium">未来 7 天</span>
               <span className="mt-0.5 block truncate text-[9px] text-muted-foreground/60">
                 {overview
-                  ? `${overview.weekStart} ~ ${overview.weekEnd} · ${
-                      overview.plan?.blocks.length ?? 0
+                  ? `${overview.rangeStart} ~ ${overview.rangeEnd} · ${
+                      overview.window?.blocks.length ?? 0
                     } 个时段`
-                  : "查看计划、记忆与任务"}
+                  : "查看日程、偏好与任务"}
               </span>
             </span>
             <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />

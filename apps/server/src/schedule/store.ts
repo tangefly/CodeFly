@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   SCHEDULE_BLOCK_STATUSES,
   SCHEDULE_CONFIDENCE,
+  SCHEDULE_FIXED_EVENT_KINDS,
   SCHEDULE_MEMORY_CATEGORIES,
   SCHEDULE_PLAN_STATUSES,
   SCHEDULE_PRIORITIES,
@@ -13,6 +14,9 @@ import {
   type ScheduleBlockStatus,
   type ScheduleCalibration,
   type ScheduleConfidence,
+  type ScheduleFixedEvent,
+  type ScheduleFixedEventInput,
+  type ScheduleFixedEventKind,
   type ScheduleMemory,
   type ScheduleMemoryCategory,
   type ScheduleOverview,
@@ -24,11 +28,14 @@ import {
   type ScheduleTask,
   type ScheduleTaskInput,
   type ScheduleTaskStatus,
+  type ScheduleTaskStep,
   type ScheduleTimeOfDay,
   type ScheduleUnscheduledTask,
+  type ScheduleWindow,
 } from "@codefly/protocol";
 import { atomicWriteFile } from "../fs/atomic-write.js";
 import { AppError, isNotFound } from "../http/errors.js";
+import { buildScheduleAgenda } from "./agenda.js";
 import {
   addDays,
   clockToMinutes,
@@ -38,9 +45,12 @@ import {
   isValidDate,
   isValidTimezone,
   mondayOf,
+  nowClockInTimezone,
+  rangeEndOf,
   serverTimezone,
   todayInTimezone,
   weekEndOf,
+  weekdayOf,
 } from "./time.js";
 
 export const PREFERENCES_MEMORY_KEY = "scheduling_preferences";
@@ -59,6 +69,10 @@ interface TaskFile {
 interface PlanFile {
   version?: unknown;
   plans?: unknown;
+}
+interface FixedEventFile {
+  version?: unknown;
+  events?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,6 +97,27 @@ function asStringArray(value: unknown, max = 64): string[] {
     if (trimmed === "" || seen.has(trimmed)) continue;
     seen.add(trimmed);
     result.push(trimmed.slice(0, 120));
+    if (result.length >= max) break;
+  }
+  return result;
+}
+
+/** Normalizes the free-form scheduling rules kept in preferences. */
+function asRuleArray(value: unknown, max = 50): string[] {
+  const entries =
+    typeof value === "string"
+      ? value.split(/\r?\n/)
+      : Array.isArray(value)
+        ? value
+        : [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim().slice(0, 2000);
+    if (trimmed === "" || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
     if (result.length >= max) break;
   }
   return result;
@@ -129,6 +164,10 @@ function isTimeOfDay(value: unknown): value is ScheduleTimeOfDay {
   return SCHEDULE_TIMES_OF_DAY.includes(value as ScheduleTimeOfDay);
 }
 
+function isFixedEventKind(value: unknown): value is ScheduleFixedEventKind {
+  return SCHEDULE_FIXED_EVENT_KINDS.includes(value as ScheduleFixedEventKind);
+}
+
 function slugify(value: string): string {
   const ascii = value
     .toLowerCase()
@@ -147,7 +186,10 @@ function copyMemory(memory: ScheduleMemory): ScheduleMemory {
 }
 
 function copyTask(task: ScheduleTask): ScheduleTask {
-  return { ...task };
+  return {
+    ...task,
+    steps: task.steps.map((step) => ({ ...step })),
+  };
 }
 
 function copyBlock(block: ScheduleBlock): ScheduleBlock {
@@ -182,6 +224,32 @@ function normalizeMemory(raw: unknown): ScheduleMemory | null {
     createdAt: asNullableString(raw.createdAt) ?? now,
     updatedAt: asNullableString(raw.updatedAt) ?? now,
   };
+}
+
+/**
+ * Normalizes an optional task breakdown. Missing ids are generated; duplicate
+ * ids are replaced so every step stays addressable from scheduled blocks.
+ */
+function normalizeSteps(raw: unknown): ScheduleTaskStep[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const steps: ScheduleTaskStep[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    // Step titles are rendered inline as block notes, so keep them single-line.
+    const title = asString(entry.title).replace(/\s+/g, " ").trim();
+    if (title === "") continue;
+    let id = asString(entry.id).trim();
+    if (id === "" || seen.has(id)) id = `step_${randomUUID()}`;
+    seen.add(id);
+    steps.push({
+      id: id.slice(0, 200),
+      title: title.slice(0, 200),
+      minutes: asInt(entry.minutes, 30, 5, 600),
+    });
+    if (steps.length >= 100) break;
+  }
+  return steps;
 }
 
 function normalizeTask(raw: unknown): ScheduleTask | null {
@@ -219,6 +287,7 @@ function normalizeTask(raw: unknown): ScheduleTask | null {
     preferredTimeOfDay: isTimeOfDay(raw.preferredTimeOfDay)
       ? raw.preferredTimeOfDay
       : "any",
+    steps: normalizeSteps(raw.steps),
     createdAt: asNullableString(raw.createdAt) ?? now,
     updatedAt: asNullableString(raw.updatedAt) ?? now,
   };
@@ -255,6 +324,7 @@ function normalizeBlock(raw: unknown): ScheduleBlock | null {
         ? Math.round(raw.actualMinutes)
         : null,
     note: asString(raw.note).slice(0, 10_000),
+    stepId: asNullableString(raw.stepId)?.slice(0, 200) ?? null,
   };
 }
 
@@ -311,6 +381,53 @@ function normalizePlan(raw: unknown): SchedulePlan | null {
   };
 }
 
+function normalizeFixedEvent(raw: unknown): ScheduleFixedEvent | null {
+  if (!isRecord(raw)) return null;
+  const id = asString(raw.id).trim();
+  const title = asString(raw.title).trim();
+  const kind = isFixedEventKind(raw.kind) ? raw.kind : null;
+  const start = asString(raw.start);
+  const end = asString(raw.end);
+  if (
+    id === "" ||
+    title === "" ||
+    kind === null ||
+    !isValidClock(start) ||
+    !isValidClock(end) ||
+    clockToMinutes(end) <= clockToMinutes(start)
+  ) {
+    return null;
+  }
+  const weekday =
+    kind === "weekly" && Number.isInteger(raw.weekday) &&
+    (raw.weekday as number) >= 1 &&
+    (raw.weekday as number) <= 7
+      ? (raw.weekday as number)
+      : null;
+  const dateRaw = asNullableString(raw.date);
+  const date = kind === "once" && dateRaw !== null && isValidDate(dateRaw) ? dateRaw : null;
+  if (kind === "weekly" && weekday === null) return null;
+  if (kind === "once" && date === null) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    title: title.slice(0, 300),
+    kind,
+    weekday,
+    date,
+    start,
+    end,
+    location: asString(raw.location).slice(0, 120),
+    note: asString(raw.note).slice(0, 10_000),
+    createdAt: asNullableString(raw.createdAt) ?? now,
+    updatedAt: asNullableString(raw.updatedAt) ?? now,
+  };
+}
+
+function copyFixedEvent(event: ScheduleFixedEvent): ScheduleFixedEvent {
+  return { ...event };
+}
+
 export function defaultPreferences(timezone = serverTimezone()): SchedulePreferences {
   return {
     timezone,
@@ -320,9 +437,30 @@ export function defaultPreferences(timezone = serverTimezone()): SchedulePrefere
     breaks: [{ label: "午休", start: "12:00", end: "13:00" }],
     maxFocusMinutes: 90,
     minBlockMinutes: 30,
-    bufferRatio: 0.15,
+    // No hidden padding: the planner schedules exactly the remaining minutes
+    // unless the user explicitly opts into a buffer.
+    bufferRatio: 0,
+    gapMinutes: 0,
     dailyFocusLimitMinutes: 480,
+    rules: [],
   };
+}
+
+/** Human-readable one-line summary persisted as the preference document text. */
+export function formatPreferencesSummary(
+  preferences: SchedulePreferences,
+): string {
+  const buffer = Math.round(preferences.bufferRatio * 100);
+  const rules =
+    preferences.rules.length > 0 ? ` · 规则 ${preferences.rules.length} 条` : "";
+  return [
+    `工作日 ${preferences.workdays.join(",")}`,
+    `${preferences.workStart}-${preferences.workEnd}`,
+    `最长专注 ${preferences.maxFocusMinutes}m`,
+    `每日上限 ${preferences.dailyFocusLimitMinutes}m`,
+    `缓冲 ${buffer}%`,
+    `块间隙 ${preferences.gapMinutes}m`,
+  ].join(" · ") + rules;
 }
 
 /** Merges stored preference fields over defaults; invalid fields are ignored. */
@@ -391,12 +529,14 @@ export function normalizePreferences(
     maxFocusMinutes,
     minBlockMinutes,
     bufferRatio: Math.min(1, Math.max(0, asNumber(raw.bufferRatio, defaults.bufferRatio))),
+    gapMinutes: asInt(raw.gapMinutes, defaults.gapMinutes, 0, 60),
     dailyFocusLimitMinutes: asInt(
       raw.dailyFocusLimitMinutes,
       defaults.dailyFocusLimitMinutes,
       30,
       1440,
     ),
+    rules: asRuleArray(raw.rules),
   };
 }
 
@@ -406,6 +546,21 @@ export interface MemoryQuery {
   category?: ScheduleMemoryCategory;
   tags?: string[];
   limit?: number;
+}
+
+/** Fields accepted by updatePreferences; omitted fields keep their value. */
+export interface SchedulePreferencesPatch {
+  timezone?: string;
+  workdays?: number[];
+  workStart?: string;
+  workEnd?: string;
+  breaks?: Array<{ label?: string; start: string; end: string }>;
+  maxFocusMinutes?: number;
+  minBlockMinutes?: number;
+  bufferRatio?: number;
+  gapMinutes?: number;
+  dailyFocusLimitMinutes?: number;
+  rules?: string[];
 }
 
 export interface TaskQuery {
@@ -448,19 +603,25 @@ export class ScheduleStore {
   private readonly memories = new Map<string, ScheduleMemory>();
   private readonly tasks = new Map<string, ScheduleTask>();
   private readonly plans = new Map<string, SchedulePlan>();
+  private readonly fixedEvents = new Map<string, ScheduleFixedEvent>();
   private readonly exportsDir: string;
   private readonly memoriesFile: string;
+  private readonly memoriesLegacyFile: string;
   private readonly tasksFile: string;
   private readonly plansFile: string;
+  private readonly fixedEventsFile: string;
   private memoryQueue: Promise<void> = Promise.resolve();
   private taskQueue: Promise<void> = Promise.resolve();
   private planQueue: Promise<void> = Promise.resolve();
+  private fixedEventQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly dataDir: string) {
     const root = path.join(dataDir, "schedule");
     this.memoriesFile = path.join(root, "memories.json");
+    this.memoriesLegacyFile = path.join(root, "memories.legacy.json");
     this.tasksFile = path.join(root, "tasks.json");
     this.plansFile = path.join(root, "plans.json");
+    this.fixedEventsFile = path.join(root, "fixed-events.json");
     this.exportsDir = path.join(root, "exports");
   }
 
@@ -469,6 +630,9 @@ export class ScheduleStore {
     await this.loadMemories();
     await this.loadTasks();
     await this.loadPlans();
+    await this.loadFixedEvents();
+    await this.migrateFixedCommitmentMemories();
+    await this.consolidateLegacyMemories();
     // Plans may reference a deleted task; keep blocks for history, but make
     // sure a plan's week is always canonical after loading.
     for (const plan of this.plans.values()) {
@@ -544,6 +708,28 @@ export class ScheduleStore {
       }
     } catch {
       console.error("[schedule] ignoring corrupt plans.json");
+    }
+  }
+
+  private async loadFixedEvents(): Promise<void> {
+    let raw: string;
+    try {
+      raw = await readFile(this.fixedEventsFile, "utf8");
+    } catch (error) {
+      if (!isNotFound(error)) {
+        console.error("[schedule] cannot read fixed-events.json");
+      }
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as FixedEventFile;
+      for (const entry of Array.isArray(parsed.events) ? parsed.events : []) {
+        const event = normalizeFixedEvent(entry);
+        if (event === null || this.fixedEvents.has(event.id)) continue;
+        this.fixedEvents.set(event.id, event);
+      }
+    } catch {
+      console.error("[schedule] ignoring corrupt fixed-events.json");
     }
   }
 
@@ -738,6 +924,489 @@ export class ScheduleStore {
     );
   }
 
+  /**
+   * Merges a partial preference update into the single scheduling_preferences
+   * document, normalizes it and persists the canonical values.
+   */
+  async updatePreferences(
+    patch: SchedulePreferencesPatch,
+  ): Promise<SchedulePreferences> {
+    const existing = this.getPreferencesMemory();
+    const current = isRecord(existing?.data) ? existing.data : {};
+    const next: Record<string, unknown> = { ...current };
+    if (patch.timezone !== undefined) next.timezone = patch.timezone;
+    if (patch.workdays !== undefined) next.workdays = patch.workdays;
+    if (patch.workStart !== undefined) next.workStart = patch.workStart;
+    if (patch.workEnd !== undefined) next.workEnd = patch.workEnd;
+    if (patch.breaks !== undefined) {
+      next.breaks = patch.breaks.map((entry) => ({
+        label: entry.label ?? "休息",
+        start: entry.start,
+        end: entry.end,
+      }));
+    }
+    if (patch.maxFocusMinutes !== undefined) {
+      next.maxFocusMinutes = patch.maxFocusMinutes;
+    }
+    if (patch.minBlockMinutes !== undefined) {
+      next.minBlockMinutes = patch.minBlockMinutes;
+    }
+    if (patch.bufferRatio !== undefined) next.bufferRatio = patch.bufferRatio;
+    if (patch.gapMinutes !== undefined) next.gapMinutes = patch.gapMinutes;
+    if (patch.dailyFocusLimitMinutes !== undefined) {
+      next.dailyFocusLimitMinutes = patch.dailyFocusLimitMinutes;
+    }
+    if (patch.rules !== undefined) next.rules = patch.rules;
+
+    const normalized = normalizePreferences(next, serverTimezone());
+    const data = {
+      timezone: normalized.timezone,
+      workdays: normalized.workdays,
+      workStart: normalized.workStart,
+      workEnd: normalized.workEnd,
+      breaks: normalized.breaks,
+      maxFocusMinutes: normalized.maxFocusMinutes,
+      minBlockMinutes: normalized.minBlockMinutes,
+      bufferRatio: normalized.bufferRatio,
+      gapMinutes: normalized.gapMinutes,
+      dailyFocusLimitMinutes: normalized.dailyFocusLimitMinutes,
+      rules: normalized.rules,
+    };
+    const content = formatPreferencesSummary(normalized);
+    if (existing !== undefined) {
+      await this.updateMemory(existing.id, { data, content });
+    } else {
+      await this.createMemory({
+        key: PREFERENCES_MEMORY_KEY,
+        category: "preference",
+        title: "排期偏好",
+        content,
+        data,
+      });
+    }
+    return normalized;
+  }
+
+  // ------------------------------------------------------------- fixed events
+
+  listFixedEvents(): ScheduleFixedEvent[] {
+    return [...this.fixedEvents.values()]
+      .sort(
+        (a, b) =>
+          // Weekly events group by weekday first; one-off events sort by date.
+          (a.weekday ?? 8) - (b.weekday ?? 8) ||
+          (a.date ?? "").localeCompare(b.date ?? "") ||
+          a.start.localeCompare(b.start) ||
+          a.title.localeCompare(b.title),
+      )
+      .map(copyFixedEvent);
+  }
+
+  getFixedEvent(id: string): ScheduleFixedEvent | undefined {
+    const event = this.fixedEvents.get(id);
+    return event === undefined ? undefined : copyFixedEvent(event);
+  }
+
+  /** Events that occupy time on the given date (weekly by weekday, once by date). */
+  fixedEventsForDate(date: string): ScheduleFixedEvent[] {
+    if (!isValidDate(date)) return [];
+    const weekday = weekdayOf(date);
+    return [...this.fixedEvents.values()]
+      .filter(
+        (event) =>
+          (event.kind === "weekly" && event.weekday === weekday) ||
+          (event.kind === "once" && event.date === date),
+      )
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .map(copyFixedEvent);
+  }
+
+  async createFixedEvent(
+    input: ScheduleFixedEventInput & {
+      title: string;
+      kind: ScheduleFixedEventKind;
+    },
+  ): Promise<ScheduleFixedEvent> {
+    const kind = input.kind;
+    const weekday =
+      kind === "weekly" && Number.isInteger(input.weekday)
+        ? Math.min(7, Math.max(1, input.weekday as number))
+        : null;
+    const date =
+      kind === "once" &&
+      input.date !== undefined &&
+      input.date !== null &&
+      isValidDate(input.date)
+        ? input.date
+        : null;
+    if (kind === "weekly" && weekday === null) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        'kind="weekly" requires weekday 1-7',
+        400,
+      );
+    }
+    if (kind === "once" && date === null) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        'kind="once" requires a valid date (YYYY-MM-DD)',
+        400,
+      );
+    }
+    const start = input.start ?? "";
+    const end = input.end ?? "";
+    if (
+      !isValidClock(start) ||
+      !isValidClock(end) ||
+      clockToMinutes(end) <= clockToMinutes(start)
+    ) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        "start/end must be HH:mm with end after start",
+        400,
+      );
+    }
+    const now = new Date().toISOString();
+    const event: ScheduleFixedEvent = {
+      id: `fixed_${randomUUID()}`,
+      title: input.title.trim().slice(0, 300),
+      kind,
+      weekday,
+      date,
+      start,
+      end,
+      location: (input.location ?? "").trim().slice(0, 120),
+      note: (input.note ?? "").slice(0, 10_000),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.fixedEvents.set(event.id, event);
+    await this.persistFixedEvents();
+    return copyFixedEvent(event);
+  }
+
+  async updateFixedEvent(
+    id: string,
+    patch: ScheduleFixedEventInput,
+  ): Promise<ScheduleFixedEvent> {
+    const event = this.fixedEvents.get(id);
+    if (event === undefined) {
+      throw new AppError(
+        "FIXED_EVENT_NOT_FOUND",
+        `unknown fixed event: ${id}`,
+        404,
+      );
+    }
+    if (patch.title !== undefined) {
+      const title = patch.title.trim();
+      if (title === "") {
+        throw new AppError(
+          "INVALID_FIXED_EVENT",
+          "fixed event title must not be empty",
+          400,
+        );
+      }
+      event.title = title.slice(0, 300);
+    }
+    if (patch.kind !== undefined) event.kind = patch.kind;
+    if (patch.weekday !== undefined) {
+      event.weekday =
+        patch.weekday !== null &&
+        Number.isInteger(patch.weekday) &&
+        patch.weekday >= 1 &&
+        patch.weekday <= 7
+          ? patch.weekday
+          : null;
+    }
+    if (patch.date !== undefined) {
+      event.date =
+        patch.date !== null && patch.date !== "" && isValidDate(patch.date)
+          ? patch.date
+          : null;
+    }
+    if (patch.start !== undefined) event.start = patch.start;
+    if (patch.end !== undefined) event.end = patch.end;
+    if (patch.location !== undefined) {
+      event.location = patch.location.trim().slice(0, 120);
+    }
+    if (patch.note !== undefined) event.note = patch.note.slice(0, 10_000);
+    // Re-validate the kind-specific fields and the time window after patching.
+    if (
+      (event.kind === "weekly" && event.weekday === null) ||
+      (event.kind === "once" && event.date === null)
+    ) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        `kind="${event.kind}" requires ${event.kind === "weekly" ? "weekday 1-7" : "a date"}`,
+        400,
+      );
+    }
+    if (
+      !isValidClock(event.start) ||
+      !isValidClock(event.end) ||
+      clockToMinutes(event.end) <= clockToMinutes(event.start)
+    ) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        "start/end must be HH:mm with end after start",
+        400,
+      );
+    }
+    event.updatedAt = new Date().toISOString();
+    await this.persistFixedEvents();
+    return copyFixedEvent(event);
+  }
+
+  async upsertFixedEvent(input: {
+    id?: string;
+    title?: string;
+    kind?: ScheduleFixedEventKind;
+    weekday?: number | null;
+    date?: string | null;
+    start?: string;
+    end?: string;
+    location?: string;
+    note?: string;
+  }): Promise<{ event: ScheduleFixedEvent; created: boolean }> {
+    const existing =
+      input.id === undefined ? undefined : this.getFixedEvent(input.id);
+    if (existing !== undefined) {
+      const event = await this.updateFixedEvent(existing.id, {
+        title: input.title,
+        kind: input.kind,
+        weekday: input.weekday,
+        date: input.date,
+        start: input.start,
+        end: input.end,
+        location: input.location,
+        note: input.note,
+      });
+      return { event, created: false };
+    }
+    if (
+      input.title === undefined ||
+      input.kind === undefined ||
+      input.start === undefined ||
+      input.end === undefined
+    ) {
+      throw new AppError(
+        "INVALID_FIXED_EVENT",
+        "Creating a fixed event requires title, kind (weekly|once), start and end, plus weekday (weekly) or date (once).",
+        400,
+      );
+    }
+    const event = await this.createFixedEvent({
+      title: input.title,
+      kind: input.kind,
+      weekday: input.weekday,
+      date: input.date,
+      start: input.start,
+      end: input.end,
+      location: input.location,
+      note: input.note,
+    });
+    return { event, created: true };
+  }
+
+  async deleteFixedEvent(id: string): Promise<boolean> {
+    if (!this.fixedEvents.delete(id)) return false;
+    await this.persistFixedEvents();
+    return true;
+  }
+
+  /**
+   * One-time, idempotent conversion of legacy freeform memories that carry
+   * structured fixed commitments (course tables, weekly meetings) into
+   * ScheduleFixedEvents, so weeks with only fixed commitments can be planned.
+   */
+  private async migrateFixedCommitmentMemories(): Promise<void> {
+    const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const created: ScheduleFixedEvent[] = [];
+    let memoriesChanged = false;
+
+    for (const memory of this.memories.values()) {
+      if (memory.data === null || memory.data.migratedFixedEvents === true) {
+        continue;
+      }
+      const candidates: Array<{
+        title: string;
+        kind: ScheduleFixedEventKind;
+        weekday: number | null;
+        date: string | null;
+        start: string;
+        end: string;
+        location: string;
+      }> = [];
+
+      const weekly = memory.data.weekly;
+      if (Array.isArray(weekly)) {
+        for (const entry of weekly) {
+          if (!isRecord(entry)) continue;
+          const day = entry.day;
+          if (
+            !Number.isInteger(day) ||
+            (day as number) < 1 ||
+            (day as number) > 7
+          ) {
+            continue;
+          }
+          candidates.push({
+            title: asString(entry.title, "固定会议").slice(0, 300) || "固定会议",
+            kind: "weekly",
+            weekday: day as number,
+            date: null,
+            start: asString(entry.start),
+            end: asString(entry.end),
+            location: asString(entry.location ?? entry.loc).slice(0, 120),
+          });
+        }
+      }
+
+      const schedule = memory.data.schedule;
+      if (isRecord(schedule)) {
+        for (const [dayName, slots] of Object.entries(schedule)) {
+          const weekday = dayNames.indexOf(dayName);
+          if (weekday <= 0 || !Array.isArray(slots)) continue;
+          for (const slot of slots) {
+            if (!isRecord(slot)) continue;
+            const location = asString(slot.loc ?? slot.location).slice(0, 120);
+            candidates.push({
+              title: location !== "" ? `课程（${location}）` : "课程",
+              kind: "weekly",
+              weekday,
+              date: null,
+              start: asString(slot.start),
+              end: asString(slot.end),
+              location,
+            });
+          }
+        }
+      }
+
+      if (candidates.length === 0) continue;
+      let touched = false;
+      for (const candidate of candidates) {
+        if (
+          !isValidClock(candidate.start) ||
+          !isValidClock(candidate.end) ||
+          clockToMinutes(candidate.end) <= clockToMinutes(candidate.start)
+        ) {
+          continue;
+        }
+        const duplicate = [...this.fixedEvents.values(), ...created].some(
+          (event) =>
+            event.kind === candidate.kind &&
+            event.weekday === candidate.weekday &&
+            event.date === candidate.date &&
+            event.start === candidate.start &&
+            event.title === candidate.title,
+        );
+        if (duplicate) continue;
+        const now = new Date().toISOString();
+        const event: ScheduleFixedEvent = {
+          id: `fixed_${randomUUID()}`,
+          title: candidate.title,
+          kind: candidate.kind,
+          weekday: candidate.weekday,
+          date: candidate.date,
+          start: candidate.start,
+          end: candidate.end,
+          location: candidate.location,
+          note: "",
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.fixedEvents.set(event.id, event);
+        created.push(event);
+        touched = true;
+      }
+      if (touched) {
+        memory.data = { ...memory.data, migratedFixedEvents: true };
+        memory.updatedAt = new Date().toISOString();
+        memoriesChanged = true;
+      }
+    }
+
+    if (created.length > 0 || memoriesChanged) {
+      await this.persistFixedEvents();
+      if (memoriesChanged) await this.persistMemories();
+      console.log(
+        `[schedule] migrated ${created.length} fixed event(s) from legacy memories`,
+      );
+    }
+  }
+
+  /**
+   * The assistant used to expose arbitrary memory documents. They are now
+   * collapsed into the single scheduling_preferences document:
+   * - course/meeting memories already migrated to fixed events are dropped;
+   * - remaining free-form memories become human-readable rules;
+   * - a backup of the original documents is written once for safety.
+   */
+  private async consolidateLegacyMemories(): Promise<void> {
+    const preference = this.getPreferencesMemory();
+    const legacy = [...this.memories.values()].filter(
+      (memory) => memory.key !== PREFERENCES_MEMORY_KEY,
+    );
+    if (legacy.length === 0) return;
+
+    await atomicWriteFile(
+      this.memoriesLegacyFile,
+      `${JSON.stringify({ version: 1, memories: legacy }, null, 2)}\n`,
+    );
+
+    const rules = new Set<string>(
+      preference === undefined || preference.data === null
+        ? []
+        : asRuleArray(preference.data.rules),
+    );
+    for (const memory of legacy) {
+      const data = memory.data;
+      const migratedFixedEvents =
+        data !== null &&
+        (data.migratedFixedEvents === true ||
+          Array.isArray(data.weekly) ||
+          isRecord(data.schedule));
+      if (migratedFixedEvents) continue;
+      const content = memory.content.trim();
+      if (content === "") continue;
+      rules.add(`【${memory.title}】${content}`.slice(0, 2000));
+    }
+
+    for (const memory of legacy) this.memories.delete(memory.id);
+
+    const now = new Date().toISOString();
+    if (preference !== undefined) {
+      const target = this.memories.get(preference.id);
+      if (target !== undefined) {
+        target.data = {
+          ...(isRecord(target.data) ? target.data : {}),
+          rules: [...rules],
+        };
+        target.updatedAt = now;
+      }
+    } else if (rules.size > 0) {
+      const memory: ScheduleMemory = {
+        id: `mem_${randomUUID()}`,
+        key: PREFERENCES_MEMORY_KEY,
+        category: "preference",
+        title: "排期偏好",
+        content: "",
+        data: { rules: [...rules] },
+        tags: [],
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.memories.set(memory.id, memory);
+    }
+
+    await this.persistMemories();
+    console.log(
+      `[schedule] consolidated ${legacy.length} legacy memory document(s) into preferences (${rules.size} rule(s))`,
+    );
+  }
+
   // ------------------------------------------------------------------- tasks
 
   listTasks(query: TaskQuery = {}): ScheduleTask[] {
@@ -768,6 +1437,7 @@ export class ScheduleStore {
             task.title,
             task.notes,
             task.project ?? "",
+            task.steps.map((step) => step.title).join(" "),
           ]
             .join("\n")
             .toLowerCase();
@@ -830,6 +1500,7 @@ export class ScheduleStore {
         Math.max(5, Math.round(input.minBlockMinutes ?? 30)),
       ),
       preferredTimeOfDay: input.preferredTimeOfDay ?? "any",
+      steps: normalizeSteps(input.steps ?? []),
       createdAt: now,
       updatedAt: now,
     };
@@ -852,6 +1523,14 @@ export class ScheduleStore {
     if (patch.status !== undefined) task.status = patch.status;
     if (patch.estimatedMinutes !== undefined) {
       task.estimatedMinutes = Math.max(1, Math.min(100_000, Math.round(patch.estimatedMinutes)));
+      // Revising the estimate before any explicit remaining value keeps the
+      // task consistent with work already recorded.
+      if (patch.remainingMinutes === undefined) {
+        task.remainingMinutes = Math.max(
+          0,
+          Math.min(100_000, task.estimatedMinutes - task.actualMinutes),
+        );
+      }
     }
     if (patch.remainingMinutes !== undefined) {
       task.remainingMinutes = Math.max(
@@ -861,6 +1540,15 @@ export class ScheduleStore {
     }
     if (patch.actualMinutes !== undefined) {
       task.actualMinutes = Math.max(0, Math.round(patch.actualMinutes));
+      if (
+        patch.remainingMinutes === undefined &&
+        patch.estimatedMinutes === undefined
+      ) {
+        task.remainingMinutes = Math.max(
+          0,
+          Math.min(100_000, task.estimatedMinutes - task.actualMinutes),
+        );
+      }
     }
     if (patch.estimateConfidence !== undefined) {
       task.estimateConfidence = patch.estimateConfidence;
@@ -880,6 +1568,9 @@ export class ScheduleStore {
     }
     if (patch.preferredTimeOfDay !== undefined) {
       task.preferredTimeOfDay = patch.preferredTimeOfDay;
+    }
+    if (patch.steps !== undefined) {
+      task.steps = patch.steps === null ? [] : normalizeSteps(patch.steps);
     }
     if (task.status === "done") task.remainingMinutes = 0;
     if (task.status === "cancelled") task.remainingMinutes = 0;
@@ -987,6 +1678,85 @@ export class ScheduleStore {
     return isValidDate(date) ? this.getPlan(mondayOf(date)) : undefined;
   }
 
+  /**
+   * Merges the stored per-ISO-week plans into one rolling window. A window
+   * that only contains fixed commitments (and therefore zero blocks) is still
+   * returned as long as a stored plan intersects the range.
+   */
+  getWindow(startDateInput: string, days = 7): ScheduleWindow | null {
+    if (!isValidDate(startDateInput)) return null;
+    const startDate = startDateInput;
+    const endDate = rangeEndOf(startDate, days);
+    const intersecting: SchedulePlan[] = [];
+    for (const plan of this.plans.values()) {
+      if (
+        compareDates(plan.weekStart, endDate) <= 0 &&
+        compareDates(plan.weekEnd, startDate) >= 0
+      ) {
+        intersecting.push(plan);
+      }
+    }
+    if (intersecting.length === 0) return null;
+    // Metadata is window-level and may be duplicated across the weeks the
+    // window touches; read the most recently updated plan first so a stale
+    // entry cannot win the dedupe.
+    const newestFirst = [...intersecting].sort((a, b) =>
+      b.updatedAt.localeCompare(a.updatedAt),
+    );
+
+    const blocks = intersecting
+      .flatMap((plan) => plan.blocks)
+      .filter(
+        (block) =>
+          compareDates(block.date, startDate) >= 0 &&
+          compareDates(block.date, endDate) <= 0,
+      )
+      .map(copyBlock)
+      .sort(
+        (a, b) =>
+          compareDates(a.date, b.date) ||
+          clockToMinutes(a.start) - clockToMinutes(b.start),
+      );
+
+    const unscheduled: ScheduleUnscheduledTask[] = [];
+    const seenTasks = new Set<string>();
+    for (const plan of newestFirst) {
+      for (const item of plan.unscheduled) {
+        if (seenTasks.has(item.taskId)) continue;
+        seenTasks.add(item.taskId);
+        unscheduled.push({ ...item });
+      }
+    }
+
+    const warnings: string[] = [];
+    const seenWarnings = new Set<string>();
+    for (const plan of newestFirst) {
+      for (const warning of plan.warnings) {
+        if (seenWarnings.has(warning)) continue;
+        seenWarnings.add(warning);
+        warnings.push(warning);
+      }
+    }
+
+    const notes = [
+      ...new Set(
+        newestFirst
+          .map((plan) => plan.notes.trim())
+          .filter((note) => note !== ""),
+      ),
+    ].join("\n");
+
+    return {
+      startDate,
+      endDate,
+      timezone: this.getPreferences().timezone,
+      blocks,
+      unscheduled,
+      warnings,
+      notes,
+    };
+  }
+
   listPlans(): SchedulePlan[] {
     return [...this.plans.values()]
       .sort((a, b) => a.weekStart.localeCompare(b.weekStart))
@@ -1015,8 +1785,21 @@ export class ScheduleStore {
     for (const plan of this.plans.values()) {
       const next: ScheduleBlock[] = [];
       for (const block of plan.blocks) {
-        if (!taskIds.has(block.taskId) || block.status !== "planned") {
+        if (!taskIds.has(block.taskId)) {
           next.push(block);
+          continue;
+        }
+        if (block.status === "done") {
+          next.push(block);
+          continue;
+        }
+        if (block.status === "skipped") {
+          // Skipped history only matters before the replanned range; keeping
+          // future skipped blocks would leave overlapping ghosts next to the
+          // freshly generated blocks.
+          if (compareDates(block.date, input.removeFromDate) < 0) {
+            next.push(block);
+          }
           continue;
         }
         if (compareDates(block.date, input.removeFromDate) >= 0) continue;
@@ -1181,18 +1964,32 @@ export class ScheduleStore {
 
   private assertNoOverlap(weekStart: string, candidate: ScheduleBlock): void {
     const plan = this.plans.get(weekStart);
-    if (plan === undefined) return;
     const start = clockToMinutes(candidate.start);
     const end = clockToMinutes(candidate.end);
-    for (const block of plan.blocks) {
-      if (block.id === candidate.id) continue;
-      if (block.date !== candidate.date || block.status === "skipped") continue;
-      const otherStart = clockToMinutes(block.start);
-      const otherEnd = clockToMinutes(block.end);
-      if (start < otherEnd && otherStart < end) {
+    if (plan !== undefined) {
+      for (const block of plan.blocks) {
+        if (block.id === candidate.id) continue;
+        if (block.date !== candidate.date || block.status === "skipped") continue;
+        const otherStart = clockToMinutes(block.start);
+        const otherEnd = clockToMinutes(block.end);
+        if (start < otherEnd && otherStart < end) {
+          throw new AppError(
+            "BLOCK_OVERLAP",
+            `block overlaps ${block.start}-${block.end}`,
+            409,
+          );
+        }
+      }
+    }
+    // Fixed commitments (courses, meetings) are not blocks but still occupy
+    // wall-clock time; moving a block on top of them is rejected.
+    for (const event of this.fixedEventsForDate(candidate.date)) {
+      const eventStart = clockToMinutes(event.start);
+      const eventEnd = clockToMinutes(event.end);
+      if (start < eventEnd && eventStart < end) {
         throw new AppError(
           "BLOCK_OVERLAP",
-          `block overlaps ${block.start}-${block.end}`,
+          `block overlaps fixed event 「${event.title}」 ${event.start}-${event.end}`,
           409,
         );
       }
@@ -1218,32 +2015,79 @@ export class ScheduleStore {
 
   // ---------------------------------------------------------------- overview
 
-  overview(weekStartInput?: string): ScheduleOverview {
+  overview(startDateInput?: string, days = 7): ScheduleOverview {
     const preferences = this.getPreferences();
     const today = todayInTimezone(preferences.timezone);
-    const weekStart = mondayOf(
-      weekStartInput !== undefined && isValidDate(weekStartInput)
-        ? weekStartInput
-        : today,
-    );
-    const plan = this.getPlan(weekStart) ?? null;
-    const summary = this.summarize(plan, preferences);
-    if (plan === null) {
-      summary.weekStart = weekStart;
-      summary.weekEnd = weekEndOf(weekStart);
-    }
+    const rangeStart =
+      startDateInput !== undefined && isValidDate(startDateInput)
+        ? startDateInput
+        : today;
+    const rangeEnd = rangeEndOf(rangeStart, days);
+    const window = this.getWindow(rangeStart, days);
+    const summary =
+      window === null
+        ? {
+            rangeStart,
+            rangeEnd,
+            timezone: preferences.timezone,
+            planId: null,
+            totalPlannedMinutes: 0,
+            taskCount: 0,
+            doneMinutes: 0,
+            unscheduled: [],
+            warnings: [],
+          }
+        : this.summarizeWindow(window);
+    const tasks = this.listTasks({ includeDone: true, limit: MAX_LIMIT });
+    const fixedEvents = this.listFixedEvents();
+    const agenda = buildScheduleAgenda({
+      window,
+      tasks,
+      fixedEvents,
+      preferences,
+      startDate: rangeStart,
+      endDate: rangeEnd,
+      today,
+      nowClock: nowClockInTimezone(preferences.timezone),
+      summary,
+    });
     return {
       timezone: preferences.timezone,
       today,
-      weekStart,
-      weekEnd: weekEndOf(weekStart),
+      rangeStart,
+      rangeEnd,
       preferences,
       preferencesConfigured: this.getPreferencesMemory() !== undefined,
-      memories: this.listMemories({ limit: MAX_LIMIT }),
-      tasks: this.listTasks({ includeDone: true, limit: MAX_LIMIT }),
-      plan,
+      tasks,
+      fixedEvents,
+      window,
+      agenda,
       summary,
       calibration: this.getCalibration(),
+    };
+  }
+
+  summarizeWindow(window: ScheduleWindow): SchedulePlanSummary {
+    let totalPlannedMinutes = 0;
+    let doneMinutes = 0;
+    const tasks = new Set<string>();
+    for (const block of window.blocks) {
+      if (block.status === "skipped") continue;
+      const duration = durationMinutes(block.start, block.end);
+      totalPlannedMinutes += duration;
+      tasks.add(block.taskId);
+      if (block.status === "done") doneMinutes += duration;
+    }
+    return {
+      rangeStart: window.startDate,
+      rangeEnd: window.endDate,
+      timezone: window.timezone,
+      planId: null,
+      totalPlannedMinutes,
+      taskCount: tasks.size,
+      doneMinutes,
+      unscheduled: window.unscheduled.map((item) => ({ ...item })),
+      warnings: [...window.warnings],
     };
   }
 
@@ -1253,8 +2097,8 @@ export class ScheduleStore {
   ): SchedulePlanSummary {
     if (plan === null) {
       return {
-        weekStart: "",
-        weekEnd: "",
+        rangeStart: "",
+        rangeEnd: "",
         timezone: preferences.timezone,
         planId: null,
         totalPlannedMinutes: 0,
@@ -1275,8 +2119,8 @@ export class ScheduleStore {
       if (block.status === "done") doneMinutes += duration;
     }
     return {
-      weekStart: plan.weekStart,
-      weekEnd: plan.weekEnd,
+      rangeStart: plan.weekStart,
+      rangeEnd: plan.weekEnd,
       timezone: plan.timezone,
       planId: plan.id,
       totalPlannedMinutes,
@@ -1358,5 +2202,20 @@ export class ScheduleStore {
         console.error("[schedule] failed to persist plans", error);
       });
     return this.planQueue;
+  }
+
+  private persistFixedEvents(): Promise<void> {
+    const data = JSON.stringify(
+      { version: 1, events: this.listFixedEvents() },
+      null,
+      2,
+    );
+    this.fixedEventQueue = this.fixedEventQueue
+      .then(() => atomicWriteFile(this.fixedEventsFile, data))
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        console.error("[schedule] failed to persist fixed-events", error);
+      });
+    return this.fixedEventQueue;
   }
 }

@@ -368,7 +368,7 @@ export function AgentTimeline({
                 ? "创建会话并绑定一个本机工作区目录。Code 工具都通过本机服务在沙箱内运行。"
                 : mode === "paper"
                   ? "创建一个论文会话，开始检索 arXiv、阅读 PDF 并整理论文库。"
-                  : "创建一个日程会话，让助手记住你的偏好、安排一周计划，并在变化时自动重排。"}
+                  : "创建一个日程会话，让助手记住你的偏好、安排今天起未来 7 天，并在变化时自动重排。"}
             </p>
           </div>
           <Button variant="primary" onClick={newSession}>
@@ -407,7 +407,7 @@ export function AgentTimeline({
               ) : mode === "paper" ? (
                 "论文助手会检索 arXiv、下载并解析 PDF、把阅读笔记和标签整理进全局论文库。它不会执行命令，也不会读写工作区文件。"
               ) : (
-                "日程助手会读取你的偏好、约束和任务，按工作时段生成一周计划；任务没做完时，会把剩余工作推后并重新排期，最后导出表格图片。"
+                "日程助手会读取你的偏好、约束和任务，按工作时段生成今天起未来 7 天的按天议程；任务没做完时，会把剩余工作推后并重新排期，最后导出图片。"
               )}
             </p>
           </div>
@@ -521,7 +521,7 @@ export function AgentTimeline({
                 <SuggestionCard
                   icon={<BookOpen className="h-4 w-4" />}
                   title="打开日程面板"
-                  hint="计划表、记忆与任务"
+                  hint="日程、记忆与任务"
                   onClick={openSchedulePanel}
                 />
               </>
@@ -543,9 +543,9 @@ export function AgentTimeline({
             </p>
           ) : (
             <p className="max-w-md text-[11px] leading-5 text-muted-foreground/70">
-              本周：
+              未来 7 天：
               {scheduleOverview
-                ? `${scheduleOverview.weekStart} ~ ${scheduleOverview.weekEnd} · ${
+                ? `${scheduleOverview.rangeStart} ~ ${scheduleOverview.rangeEnd} · ${
                     scheduleOverview.tasks.filter(
                       (task) =>
                         (task.status === "todo" ||

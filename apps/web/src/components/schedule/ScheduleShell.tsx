@@ -1,6 +1,7 @@
 import { AgentSettingsDialog } from "../AgentSettingsDialog.js";
 import { AuditDrawer } from "../AuditDrawer.js";
 import { LlmSettingsDialog } from "../LlmSettingsDialog.js";
+import { QuestionPrompt } from "../QuestionPrompt.js";
 import { SearchSettingsDialog } from "../SearchSettingsDialog.js";
 import { SettingsDialog } from "../SettingsDialog.js";
 import { ScheduleComposer } from "./ScheduleComposer.js";
@@ -20,6 +21,7 @@ export function ScheduleShell() {
         <main className="min-h-0 flex-1">
           <ScheduleTimeline />
         </main>
+        <QuestionPrompt />
         <ScheduleComposer />
       </div>
 

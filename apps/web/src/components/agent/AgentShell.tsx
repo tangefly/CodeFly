@@ -1,6 +1,7 @@
 import { AgentSettingsDialog } from "../AgentSettingsDialog.js";
 import { AuditDrawer } from "../AuditDrawer.js";
 import { LlmSettingsDialog } from "../LlmSettingsDialog.js";
+import { QuestionPrompt } from "../QuestionPrompt.js";
 import { SearchSettingsDialog } from "../SearchSettingsDialog.js";
 import { SettingsDialog } from "../SettingsDialog.js";
 import { AgentComposer } from "./AgentComposer.js";
@@ -19,6 +20,7 @@ export function AgentShell() {
         <main className="min-h-0 flex-1">
           <AgentTimeline />
         </main>
+        <QuestionPrompt />
         <AgentComposer />
       </div>
 

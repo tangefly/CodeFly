@@ -1,4 +1,5 @@
 import { LlmSettingsDialog } from "../LlmSettingsDialog.js";
+import { QuestionPrompt } from "../QuestionPrompt.js";
 import { ChatComposer } from "./ChatComposer.js";
 import { ChatConversation } from "./ChatConversation.js";
 import { ChatSidebar } from "./ChatSidebar.js";
@@ -14,6 +15,7 @@ export function ChatShell() {
         <main className="min-h-0 flex-1">
           <ChatConversation />
         </main>
+        <QuestionPrompt />
         <ChatComposer />
       </div>
 

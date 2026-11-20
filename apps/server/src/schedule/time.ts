@@ -53,6 +53,16 @@ export function weekEndOf(weekStart: string): string {
   return addDays(weekStart, 6);
 }
 
+/** Last day of a rolling `days`-day window that starts at `start` (inclusive). */
+export function rangeEndOf(start: string, days: number): string {
+  return addDays(start, Math.max(0, days - 1));
+}
+
+/** Rounds a minute-of-day value up to the next `step` boundary. */
+export function ceilMinutes(minutes: number, step = 5): number {
+  return Math.ceil(minutes / step) * step;
+}
+
 export function compareDates(left: string, right: string): number {
   return left.localeCompare(right);
 }
@@ -109,6 +119,73 @@ export function todayInTimezone(timezone: string | undefined): string {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/** Minutes since local midnight in `timezone`, falling back to the server zone. */
+export function nowMinutesInTimezone(timezone: string | undefined): number {
+  const zone = timezone?.trim() !== "" ? timezone : undefined;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date());
+    const lookup = (type: string): string =>
+      parts.find((part) => part.type === type)?.value ?? "";
+    const hours = Number(lookup("hour"));
+    const minutes = Number(lookup("minute"));
+    if (Number.isFinite(hours) && Number.isFinite(minutes)) {
+      return (hours % 24) * 60 + minutes;
+    }
+  } catch {
+    // Unknown timezone; use the server's local clock below.
+  }
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/** Local wall-clock HH:mm in `timezone`. */
+export function nowClockInTimezone(timezone: string | undefined): string {
+  return minutesToClock(nowMinutesInTimezone(timezone));
+}
+
+/**
+ * Formats an ISO timestamp as `YYYY-MM-DD HH:mm` in the user's timezone.
+ * ISO strings are stored in UTC, so rendering them directly would show UTC
+ * instead of the wall-clock time the user actually sees.
+ */
+export function formatDateTimeInTimezone(
+  iso: string,
+  timezone: string | undefined,
+): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const zone = timezone?.trim() !== "" ? timezone : undefined;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const lookup = (type: string): string =>
+      parts.find((part) => part.type === type)?.value ?? "";
+    return `${lookup("year")}-${lookup("month")}-${lookup("day")} ${lookup(
+      "hour",
+    )}:${lookup("minute")}`;
+  } catch {
+    // Unknown timezone; fall back to the server's local wall clock.
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+  }
 }
 
 export function serverTimezone(): string {

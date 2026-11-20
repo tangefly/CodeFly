@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ScheduleStore } from "../src/schedule/store.js";
+import { todayInTimezone } from "../src/schedule/time.js";
 
 describe("ScheduleStore", () => {
   let dir: string;
@@ -62,6 +63,9 @@ describe("ScheduleStore", () => {
     const defaults = store.getPreferences();
     expect(defaults.workdays).toEqual([1, 2, 3, 4, 5]);
     expect(defaults.maxFocusMinutes).toBe(90);
+    expect(defaults.bufferRatio).toBe(0);
+    expect(defaults.gapMinutes).toBe(0);
+    expect(defaults.rules).toEqual([]);
 
     await store.upsertMemory({
       key: "scheduling_preferences",
@@ -76,7 +80,9 @@ describe("ScheduleStore", () => {
         maxFocusMinutes: 120,
         minBlockMinutes: 45,
         bufferRatio: 0.2,
+        gapMinutes: 15,
         dailyFocusLimitMinutes: 600,
+        rules: ["规则一", "规则一", " 规则二 "],
       },
     });
     const preferences = store.getPreferences();
@@ -87,7 +93,28 @@ describe("ScheduleStore", () => {
     expect(preferences.maxFocusMinutes).toBe(120);
     expect(preferences.minBlockMinutes).toBe(45);
     expect(preferences.bufferRatio).toBe(0.2);
+    expect(preferences.gapMinutes).toBe(15);
+    expect(preferences.rules).toEqual(["规则一", "规则二"]);
     expect(store.getPreferencesMemory()?.key).toBe("scheduling_preferences");
+  });
+
+  it("merges partial preference updates and persists rules", async () => {
+    const updated = await store.updatePreferences({
+      workStart: "08:00",
+      workEnd: "21:00",
+      gapMinutes: 0,
+      bufferRatio: 0,
+      rules: ["十点前不排会"],
+    });
+    expect(updated.workStart).toBe("08:00");
+    expect(updated.workEnd).toBe("21:00");
+    expect(updated.gapMinutes).toBe(0);
+    expect(updated.rules).toEqual(["十点前不排会"]);
+
+    const reloaded = new ScheduleStore(dir);
+    await reloaded.init();
+    expect(reloaded.getPreferences().workStart).toBe("08:00");
+    expect(reloaded.getPreferences().rules).toEqual(["十点前不排会"]);
   });
 
   it("tracks task progress, completion and calibration", async () => {
@@ -117,6 +144,46 @@ describe("ScheduleStore", () => {
     expect(updated.remainingMinutes).toBe(70);
     expect(updated.actualMinutes).toBe(50);
     expect(updated.status).toBe("in_progress");
+  });
+
+  it("stores, replaces and clears optional task steps", async () => {
+    const task = await store.createTask({
+      title: "写论文",
+      estimatedMinutes: 180,
+      steps: [
+        { title: "精读基线论文", minutes: 60 },
+        { title: "整理对比表", minutes: 45 },
+      ],
+    });
+    expect(task.steps.map((step) => step.title)).toEqual([
+      "精读基线论文",
+      "整理对比表",
+    ]);
+    expect(task.steps.every((step) => step.id.startsWith("step_"))).toBe(true);
+    const firstId = task.steps[0]!.id;
+
+    const updated = await store.updateTask(task.id, {
+      steps: [
+        { id: firstId, title: "精读基线论文（修订）", minutes: 70 },
+        { title: "写方法小节", minutes: 90 },
+      ],
+    });
+    expect(updated.steps).toHaveLength(2);
+    expect(updated.steps[0]).toMatchObject({
+      id: firstId,
+      title: "精读基线论文（修订）",
+      minutes: 70,
+    });
+
+    const reloaded = new ScheduleStore(dir);
+    await reloaded.init();
+    expect(reloaded.getTask(task.id)?.steps.map((step) => step.title)).toEqual([
+      "精读基线论文（修订）",
+      "写方法小节",
+    ]);
+
+    const cleared = await store.updateTask(task.id, { steps: null });
+    expect(cleared.steps).toEqual([]);
   });
 
   it("applies a schedule while preserving done blocks and replacing planned work", async () => {
@@ -228,6 +295,49 @@ describe("ScheduleStore", () => {
     expect(reloaded.getTask(t1.id)?.title).toBe("任务一");
   });
 
+  it("drops future skipped blocks when replanning an included task", async () => {
+    const task = await store.createTask({ title: "任务", estimatedMinutes: 60 });
+    await store.applySchedule({
+      taskIds: [task.id],
+      removeFromDate: "2026-11-16",
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "old_skipped",
+          taskId: task.id,
+          date: "2026-11-19",
+          start: "09:00",
+          end: "10:00",
+          status: "skipped",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "old_done",
+          taskId: task.id,
+          date: "2026-11-17",
+          start: "09:00",
+          end: "10:00",
+          status: "done",
+          actualMinutes: 60,
+          note: "",
+        },
+      ],
+    });
+    await store.applySchedule({
+      taskIds: [task.id],
+      removeFromDate: "2026-11-18",
+      skipBeforeDate: "2026-11-18",
+      addBlocks: [],
+    });
+    expect(
+      store
+        .getPlan("2026-11-16")!
+        .blocks.map((block) => block.id)
+        .sort(),
+    ).toEqual(["old_done"]);
+  });
+
   it("deletes a task and its blocks", async () => {
     const task = await store.createTask({ title: "待删除", estimatedMinutes: 30 });
     await store.applySchedule({
@@ -253,7 +363,7 @@ describe("ScheduleStore", () => {
     expect(store.getPlan("2026-11-16")?.blocks).toHaveLength(0);
   });
 
-  it("summarizes the current week", async () => {
+  it("summarizes a requested rolling window", async () => {
     await store.upsertMemory({
       key: "scheduling_preferences",
       title: "排期偏好",
@@ -289,12 +399,244 @@ describe("ScheduleStore", () => {
     });
 
     const overview = store.overview("2026-11-16");
-    expect(overview.weekStart).toBe("2026-11-16");
-    expect(overview.weekEnd).toBe("2026-11-22");
+    expect(overview.rangeStart).toBe("2026-11-16");
+    expect(overview.rangeEnd).toBe("2026-11-22");
+    expect(overview.summary.rangeStart).toBe("2026-11-16");
+    expect(overview.summary.rangeEnd).toBe("2026-11-22");
     expect(overview.summary.totalPlannedMinutes).toBe(120);
     expect(overview.summary.doneMinutes).toBe(60);
     expect(overview.summary.taskCount).toBe(1);
     expect(overview.preferencesConfigured).toBe(true);
     expect(overview.timezone).toBe("Asia/Shanghai");
+    expect(overview.window?.blocks).toHaveLength(2);
+    expect(overview.agenda.days).toHaveLength(7);
+    expect(overview.agenda.days[0]?.date).toBe("2026-11-16");
+    expect(overview.agenda.days[0]?.items).toHaveLength(2);
+  });
+
+  it("merges rolling-window blocks across two ISO weeks", async () => {
+    await store.upsertMemory({
+      key: "scheduling_preferences",
+      title: "排期偏好",
+      data: { timezone: "Asia/Shanghai", workdays: [1, 2, 3, 4, 5] },
+    });
+    const task = await store.createTask({ title: "跨周任务", estimatedMinutes: 120 });
+    await store.applySchedule({
+      taskIds: [task.id],
+      removeFromDate: "2026-11-18",
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b1",
+          taskId: task.id,
+          date: "2026-11-18",
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b2",
+          taskId: task.id,
+          date: "2026-11-23",
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    // 2026-11-18 (Wed) .. 2026-11-24 (Tue) crosses the Sunday/Monday split.
+    const window = store.getWindow("2026-11-18", 7);
+    expect(window?.startDate).toBe("2026-11-18");
+    expect(window?.endDate).toBe("2026-11-24");
+    expect(window?.blocks.map((block) => block.date)).toEqual([
+      "2026-11-18",
+      "2026-11-23",
+    ]);
+    const overview = store.overview("2026-11-18");
+    expect(overview.summary.totalPlannedMinutes).toBe(120);
+    expect(overview.agenda.days.map((day) => day.date)).toContain("2026-11-23");
+  });
+
+  it("returns a fixed-only window with zero blocks", async () => {
+    const today = todayInTimezone("Asia/Shanghai");
+    const fixed = await store.createFixedEvent({
+      title: "固定课程",
+      kind: "once",
+      date: today,
+      start: "09:00",
+      end: "10:00",
+    });
+    const window = store.getWindow(today, 7);
+    // No plan exists yet, so the window itself is absent; the agenda still
+    // carries the fixed commitment for the requested day.
+    expect(window).toBeNull();
+    const overview = store.overview(today);
+    expect(overview.agenda.days[0]?.items[0]?.title).toBe("固定课程");
+    expect(overview.agenda.days[0]?.items[0]?.id).toContain(fixed.id);
+  });
+
+  it("stores, updates and deletes fixed events", async () => {
+    const weekly = await store.createFixedEvent({
+      title: "组会",
+      kind: "weekly",
+      weekday: 1,
+      start: "16:00",
+      end: "17:30",
+      location: "线上",
+    });
+    const once = await store.createFixedEvent({
+      title: "讲座",
+      kind: "once",
+      date: "2026-11-19",
+      start: "10:00",
+      end: "12:00",
+    });
+    expect(weekly.id.startsWith("fixed_")).toBe(true);
+
+    await expect(
+      store.createFixedEvent({
+        title: "缺 weekday",
+        kind: "weekly",
+        start: "09:00",
+        end: "10:00",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_FIXED_EVENT" });
+    await expect(
+      store.createFixedEvent({
+        title: "时间倒挂",
+        kind: "weekly",
+        weekday: 2,
+        start: "10:00",
+        end: "09:00",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_FIXED_EVENT" });
+
+    const updated = await store.updateFixedEvent(weekly.id, {
+      start: "15:00",
+      end: "16:00",
+    });
+    expect(updated.start).toBe("15:00");
+
+    // 2026-11-16 is Monday; both the weekly event and the one-off on the 19th
+    // match their dates correctly.
+    expect(
+      store.fixedEventsForDate("2026-11-16").map((event) => event.id),
+    ).toEqual([weekly.id]);
+    expect(
+      store.fixedEventsForDate("2026-11-19").map((event) => event.id),
+    ).toEqual([once.id]);
+    expect(store.fixedEventsForDate("2026-11-17")).toEqual([]);
+
+    const reloaded = new ScheduleStore(dir);
+    await reloaded.init();
+    expect(reloaded.listFixedEvents()).toHaveLength(2);
+    expect(reloaded.getFixedEvent(weekly.id)?.end).toBe("16:00");
+
+    expect(await reloaded.deleteFixedEvent(weekly.id)).toBe(true);
+    expect(reloaded.getFixedEvent(weekly.id)).toBeUndefined();
+  });
+
+  it("migrates legacy fixed-commitment memories into fixed events once", async () => {
+    await store.upsertMemory({
+      key: "class_schedule_constraint",
+      category: "constraint",
+      title: "固定上课时间表",
+      data: {
+        schedule: {
+          Mon: [{ start: "08:00", end: "09:35", loc: "3-130" }],
+          Tue: [{ start: "08:00", end: "09:35", loc: "3-130" }],
+        },
+      },
+    });
+    await store.upsertMemory({
+      key: "fixed_meetings",
+      category: "routine",
+      title: "每周固定线上会议",
+      data: {
+        weekly: [
+          { day: 1, start: "16:00", end: "17:30", title: "线上会议 A" },
+        ],
+      },
+    });
+
+    await store.upsertMemory({
+      key: "task_split_rule",
+      category: "constraint",
+      title: "任务拆分规则",
+      content: "同一任务同一天只在跨饭点时拆分。",
+    });
+
+    const reloaded = new ScheduleStore(dir);
+    await reloaded.init();
+    const events = reloaded.listFixedEvents();
+    expect(events).toHaveLength(3);
+    expect(
+      events.filter((event) => event.kind === "weekly" && event.weekday === 1),
+    ).toHaveLength(2);
+    const mondayCourses = events.filter(
+      (event) =>
+        event.weekday === 1 && event.title.startsWith("课程"),
+    );
+    expect(mondayCourses).toHaveLength(1);
+    expect(mondayCourses[0]?.location).toBe("3-130");
+    // Migrated fixed-commitment memories are removed; other free-form
+    // memories become rules in the single preference document.
+    expect(reloaded.getMemoryByKey("class_schedule_constraint")).toBeUndefined();
+    expect(reloaded.getMemoryByKey("fixed_meetings")).toBeUndefined();
+    expect(
+      reloaded
+        .getPreferences()
+        .rules.some((rule) => rule.includes("跨饭点")),
+    ).toBe(true);
+    expect(reloaded.listMemories()).toHaveLength(1);
+
+    // Second init must not duplicate anything.
+    const again = new ScheduleStore(dir);
+    await again.init();
+    expect(again.listFixedEvents()).toHaveLength(3);
+    expect(again.listMemories()).toHaveLength(1);
+  });
+
+  it("rejects blocks that overlap a fixed event", async () => {
+    const event = await store.createFixedEvent({
+      title: "课程",
+      kind: "weekly",
+      weekday: 1,
+      start: "09:00",
+      end: "11:00",
+    });
+    const task = await store.createTask({ title: "任务", estimatedMinutes: 60 });
+    await store.applySchedule({
+      taskIds: [task.id],
+      removeFromDate: "2026-11-16",
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b1",
+          taskId: task.id,
+          date: "2026-11-16",
+          start: "14:00",
+          end: "15:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+    await expect(
+      store.updateBlock("b1", { start: "10:00", end: "11:00" }),
+    ).rejects.toMatchObject({ code: "BLOCK_OVERLAP" });
+    // Moving outside the fixed event still works.
+    const updated = await store.updateBlock("b1", {
+      start: "13:00",
+      end: "14:00",
+    });
+    expect(updated.block.start).toBe("13:00");
+    expect(store.getFixedEvent(event.id)).toBeDefined();
   });
 });

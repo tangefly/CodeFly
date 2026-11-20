@@ -1,0 +1,217 @@
+import type {
+  ScheduleAgendaDay,
+  ScheduleAgendaItem,
+  ScheduleAgendaModel,
+  ScheduleFixedEvent,
+  SchedulePlanSummary,
+  SchedulePreferences,
+  ScheduleTask,
+  ScheduleWindow,
+} from "@codefly/protocol";
+import {
+  addDays,
+  clockToMinutes,
+  compareDates,
+  daysBetween,
+  durationMinutes,
+  weekdayLabel,
+  weekdayOf,
+} from "./time.js";
+
+interface Interval {
+  start: number;
+  end: number;
+}
+
+function subtractInterval(
+  intervals: Interval[],
+  cutStart: number,
+  cutEnd: number,
+): Interval[] {
+  if (cutEnd <= cutStart) return intervals;
+  const next: Interval[] = [];
+  for (const interval of intervals) {
+    if (cutEnd <= interval.start || cutStart >= interval.end) {
+      next.push(interval);
+      continue;
+    }
+    if (cutStart > interval.start) {
+      next.push({ start: interval.start, end: cutStart });
+    }
+    if (cutEnd < interval.end) {
+      next.push({ start: cutEnd, end: interval.end });
+    }
+  }
+  return next;
+}
+
+function totalMinutes(intervals: Interval[]): number {
+  return intervals.reduce(
+    (total, interval) => total + (interval.end - interval.start),
+    0,
+  );
+}
+
+/** Fixed commitments that occupy wall-clock time on `date`. */
+export function fixedEventsForDate(
+  events: ScheduleFixedEvent[],
+  date: string,
+): ScheduleFixedEvent[] {
+  const weekday = weekdayOf(date);
+  return events
+    .filter(
+      (event) =>
+        (event.kind === "weekly" && event.weekday === weekday) ||
+        (event.kind === "once" && event.date === date),
+    )
+    .sort((a, b) => a.start.localeCompare(b.start) || a.title.localeCompare(b.title));
+}
+
+function agendaItemsForDay(input: {
+  date: string;
+  fixedEvents: ScheduleFixedEvent[];
+  window: ScheduleWindow | null;
+  taskIndex: Map<string, ScheduleTask>;
+}): ScheduleAgendaItem[] {
+  const items: ScheduleAgendaItem[] = [];
+  for (const event of fixedEventsForDate(input.fixedEvents, input.date)) {
+    items.push({
+      id: `fixed:${event.id}:${input.date}`,
+      kind: "fixed",
+      title: event.title,
+      start: event.start,
+      end: event.end,
+      status: "planned",
+      actualMinutes: null,
+      priority: null,
+      location: event.location,
+      note: event.note,
+    });
+  }
+  for (const block of input.window?.blocks ?? []) {
+    if (block.date !== input.date) continue;
+    const task = input.taskIndex.get(block.taskId);
+    items.push({
+      id: block.id,
+      kind: "task",
+      title: task?.title ?? "已删除任务",
+      start: block.start,
+      end: block.end,
+      status: block.status,
+      actualMinutes: block.actualMinutes,
+      priority: task?.priority ?? null,
+      location: "",
+      note: block.note,
+    });
+  }
+  // Chronological order; fixed commitments win ties so they anchor the day.
+  return items.sort(
+    (a, b) =>
+      clockToMinutes(a.start) - clockToMinutes(b.start) ||
+      (a.kind === b.kind ? 0 : a.kind === "fixed" ? -1 : 1) ||
+      a.title.localeCompare(b.title),
+  );
+}
+
+function freeMinutesForDay(input: {
+  date: string;
+  items: ScheduleAgendaItem[];
+  preferences: SchedulePreferences;
+  today: string;
+  nowClock: string;
+}): number | null {
+  const weekday = weekdayOf(input.date);
+  if (!input.preferences.workdays.includes(weekday)) return null;
+
+  const workStart = clockToMinutes(input.preferences.workStart);
+  const workEnd = clockToMinutes(input.preferences.workEnd);
+  const dayStart =
+    input.date === input.today
+      ? Math.max(workStart, Math.ceil(clockToMinutes(input.nowClock) / 5) * 5)
+      : workStart;
+  if (dayStart >= workEnd || workEnd <= workStart) return 0;
+
+  let free: Interval[] = [{ start: dayStart, end: workEnd }];
+  for (const brk of input.preferences.breaks) {
+    free = subtractInterval(
+      free,
+      Math.max(dayStart, clockToMinutes(brk.start)),
+      Math.min(workEnd, clockToMinutes(brk.end)),
+    );
+  }
+  for (const item of input.items) {
+    if (item.status === "skipped") continue;
+    free = subtractInterval(
+      free,
+      Math.max(dayStart, clockToMinutes(item.start)),
+      Math.min(workEnd, clockToMinutes(item.end)),
+    );
+  }
+  return Math.max(0, totalMinutes(free));
+}
+
+/**
+ * Builds the day-by-day agenda shared by the schedule panel, tool cards and
+ * the PNG renderer. It merges fixed commitments with task blocks, keeps each
+ * day in chronological order and reports remaining free time inside working
+ * hours. On the current day free time starts at "now", never in the past.
+ */
+export function buildScheduleAgenda(input: {
+  window: ScheduleWindow | null;
+  tasks: ScheduleTask[];
+  fixedEvents: ScheduleFixedEvent[];
+  preferences: SchedulePreferences;
+  startDate: string;
+  endDate: string;
+  today: string;
+  nowClock: string;
+  summary: SchedulePlanSummary;
+}): ScheduleAgendaModel {
+  const taskIndex = new Map(input.tasks.map((task) => [task.id, task]));
+  const dayCount = Math.max(
+    1,
+    compareDates(input.endDate, input.startDate) < 0
+      ? 1
+      : daysBetween(input.startDate, input.endDate) + 1,
+  );
+  const days: ScheduleAgendaDay[] = [];
+  for (let index = 0; index < dayCount; index += 1) {
+    const date = addDays(input.startDate, index);
+    const items = agendaItemsForDay({
+      date,
+      fixedEvents: input.fixedEvents,
+      window: input.window,
+      taskIndex,
+    });
+    const plannedMinutes = items.reduce((total, item) => {
+      if (item.status === "skipped") return total;
+      return total + durationMinutes(item.start, item.end);
+    }, 0);
+    days.push({
+      date,
+      weekday: weekdayLabel(date),
+      items,
+      plannedMinutes,
+      freeMinutes: freeMinutesForDay({
+        date,
+        items,
+        preferences: input.preferences,
+        today: input.today,
+        nowClock: input.nowClock,
+      }),
+    });
+  }
+
+  return {
+    startDate: input.startDate,
+    endDate: input.endDate,
+    timezone: input.preferences.timezone,
+    today: input.today,
+    generatedAt: new Date().toISOString(),
+    days,
+    summary: input.summary,
+    unscheduled: input.window?.unscheduled.map((item) => ({ ...item })) ?? [],
+    warnings: [...(input.window?.warnings ?? [])],
+    notes: input.window?.notes ?? "",
+  };
+}

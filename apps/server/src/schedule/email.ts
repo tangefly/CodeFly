@@ -1,11 +1,12 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  ScheduleAgendaModel,
   ScheduleEmailSettingsInput,
   ScheduleEmailSettingsPublic,
   ScheduleEmailTestResult,
-  SchedulePlan,
   SchedulePlanSummary,
+  ScheduleWindow,
 } from "@codefly/protocol";
 import nodemailer from "nodemailer";
 import { AppError, isNotFound } from "../http/errors.js";
@@ -275,44 +276,74 @@ export class ScheduleEmailService {
   }
 
   async sendPlan(input: {
-    plan: SchedulePlan;
+    window: ScheduleWindow;
+    agenda: ScheduleAgendaModel;
     summary: SchedulePlanSummary;
     png: Buffer;
     fileName: string;
     note?: string;
   }): Promise<{ to: string; messageId: string | null }> {
     const config = this.store.getInternal();
-    const { plan, summary } = input;
-    const subject = `CodeFly 周计划 · ${plan.weekStart} ~ ${plan.weekEnd}`;
+    const { window, agenda, summary } = input;
+    const subject = `CodeFly 日程 · ${window.startDate} ~ ${window.endDate}`;
     const lines = [
-      `一周计划：${plan.weekStart} ~ ${plan.weekEnd}（时区 ${plan.timezone}）`,
+      `未来 ${agenda.days.length} 天日程：${window.startDate} ~ ${window.endDate}（时区 ${window.timezone}）`,
       `共 ${summary.taskCount} 项任务，计划 ${summary.totalPlannedMinutes} 分钟，已完成 ${summary.doneMinutes} 分钟。`,
     ];
-    if (plan.unscheduled.length > 0) {
+    for (const day of agenda.days) {
+      if (day.items.length === 0) continue;
+      lines.push("", `${day.weekday} ${day.date} · 计划 ${day.plannedMinutes} 分钟`);
+      for (const item of day.items) {
+        const mark =
+          item.status === "done" ? "✓" : item.status === "skipped" ? "—" : "·";
+        const suffix =
+          item.kind === "fixed"
+            ? `（固定${item.location.trim() === "" ? "" : ` @${item.location.trim()}`}）`
+            : "";
+        lines.push(`  ${mark} ${item.start}-${item.end} ${item.title}${suffix}`);
+      }
+    }
+    if (window.unscheduled.length > 0) {
       lines.push("", "未排期任务：");
-      for (const item of plan.unscheduled) {
+      for (const item of window.unscheduled) {
         lines.push(`- ${item.title} · 剩余 ${item.remainingMinutes} 分钟 · ${item.reason}`);
       }
     }
-    if (plan.warnings.length > 0) {
+    if (window.warnings.length > 0) {
       lines.push("", "提醒：");
-      for (const warning of plan.warnings) lines.push(`- ${warning}`);
+      for (const warning of window.warnings) lines.push(`- ${warning}`);
     }
-    if (plan.notes.trim() !== "") {
-      lines.push("", "备注：", plan.notes.trim());
+    if (window.notes.trim() !== "") {
+      lines.push("", "备注：", window.notes.trim());
     }
     if (input.note !== undefined && input.note.trim() !== "") {
       lines.push("", "附言：", input.note.trim());
     }
-    lines.push("", "计划表图片见附件。");
+    lines.push("", "日程图片见附件。");
+    const dayHtml = agenda.days
+      .filter((day) => day.items.length > 0)
+      .map(
+        (day) => `<h3 style="margin:16px 0 4px">${escapeHtml(day.weekday)} ${escapeHtml(
+          day.date,
+        )}</h3><ul style="margin:0">${day.items
+          .map(
+            (item) =>
+              `<li>${escapeHtml(item.start)}-${escapeHtml(item.end)} ${escapeHtml(
+                item.title,
+              )}${item.kind === "fixed" ? "（固定）" : ""}</li>`,
+          )
+          .join("")}</ul>`,
+      )
+      .join("");
     const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;line-height:1.6">
-<h2 style="margin:0 0 8px">CodeFly 周计划</h2>
-<p style="margin:0 0 4px;color:#6b7280">${plan.weekStart} ~ ${plan.weekEnd} · ${plan.timezone}</p>
+<h2 style="margin:0 0 8px">CodeFly 未来 ${agenda.days.length} 天日程</h2>
+<p style="margin:0 0 4px;color:#6b7280">${window.startDate} ~ ${window.endDate} · ${window.timezone}</p>
 <p style="margin:12px 0">共 <b>${summary.taskCount}</b> 项任务，计划 <b>${summary.totalPlannedMinutes}</b> 分钟，已完成 <b>${summary.doneMinutes}</b> 分钟。</p>
-${plan.unscheduled.length > 0 ? `<h3>未排期任务</h3><ul>${plan.unscheduled.map((item) => `<li>${escapeHtml(item.title)} · 剩余 ${item.remainingMinutes} 分钟 · ${escapeHtml(item.reason)}</li>`).join("")}</ul>` : ""}
-${plan.warnings.length > 0 ? `<h3>提醒</h3><ul>${plan.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}
+${dayHtml}
+${window.unscheduled.length > 0 ? `<h3>未排期任务</h3><ul>${window.unscheduled.map((item) => `<li>${escapeHtml(item.title)} · 剩余 ${item.remainingMinutes} 分钟 · ${escapeHtml(item.reason)}</li>`).join("")}</ul>` : ""}
+${window.warnings.length > 0 ? `<h3>提醒</h3><ul>${window.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}
 ${input.note !== undefined && input.note.trim() !== "" ? `<p style="margin-top:12px"><b>附言：</b>${escapeHtml(input.note)}</p>` : ""}
-<p style="margin-top:16px;color:#6b7280">计划表图片见附件。</p>
+<p style="margin-top:16px;color:#6b7280">日程图片见附件。</p>
 </div>`;
 
     const result = await transportFor(config).sendMail({

@@ -142,6 +142,9 @@ describe("ScheduleService", () => {
       store,
       email: { isConfigured: () => false } as never,
       tools,
+      questions: {
+        ask: async () => ({ answers: [], outcome: "skipped" as const }),
+      },
       maxSteps: 10,
     });
   });
@@ -151,6 +154,13 @@ describe("ScheduleService", () => {
   });
 
   it("runs the tool loop and injects a schedule runtime context", async () => {
+    await store.createFixedEvent({
+      title: "线上会议 A",
+      kind: "weekly",
+      weekday: 1,
+      start: "16:00",
+      end: "17:30",
+    });
     const events: AgentEvent[] = [];
     await service.run(
       session,
@@ -173,8 +183,12 @@ describe("ScheduleService", () => {
     const contextText =
       typeof context?.content === "string" ? context.content : "";
     expect(contextText).toContain("Scheduling preferences: configured");
+    expect(contextText).toContain("Rolling window (today → +6 days):");
+    expect(contextText).toContain("Fixed events (1 total · 1 weekly · 0 one-off)");
+    expect(contextText).toContain("周一 16:00-17:30 线上会议 A");
     expect(contextText).toContain("Active tasks: 0");
-    expect(contextText).toContain("Memories: 1");
+    expect(contextText).toContain("This window's plan:");
+    expect(contextText).toContain("Scheduling rules (0): none");
     expect(contextText).toContain("Email: not configured");
 
     const toolNames = client.toolSets[0]!.map((tool) => tool.function.name).sort();

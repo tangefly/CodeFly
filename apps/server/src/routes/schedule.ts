@@ -6,9 +6,10 @@ import {
   scheduleEmailSendSchema,
   scheduleEmailSettingsSchema,
   scheduleEmailTestSchema,
-  scheduleMemoryCreateSchema,
-  scheduleMemoryUpdateSchema,
+  scheduleFixedEventCreateSchema,
+  scheduleFixedEventUpdateSchema,
   scheduleOverviewQuerySchema,
+  schedulePreferencesUpdateSchema,
   scheduleTaskUpdateSchema,
   type AgentEvent,
 } from "@codefly/protocol";
@@ -21,10 +22,17 @@ import type {
   ScheduleEmailConfigStore,
   ScheduleEmailService,
 } from "../schedule/email.js";
-import { renderWeekPng } from "../schedule/render.js";
+import { buildScheduleAgenda } from "../schedule/agenda.js";
+import {
+  renderAgendaPng,
+} from "../schedule/render.js";
 import type { ScheduleService } from "../schedule/service.js";
 import type { ScheduleStore } from "../schedule/store.js";
-import { isValidDate, mondayOf, todayInTimezone, weekEndOf } from "../schedule/time.js";
+import {
+  nowClockInTimezone,
+  rangeEndOf,
+  todayInTimezone,
+} from "../schedule/time.js";
 
 export interface ScheduleRouteDeps {
   sessions: SessionStore;
@@ -122,57 +130,63 @@ export function registerScheduleRoutes(
 ): void {
   app.get("/api/schedule/overview", async (request) => {
     const query = scheduleOverviewQuerySchema.parse(request.query);
-    return { overview: deps.store.overview(query.week_start) };
+    return { overview: deps.store.overview(query.start_date) };
   });
 
-  app.post("/api/schedule/memories", async (request, reply) => {
-    const body = scheduleMemoryCreateSchema.parse(request.body);
-    const memory = await deps.store.createMemory({
-      key: body.key,
-      category: body.category,
-      title: body.title,
-      content: body.content,
-      data: body.data,
-      tags: body.tags,
-      pinned: body.pinned,
-    });
+  app.patch("/api/schedule/preferences", async (request) => {
+    const body = schedulePreferencesUpdateSchema.parse(request.body);
+    const preferences = await deps.store.updatePreferences(body);
     void deps.audit.append({
-      type: "schedule.memory.changed",
+      type: "schedule.preferences.changed",
+      action: "updated",
+      source: "ui",
+      rules: preferences.rules.length,
+      bufferRatio: preferences.bufferRatio,
+      gapMinutes: preferences.gapMinutes,
+    });
+    return { preferences };
+  });
+
+  app.post("/api/schedule/fixed-events", async (request, reply) => {
+    const body = scheduleFixedEventCreateSchema.parse(request.body);
+    const event = await deps.store.createFixedEvent(body);
+    void deps.audit.append({
+      type: "schedule.fixed_event.changed",
       action: "created",
-      memoryId: memory.id,
-      key: memory.key,
+      fixedEventId: event.id,
+      title: event.title,
       source: "ui",
     });
     reply.code(201);
-    return { memory };
+    return { event };
   });
 
-  app.patch("/api/schedule/memories/:id", async (request) => {
+  app.patch("/api/schedule/fixed-events/:id", async (request) => {
     const { id } = request.params as { id: string };
-    const body = scheduleMemoryUpdateSchema.parse(request.body);
-    const memory = await deps.store.updateMemory(id, body);
+    const body = scheduleFixedEventUpdateSchema.parse(request.body);
+    const event = await deps.store.updateFixedEvent(id, body);
     void deps.audit.append({
-      type: "schedule.memory.changed",
+      type: "schedule.fixed_event.changed",
       action: "updated",
-      memoryId: memory.id,
-      key: memory.key,
+      fixedEventId: event.id,
+      title: event.title,
       source: "ui",
     });
-    return { memory };
+    return { event };
   });
 
-  app.delete("/api/schedule/memories/:id", async (request, reply) => {
+  app.delete("/api/schedule/fixed-events/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const memory = deps.store.getMemory(id);
-    const deleted = await deps.store.deleteMemory(id);
+    const event = deps.store.getFixedEvent(id);
+    const deleted = await deps.store.deleteFixedEvent(id);
     if (!deleted) {
-      throw new AppError("MEMORY_NOT_FOUND", `unknown memory: ${id}`, 404);
+      throw new AppError("FIXED_EVENT_NOT_FOUND", `unknown fixed event: ${id}`, 404);
     }
     void deps.audit.append({
-      type: "schedule.memory.changed",
+      type: "schedule.fixed_event.changed",
       action: "deleted",
-      memoryId: id,
-      key: memory?.key,
+      fixedEventId: id,
+      title: event?.title,
       source: "ui",
     });
     return reply.code(204).send();
@@ -234,38 +248,46 @@ export function registerScheduleRoutes(
     const body = scheduleEmailSendSchema.parse(request.body);
     const preferences = deps.store.getPreferences();
     const today = todayInTimezone(preferences.timezone);
-    const weekStart = mondayOf(body.week_start ?? today);
-    if (!isValidDate(weekStart)) {
-      throw new AppError("INVALID_WEEK", "invalid week_start", 400);
-    }
-    const plan = deps.store.getPlan(weekStart) ?? null;
-    if (plan === null) {
+    const startDate = body.start_date ?? today;
+    const days = body.days ?? 7;
+    const endDate = rangeEndOf(startDate, days);
+    const window = deps.store.getWindow(startDate, days);
+    if (window === null) {
       throw new AppError(
         "PLAN_NOT_FOUND",
-        `这一周还没有计划：${weekStart}`,
+        `这个时间窗口还没有计划：${startDate} ~ ${endDate}`,
         404,
       );
     }
     const tasks = deps.store.listTasks({ includeDone: true, limit: 200 });
-    const summary = deps.store.summarize(plan, preferences);
-    const render = await renderWeekPng({
-      plan,
+    const fixedEvents = deps.store.listFixedEvents();
+    const summary = deps.store.summarizeWindow(window);
+    const agenda = buildScheduleAgenda({
+      window,
       tasks,
+      fixedEvents,
       preferences,
-      weekStart,
-      weekEnd: weekEndOf(weekStart),
+      startDate,
+      endDate,
+      today,
+      nowClock: nowClockInTimezone(preferences.timezone),
       summary,
+    });
+    const render = await renderAgendaPng({
+      agenda,
       outputDir: deps.store.getExportsDir(),
     });
     const result = await deps.email.sendPlan({
-      plan,
+      window,
+      agenda,
       summary,
       png: render.buffer,
-      fileName: `codefly-week-${weekStart}.png`,
+      fileName: `codefly-agenda-${startDate}.png`,
     });
     void deps.audit.append({
       type: "schedule.email.sent",
-      weekStart,
+      rangeStart: startDate,
+      rangeEnd: endDate,
       to: result.to,
       messageId: result.messageId,
       imagePath: render.filePath,

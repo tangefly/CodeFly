@@ -2,7 +2,6 @@ import { AlertTriangle, CheckCircle2, X } from "lucide-react";
 import { useAppStore } from "../lib/store.js";
 import { cn } from "../lib/utils.js";
 import { ApprovalDialog } from "./ApprovalDialog.js";
-import { QuestionDialog } from "./QuestionDialog.js";
 import { AgentShell } from "./agent/AgentShell.js";
 import { ChatShell } from "./chat/ChatShell.js";
 import { PaperShell } from "./paper/PaperShell.js";
@@ -65,7 +64,6 @@ export function AppShell() {
           the user switches to chat; surfacing the dialog globally avoids
           silently blocking a background run until it times out. */}
       <ApprovalDialog />
-      <QuestionDialog />
       <NotificationToast />
     </div>
   );

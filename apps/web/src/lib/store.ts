@@ -29,8 +29,9 @@ import type {
   ScheduleEmailSettingsPublic,
   ScheduleEmailTestInput,
   ScheduleEmailTestResult,
-  ScheduleMemoryInput,
+  ScheduleFixedEventInput,
   ScheduleOverview,
+  SchedulePreferencesUpdateInput,
   ScheduleSession,
   ScheduleTask,
   ScheduleTaskInput,
@@ -206,13 +207,16 @@ export interface AppState {
   cancelPaper(): void;
   sendSchedule(text: string): Promise<void>;
   cancelSchedule(): void;
-  loadScheduleOverview(weekStart?: string): Promise<void>;
-  createScheduleMemory(input: ScheduleMemoryInput): Promise<boolean>;
-  updateScheduleMemory(
-    memoryId: string,
-    input: ScheduleMemoryInput,
+  loadScheduleOverview(startDate?: string): Promise<void>;
+  updateSchedulePreferences(
+    input: SchedulePreferencesUpdateInput,
   ): Promise<boolean>;
-  deleteScheduleMemory(memoryId: string): Promise<boolean>;
+  createScheduleFixedEvent(input: ScheduleFixedEventInput): Promise<boolean>;
+  updateScheduleFixedEvent(
+    eventId: string,
+    input: ScheduleFixedEventInput,
+  ): Promise<boolean>;
+  deleteScheduleFixedEvent(eventId: string): Promise<boolean>;
   updateScheduleTask(taskId: string, input: ScheduleTaskInput): Promise<boolean>;
   deleteScheduleTask(taskId: string): Promise<boolean>;
   loadScheduleEmailSettings(): Promise<void>;
@@ -222,7 +226,7 @@ export interface AppState {
   testScheduleEmail(
     input: ScheduleEmailTestInput,
   ): Promise<ScheduleEmailTestResult>;
-  sendScheduleEmailNow(weekStart?: string): Promise<boolean>;
+  sendScheduleEmailNow(startDate?: string, days?: number): Promise<boolean>;
   openSchedulePanel(): void;
   closeSchedulePanel(): void;
   openScheduleEmailSettings(): void;
@@ -798,6 +802,11 @@ export const useAppStore = create<AppState>()((set, get) => {
       } else {
         set((current) => ({
           scheduleBusy: { ...current.scheduleBusy, [sessionId]: false },
+          // A schedule run can end (or be aborted) while its blocking
+          // ask_user_question is still open; drop the stale dialog.
+          questions: current.questions.filter(
+            (question) => question.sessionId !== sessionId,
+          ),
         }));
         void get().loadScheduleOverview();
       }
@@ -1466,10 +1475,10 @@ export const useAppStore = create<AppState>()((set, get) => {
     scheduleAborters.get(sessionId)?.abort();
   },
 
-  loadScheduleOverview: async (weekStart?: string) => {
+  loadScheduleOverview: async (startDate?: string) => {
     set({ scheduleLoading: true });
     try {
-      const { overview } = await api.scheduleOverview(weekStart);
+      const { overview } = await api.scheduleOverview(startDate);
       set({ scheduleOverview: overview, scheduleLoading: false });
     } catch (error) {
       set({ scheduleLoading: false });
@@ -1477,11 +1486,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     }
   },
 
-  createScheduleMemory: async (input: ScheduleMemoryInput) => {
+  updateSchedulePreferences: async (input: SchedulePreferencesUpdateInput) => {
     try {
-      await api.createScheduleMemory(input);
-      await get().loadScheduleOverview();
-      get().notify("info", "记忆已保存");
+      await api.updateSchedulePreferences(input);
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
+      get().notify("info", "排期偏好已保存");
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
@@ -1489,14 +1498,26 @@ export const useAppStore = create<AppState>()((set, get) => {
     }
   },
 
-  updateScheduleMemory: async (
-    memoryId: string,
-    input: ScheduleMemoryInput,
+  createScheduleFixedEvent: async (input: ScheduleFixedEventInput) => {
+    try {
+      await api.createScheduleFixedEvent(input);
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
+      get().notify("info", "固定安排已添加");
+      return true;
+    } catch (error) {
+      get().notify("error", asApiError(error).message);
+      return false;
+    }
+  },
+
+  updateScheduleFixedEvent: async (
+    eventId: string,
+    input: ScheduleFixedEventInput,
   ) => {
     try {
-      await api.updateScheduleMemory(memoryId, input);
-      await get().loadScheduleOverview();
-      get().notify("info", "记忆已更新");
+      await api.updateScheduleFixedEvent(eventId, input);
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
+      get().notify("info", "固定安排已更新");
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
@@ -1504,11 +1525,11 @@ export const useAppStore = create<AppState>()((set, get) => {
     }
   },
 
-  deleteScheduleMemory: async (memoryId: string) => {
+  deleteScheduleFixedEvent: async (eventId: string) => {
     try {
-      await api.deleteScheduleMemory(memoryId);
-      await get().loadScheduleOverview();
-      get().notify("info", "记忆已删除");
+      await api.deleteScheduleFixedEvent(eventId);
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
+      get().notify("info", "固定安排已删除");
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
@@ -1519,7 +1540,7 @@ export const useAppStore = create<AppState>()((set, get) => {
   updateScheduleTask: async (taskId: string, input: ScheduleTaskInput) => {
     try {
       await api.updateScheduleTask(taskId, input);
-      await get().loadScheduleOverview();
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
@@ -1530,7 +1551,7 @@ export const useAppStore = create<AppState>()((set, get) => {
   deleteScheduleTask: async (taskId: string) => {
     try {
       await api.deleteScheduleTask(taskId);
-      await get().loadScheduleOverview();
+      await get().loadScheduleOverview(get().scheduleOverview?.rangeStart);
       get().notify("info", "任务已删除");
       return true;
     } catch (error) {
@@ -1565,10 +1586,10 @@ export const useAppStore = create<AppState>()((set, get) => {
     return result;
   },
 
-  sendScheduleEmailNow: async (weekStart?: string) => {
+  sendScheduleEmailNow: async (startDate?: string, days?: number) => {
     try {
-      const result = await api.sendScheduleEmail(weekStart);
-      get().notify("info", `计划表已发送到 ${result.to}`);
+      const result = await api.sendScheduleEmail(startDate, days);
+      get().notify("info", `日程已发送到 ${result.to}`);
       return true;
     } catch (error) {
       get().notify("error", asApiError(error).message);
