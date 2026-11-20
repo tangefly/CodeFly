@@ -21,6 +21,8 @@ import {
 import type { LlmConfigStore } from "../llm/config-store.js";
 import type { MessageStore } from "../llm/messages.js";
 import type { SessionRunLock } from "../llm/run-lock.js";
+import { agentContextMessages } from "./context.js";
+import { toolGuidanceSection } from "./tool-guidance.js";
 import type {
   AgentToolExecutorLike,
   ToolExecutionContext,
@@ -94,10 +96,10 @@ export class AgentService {
     const toolDefinitions = this.deps.tools.definitions(settings.enabledTools);
     const enabledTools = new Set<string>(settings.enabledTools);
     const prior = this.deps.messages.list(session.id);
-    const system = buildSystemPrompt(
-      settings,
+    const system = buildSystemPrompt(settings);
+    const contextMessages = await agentContextMessages(
       session,
-      toolDefinitions.map((definition) => definition.function.name),
+      settings.enabledTools,
     );
 
     await runToolLoop(
@@ -108,6 +110,7 @@ export class AgentService {
         maxSteps: settings.maxSteps,
         systemPrompt: system,
         toolDefinitions,
+        contextMessages,
         messages: this.deps.messages,
         lock: this.deps.lock,
         audit: this.deps.audit,
@@ -171,15 +174,19 @@ export class AgentService {
   }
 }
 
-function buildSystemPrompt(
-  settings: AgentInternalSettings,
-  session: AgentSession,
-  availableTools: string[],
-): string {
-  const base = settings.systemPrompt.trim() || DEFAULT_AGENT_PROMPT;
-  return `${base}
-
-工作区: ${session.workspaceRoot}
-当前权限: ${session.mode}
-可用工具: ${availableTools.length > 0 ? availableTools.join(", ") : "(无工具，仅可对话)"}`;
+/**
+ * Stable system prompt: user persona prefix, the harness-owned base prompt,
+ * guidance for the currently enabled tools, and the persona suffix. Volatile
+ * facts (workspace, permissions, tool list) live in the per-run runtime
+ * context message instead, so this prompt only changes when guidance does.
+ */
+function buildSystemPrompt(settings: AgentInternalSettings): string {
+  return [
+    settings.personaPrefix.trim(),
+    DEFAULT_AGENT_PROMPT,
+    toolGuidanceSection(settings.enabledTools),
+    settings.personaSuffix.trim(),
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
 }

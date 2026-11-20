@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "CODEFLY_DEV_WEB_URL=${CODEFLY_DEV_WEB_URL:-http://127.0.0.1:5173} tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && cp src/agent/prompt.md dist/agent/prompt.md && cp src/paper/prompt.md dist/paper/prompt.md",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run"

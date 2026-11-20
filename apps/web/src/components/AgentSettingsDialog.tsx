@@ -83,7 +83,8 @@ export function AgentSettingsDialog() {
   const [maxSteps, setMaxSteps] = useState(String(DEFAULT_AGENT_MAX_STEPS));
   const [commandTimeoutMs, setCommandTimeoutMs] = useState("60000");
   const [enabledTools, setEnabledTools] = useState<AgentToolName[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState("");
+  const [personaPrefix, setPersonaPrefix] = useState("");
+  const [personaSuffix, setPersonaSuffix] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -92,7 +93,8 @@ export function AgentSettingsDialog() {
     setMaxSteps(String(settings?.maxSteps ?? DEFAULT_AGENT_MAX_STEPS));
     setCommandTimeoutMs(String(settings?.commandTimeoutMs ?? 60_000));
     setEnabledTools(settings?.enabledTools ?? TOOL_INFO.map((tool) => tool.name));
-    setSystemPrompt(settings?.systemPrompt ?? "");
+    setPersonaPrefix(settings?.personaPrefix ?? "");
+    setPersonaSuffix(settings?.personaSuffix ?? "");
     setSaving(false);
     setError(null);
   }, [open, settings?.updatedAt]);
@@ -121,7 +123,8 @@ export function AgentSettingsDialog() {
       maxSteps: steps,
       commandTimeoutMs: timeout,
       enabledTools,
-      systemPrompt,
+      personaPrefix,
+      personaSuffix,
     });
     setSaving(false);
     if (ok) close();
@@ -244,12 +247,23 @@ export function AgentSettingsDialog() {
 
         <details className="rounded-lg border border-border bg-background/40 px-3 py-2">
           <summary className="cursor-pointer select-none text-[11px] font-medium text-foreground">
-            高级：Code system prompt
+            高级：自定义 persona（前缀 / 后缀）
           </summary>
+          <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+            前缀拼接在默认系统指导之前，后缀拼接在工具指导之后；都留空则完全使用默认行为。核心工作方式与安全边界始终保留。
+          </p>
           <textarea
-            value={systemPrompt}
-            onChange={(event) => setSystemPrompt(event.target.value)}
-            rows={6}
+            value={personaPrefix}
+            onChange={(event) => setPersonaPrefix(event.target.value)}
+            rows={3}
+            placeholder="persona 前缀，例如角色设定…（可留空）"
+            className="mt-2 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[11px] leading-5 text-foreground placeholder:text-muted-foreground/45 focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
+          <textarea
+            value={personaSuffix}
+            onChange={(event) => setPersonaSuffix(event.target.value)}
+            rows={3}
+            placeholder="persona 后缀，例如额外约束…（可留空）"
             className="mt-2 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[11px] leading-5 text-foreground placeholder:text-muted-foreground/45 focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/20"
           />
         </details>

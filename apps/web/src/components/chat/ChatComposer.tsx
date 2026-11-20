@@ -118,15 +118,6 @@ export function ChatComposer() {
                   submit();
                 }
               }}
-              placeholder={
-                !session
-                  ? "请先新建或选择一个对话"
-                  : !ready
-                    ? "请先配置模型 API"
-                    : streaming
-                      ? "模型正在回复…"
-                      : "输入消息，Enter 发送…"
-              }
               spellCheck={false}
               className="max-h-[200px] min-h-[44px] w-full resize-none bg-transparent py-1 font-mono text-[13px] leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground/45 focus:outline-none disabled:cursor-not-allowed"
             />

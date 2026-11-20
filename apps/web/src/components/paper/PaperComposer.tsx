@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Library, Send, Sparkles, Square, X } from "lucide-react";
+import { BookOpen, Send, Sparkles, Square } from "lucide-react";
 import {
   selectCurrentMessages,
   selectCurrentPaperSession,
@@ -17,23 +17,14 @@ export function PaperComposer() {
   const sendPaper = useAppStore((state) => state.sendPaper);
   const cancelPaper = useAppStore((state) => state.cancelPaper);
   const openLlmSettings = useAppStore((state) => state.openLlmSettings);
-  const openPaperLibrary = useAppStore((state) => state.openPaperLibrary);
-  const openPaperDetail = useAppStore((state) => state.openPaperDetail);
-  const removePaperFromContext = useAppStore(
-    (state) => state.removePaperFromContext,
-  );
   const llmSettings = useAppStore((state) => state.llmSettings);
   const paperBusy = useAppStore((state) => state.paperBusy);
-  const paperIndex = useAppStore((state) => state.paperIndex);
 
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const ready = Boolean(llmSettings?.configured);
   const streaming = session ? Boolean(paperBusy[session.id]) : false;
-  const contextPapers = (session?.paperIds ?? [])
-    .map((id) => paperIndex[id])
-    .filter((paper) => paper !== undefined);
 
   useEffect(() => {
     const element = textareaRef.current;
@@ -70,53 +61,7 @@ export function PaperComposer() {
               ? "arXiv 检索 · PDF 分段阅读 · 笔记写入论文库"
               : "论文助手需要先配置模型 API"}
           </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto h-7"
-            onClick={openPaperLibrary}
-          >
-            <Library className="h-3.5 w-3.5" />
-            论文库
-          </Button>
         </div>
-
-        {contextPapers.length > 0 ? (
-          <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-muted-foreground/50">上下文</span>
-            {contextPapers.slice(0, 6).map((paper) => (
-              <span
-                key={paper.id}
-                className="inline-flex max-w-[20rem] items-center gap-1 rounded-md border border-border/70 bg-card/60 px-1.5 py-0.5 text-[10px] text-muted-foreground"
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    openPaperLibrary();
-                    openPaperDetail(paper.id);
-                  }}
-                  className="truncate hover:text-foreground"
-                  title={paper.title}
-                >
-                  {paper.title}
-                </button>
-                <button
-                  type="button"
-                  aria-label="从当前上下文移除"
-                  onClick={() => void removePaperFromContext(paper.id)}
-                  className="text-muted-foreground/40 hover:text-danger"
-                >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            ))}
-            {contextPapers.length > 6 ? (
-              <span className="text-[10px] text-muted-foreground/50">
-                +{contextPapers.length - 6}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
 
         {!ready ? (
           <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
@@ -160,15 +105,6 @@ export function PaperComposer() {
                   submit();
                 }
               }}
-              placeholder={
-                !session
-                  ? "请先创建或选择一个论文会话"
-                  : !ready
-                    ? "请先配置模型 API"
-                    : streaming
-                      ? "论文助手正在工作…"
-                      : "例如：找最近一周 cs.CL 的 RAG 论文并挑 3 篇总结"
-              }
               spellCheck={false}
               className="max-h-[200px] min-h-[44px] w-full resize-none bg-transparent py-1 font-mono text-[13px] leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground/45 focus:outline-none disabled:cursor-not-allowed"
             />

@@ -109,15 +109,6 @@ export function AgentComposer() {
                   submit();
                 }
               }}
-              placeholder={
-                !session
-                  ? "请先创建或选择一个 Code 会话"
-                  : !ready
-                    ? "请先配置模型 API"
-                    : streaming
-                      ? "Code 正在执行…"
-                      : "描述一个任务，Enter 启动 Code…"
-              }
               spellCheck={false}
               className="max-h-[200px] min-h-[44px] w-full resize-none bg-transparent py-1 font-mono text-[13px] leading-6 text-foreground placeholder:font-sans placeholder:text-muted-foreground/45 focus:outline-none disabled:cursor-not-allowed"
             />

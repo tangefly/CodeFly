@@ -196,7 +196,8 @@ export const agentSettingsUpdateSchema = z.object({
     .array(z.enum(AGENT_TOOL_NAMES))
     .max(AGENT_TOOL_NAMES.length)
     .optional(),
-  systemPrompt: z.string().max(20_000).optional(),
+  personaPrefix: z.string().max(20_000).optional(),
+  personaSuffix: z.string().max(20_000).optional(),
 });
 
 export const updateSettingsSchema = z.object({

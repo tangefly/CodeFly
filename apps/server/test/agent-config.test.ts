@@ -34,7 +34,8 @@ describe("AgentConfigStore", () => {
     expect(settings.maxSteps).toBe(500);
     expect(settings.commandTimeoutMs).toBe(60_000);
     expect(settings.enabledTools).toEqual([...AGENT_TOOL_NAMES]);
-    expect(settings.systemPrompt).toBe(DEFAULT_AGENT_PROMPT);
+    expect(settings.personaPrefix).toBe("");
+    expect(settings.personaSuffix).toBe("");
   });
 
   it("updates, clamps, filters, and persists settings", async () => {
@@ -44,13 +45,15 @@ describe("AgentConfigStore", () => {
       maxSteps: AGENT_MAX_STEPS_LIMIT + 100,
       commandTimeoutMs: 1000,
       enabledTools: ["read_file", "write_file", "read_file"] as AgentToolName[],
-      systemPrompt: "custom agent prompt",
+      personaPrefix: "custom prefix",
+      personaSuffix: "custom suffix",
     });
 
     expect(updated.maxSteps).toBe(AGENT_MAX_STEPS_LIMIT);
     expect(updated.commandTimeoutMs).toBe(1000);
     expect(updated.enabledTools).toEqual(["read_file", "write_file"]);
-    expect(updated.systemPrompt).toBe("custom agent prompt");
+    expect(updated.personaPrefix).toBe("custom prefix");
+    expect(updated.personaSuffix).toBe("custom suffix");
     expect((await stat(file)).mode & 0o777).toBe(0o600);
 
     const reloaded = new AgentConfigStore(file);
@@ -59,7 +62,8 @@ describe("AgentConfigStore", () => {
       maxSteps: AGENT_MAX_STEPS_LIMIT,
       commandTimeoutMs: 1000,
       enabledTools: ["read_file", "write_file"],
-      systemPrompt: "custom agent prompt",
+      personaPrefix: "custom prefix",
+      personaSuffix: "custom suffix",
     });
   });
 
@@ -68,5 +72,30 @@ describe("AgentConfigStore", () => {
     await store.init();
     const updated = await store.update({ enabledTools: [] });
     expect(updated.enabledTools).toEqual([]);
+  });
+
+  it("migrates a legacy customized systemPrompt to the persona prefix", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      file,
+      JSON.stringify({ systemPrompt: "my tuned prompt" }),
+      "utf8",
+    );
+    const store = new AgentConfigStore(file);
+    await store.init();
+    expect(store.getPublic().personaPrefix).toBe("my tuned prompt");
+    expect(store.getPublic().personaSuffix).toBe("");
+  });
+
+  it("drops a legacy systemPrompt that is an untouched default copy", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      file,
+      JSON.stringify({ systemPrompt: DEFAULT_AGENT_PROMPT }),
+      "utf8",
+    );
+    const store = new AgentConfigStore(file);
+    await store.init();
+    expect(store.getPublic().personaPrefix).toBe("");
   });
 });

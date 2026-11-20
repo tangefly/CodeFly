@@ -395,7 +395,10 @@ export interface AgentSettingsPublic {
   maxSteps: number;
   commandTimeoutMs: number;
   enabledTools: AgentToolName[];
-  systemPrompt: string;
+  /** Prepended to the harness-owned base prompt; empty when uncustomized. */
+  personaPrefix: string;
+  /** Appended after the base prompt and tool guidance; empty when uncustomized. */
+  personaSuffix: string;
   updatedAt: string | null;
 }
 
@@ -403,7 +406,8 @@ export interface AgentSettingsInput {
   maxSteps?: number;
   commandTimeoutMs?: number;
   enabledTools?: AgentToolName[];
-  systemPrompt?: string;
+  personaPrefix?: string;
+  personaSuffix?: string;
 }
 
 export interface ChatUsage {

@@ -228,10 +228,15 @@ describe("PaperService", () => {
       "library_update",
       "library_export",
     ]);
-    const system = client.calls[0]?.[0];
-    expect(system?.role).toBe("system");
-    expect(String(system?.content)).toContain("论文库");
-    expect(String(client.calls[0]?.[1]?.content)).toBe("add this paper");
+    const firstCall = client.calls[0]!;
+    expect(firstCall[0]).toMatchObject({ role: "system" });
+    expect(String(firstCall[0]!.content)).toContain("paper research assistant");
+    // Volatile facts moved out of the system prompt into a runtime snapshot.
+    expect(String(firstCall[0]!.content)).not.toContain("Date:");
+    expect(firstCall[1]).toMatchObject({ role: "user" });
+    expect(String(firstCall[1]!.content)).toContain("<runtime_context>");
+    expect(String(firstCall[1]!.content)).toContain("Library:");
+    expect(firstCall[2]!.content).toBe("add this paper");
     const toolResult = client.calls[1]?.find((message) => message.role === "tool");
     expect(String(toolResult?.content)).toContain("A Test Paper about Retrieval");
     expect(auditEvents.some((event) => event.type === "paper.run")).toBe(true);

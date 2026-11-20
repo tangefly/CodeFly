@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -378,6 +378,44 @@ describe("AgentService", () => {
     expect(lock.isBusy(session.id)).toBe(false);
     expect(auditEvents.some((event) => event.type === "agent.run")).toBe(true);
     expect(auditEvents.some((event) => event.type === "agent.tool")).toBe(true);
+  });
+
+  it("injects runtime context and AGENTS.md as ephemeral user messages", async () => {
+    await writeFile(
+      path.join(dir, "AGENTS.md"),
+      "# 项目约定\n- 回答前先跑 pnpm test。\n",
+      "utf8",
+    );
+    session.workspaceRoot = dir;
+    await service.run(session, "please check", new AbortController().signal, () =>
+      undefined,
+    );
+
+    const firstCall = client.calls[0]!;
+    expect(firstCall[0]).toMatchObject({ role: "system" });
+    const system = String(firstCall[0]!.content);
+    // Stable prompt: guidance follows enabled tools; volatile facts are out.
+    expect(system).toContain("Tool guidance:");
+    expect(system).toContain("run_command");
+    expect(system).toContain("Inspect files with read_file");
+    expect(system).not.toContain("Workspace root");
+
+    const userMessages = firstCall.filter((message) => message.role === "user");
+    expect(userMessages[0]!.content).toContain("<runtime_context>");
+    expect(userMessages[0]!.content).toContain(dir);
+    expect(userMessages[0]!.content).toContain("workspace-write");
+    expect(userMessages[0]!.content).toContain("run_command");
+
+    expect(userMessages[1]!.content).toContain("<project_instructions");
+    expect(userMessages[1]!.content).toContain("AGENTS.md");
+    expect(userMessages[1]!.content).toContain("回答前先跑 pnpm test");
+    expect(userMessages[2]!.content).toBe("please check");
+
+    // Ephemeral by design: nothing context-shaped is persisted.
+    const records = messageStore.list(session.id);
+    expect(
+      records.some((record) => record.content.includes("runtime_context")),
+    ).toBe(false);
   });
 
   it("streams reasoning and echoes it back when tools are present", async () => {

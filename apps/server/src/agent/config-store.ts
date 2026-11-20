@@ -9,32 +9,16 @@ import {
   type AgentToolName,
 } from "@codefly/protocol";
 import { isNotFound } from "../http/errors.js";
+import { loadPromptFile } from "../prompt-file.js";
 
-export const DEFAULT_AGENT_PROMPT = `你是 CodeFly 的本地编码助手，在用户指定的工作区中完成软件工程任务。
-
-工作方式：
-- 先理解后行动：阅读相关代码与上下文，遵循项目已有的结构和约定。
-- 以最小必要的改动解决问题，不做与任务无关的重构。
-- 根据任务选择合适的工具：文件操作与代码搜索优先使用专用工具，需要执行程序或组合命令时再使用 shell。
-- 修改后主动验证（测试、类型检查、构建等）；无法验证时如实说明。
-- 自主推进任务；失败时先分析原因再调整方案，不要重复无效操作。
-- 需求不明确或操作不可逆时，先向用户确认。
-- 项目内找不到所需信息时，可以使用网络工具查阅外部资料。
-
-安全边界：
-- 严格遵守当前会话的权限与沙箱限制；操作被拒绝时不要尝试绕过，向用户说明限制。
-- 只依据工具的真实返回结果作判断，绝不编造或假设执行结果。
-
-沟通：
-- 使用与用户相同的语言。
-- 过程简洁；结束时总结改动、验证结果与潜在风险。
-- 代码、命令与路径使用 Markdown 代码块或行内代码。`;
+export const DEFAULT_AGENT_PROMPT = loadPromptFile(import.meta.url);
 
 export interface AgentInternalSettings {
   maxSteps: number;
   commandTimeoutMs: number;
   enabledTools: AgentToolName[];
-  systemPrompt: string;
+  personaPrefix: string;
+  personaSuffix: string;
   updatedAt: string | null;
 }
 
@@ -44,7 +28,8 @@ const DEFAULTS: AgentInternalSettings = {
   maxSteps: DEFAULT_AGENT_MAX_STEPS,
   commandTimeoutMs: 60_000,
   enabledTools: [...AGENT_TOOL_NAMES],
-  systemPrompt: DEFAULT_AGENT_PROMPT,
+  personaPrefix: "",
+  personaSuffix: "",
   updatedAt: null,
 };
 
@@ -55,6 +40,21 @@ function normalizeTools(value: unknown): AgentToolName[] {
       typeof tool === "string" && VALID_TOOLS.has(tool),
   );
   return [...new Set(tools)];
+}
+
+/**
+ * Pre-persona builds stored a full system prompt that replaced the default.
+ * An untouched copy of the default maps to no persona; a user edit survives
+ * as the persona prefix so core harness guidance is never lost.
+ */
+function legacyPromptToPrefix(
+  parsed: Partial<AgentInternalSettings & { systemPrompt?: unknown }>,
+): string {
+  if (typeof parsed.systemPrompt !== "string") return "";
+  const trimmed = parsed.systemPrompt.trim();
+  return trimmed !== "" && trimmed !== DEFAULT_AGENT_PROMPT.trim()
+    ? parsed.systemPrompt
+    : "";
 }
 
 export class AgentConfigStore {
@@ -77,7 +77,9 @@ export class AgentConfigStore {
     }
 
     try {
-      const parsed = JSON.parse(raw) as Partial<AgentInternalSettings>;
+      const parsed = JSON.parse(raw) as Partial<
+        AgentInternalSettings & { systemPrompt?: unknown }
+      >;
       this.current = {
         maxSteps:
           typeof parsed.maxSteps === "number" &&
@@ -92,10 +94,12 @@ export class AgentConfigStore {
             ? Math.round(parsed.commandTimeoutMs)
             : DEFAULTS.commandTimeoutMs,
         enabledTools: normalizeTools(parsed.enabledTools),
-        systemPrompt:
-          typeof parsed.systemPrompt === "string"
-            ? parsed.systemPrompt
-            : DEFAULTS.systemPrompt,
+        personaPrefix:
+          typeof parsed.personaPrefix === "string"
+            ? parsed.personaPrefix
+            : legacyPromptToPrefix(parsed),
+        personaSuffix:
+          typeof parsed.personaSuffix === "string" ? parsed.personaSuffix : "",
         updatedAt:
           typeof parsed.updatedAt === "string" ? parsed.updatedAt : null,
       };
@@ -121,7 +125,8 @@ export class AgentConfigStore {
       maxSteps: settings.maxSteps,
       commandTimeoutMs: settings.commandTimeoutMs,
       enabledTools: [...settings.enabledTools],
-      systemPrompt: settings.systemPrompt,
+      personaPrefix: settings.personaPrefix,
+      personaSuffix: settings.personaSuffix,
       updatedAt: settings.updatedAt,
     };
   }
@@ -143,10 +148,14 @@ export class AgentConfigStore {
         input.enabledTools === undefined
           ? this.current.enabledTools
           : normalizeTools(input.enabledTools),
-      systemPrompt:
-        input.systemPrompt === undefined
-          ? this.current.systemPrompt
-          : input.systemPrompt,
+      personaPrefix:
+        input.personaPrefix === undefined
+          ? this.current.personaPrefix
+          : input.personaPrefix,
+      personaSuffix:
+        input.personaSuffix === undefined
+          ? this.current.personaSuffix
+          : input.personaSuffix,
       updatedAt: new Date().toISOString(),
     };
 

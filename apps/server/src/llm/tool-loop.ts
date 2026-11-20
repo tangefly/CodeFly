@@ -35,6 +35,13 @@ export interface ToolLoopProfile {
   client: LlmClientLike;
   /** Prior records converted to provider messages, excluding the system prompt. */
   priorMessages: LlmChatMessage[];
+  /**
+   * Ephemeral user-role context messages (runtime snapshot, project
+   * instructions) inserted between the system prompt and the persisted
+   * history. Recomputed every run and never stored, the model sees exactly
+   * one current snapshot per conversation.
+   */
+  contextMessages?: LlmChatMessage[];
   /** Read-only tools may run concurrently; writes stay ordered. */
   isParallelTool: (name: string) => boolean;
   executeTool: (
@@ -83,6 +90,7 @@ export async function runToolLoop(
   const startedAt = Date.now();
   const conversation: LlmChatMessage[] = [
     { role: "system", content: profile.systemPrompt },
+    ...(profile.contextMessages ?? []),
     ...profile.priorMessages,
   ];
 
