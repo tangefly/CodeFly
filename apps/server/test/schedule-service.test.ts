@@ -27,6 +27,7 @@ import { SessionStore } from "../src/session/store.js";
 import { ScheduleService } from "../src/schedule/service.js";
 import { ScheduleStore } from "../src/schedule/store.js";
 import { ScheduleToolExecutor } from "../src/schedule/tools.js";
+import { addDays, todayInTimezone } from "../src/schedule/time.js";
 
 class FakeScheduleClient implements LlmClientLike {
   calls: LlmChatMessage[][] = [];
@@ -190,6 +191,7 @@ describe("ScheduleService", () => {
     expect(contextText).toContain("周一 16:00-17:30 线上会议 A");
     expect(contextText).toContain("Active tasks: 0");
     expect(contextText).toContain("This window's plan:");
+    expect(contextText).toContain("Overdue unconfirmed blocks: none");
     expect(contextText).toContain("Scheduling rules (0): none");
     expect(contextText).toContain("Email: not configured");
 
@@ -204,5 +206,60 @@ describe("ScheduleService", () => {
     expect(auditEvents.some((event) => event.type === "schedule.task.changed")).toBe(
       true,
     );
+  });
+
+  it("injects overdue unconfirmed blocks into the runtime context", async () => {
+    const task = await store.createTask({
+      title: "写论文初稿",
+      estimatedMinutes: 120,
+    });
+    const today = todayInTimezone("Asia/Shanghai");
+    await store.applySchedule({
+      taskIds: [],
+      removeFromDate: today,
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b_overdue_1",
+          taskId: task.id,
+          date: addDays(today, -2),
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b_overdue_2",
+          taskId: task.id,
+          date: addDays(today, -1),
+          start: "14:00",
+          end: "15:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    const events: AgentEvent[] = [];
+    await service.run(
+      session,
+      "帮我排一下这周的日程",
+      new AbortController().signal,
+      (event) => events.push(event),
+    );
+
+    const context = client.calls[0]!.find(
+      (message) =>
+        message.role === "user" &&
+        typeof message.content === "string" &&
+        message.content.includes("<runtime_context>"),
+    );
+    expect(context).toBeDefined();
+    const contextText =
+      typeof context?.content === "string" ? context.content : "";
+    expect(contextText).toContain("Overdue unconfirmed blocks: 2");
+    expect(contextText).toContain("写论文初稿×2");
   });
 });

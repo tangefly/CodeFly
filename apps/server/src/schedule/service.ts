@@ -185,6 +185,20 @@ function runtimeContextMessage(
     .map((task) => `${task.title}（${task.deadline}）`);
   const planBlocks = overview.window?.blocks.length ?? 0;
   const unscheduled = overview.window?.unscheduled.length ?? 0;
+  const overdueBlocks = store.listOverduePlannedBlocks();
+  const taskTitles = new Map(
+    store
+      .listTasks({ includeDone: true, limit: 200 })
+      .map((task) => [task.id, task.title] as const),
+  );
+  const overdueByTask = new Map<string, number>();
+  for (const block of overdueBlocks) {
+    const title = taskTitles.get(block.taskId) ?? "未知任务";
+    overdueByTask.set(title, (overdueByTask.get(title) ?? 0) + 1);
+  }
+  const overdueTasks = [...overdueByTask.entries()].map(
+    ([title, count]) => `${title}×${count}`,
+  );
   const fixedEvents = overview.fixedEvents;
   const weeklyFixed = fixedEvents.filter((event) => event.kind === "weekly");
   const onceFixed = fixedEvents.filter((event) => event.kind === "once");
@@ -252,6 +266,15 @@ function runtimeContextMessage(
       overview.window === null
         ? "none"
         : `${planBlocks} blocks · ${unscheduled} unscheduled · warnings ${overview.window.warnings.length}`
+    }`,
+    `- Overdue unconfirmed blocks: ${
+      overdueBlocks.length === 0
+        ? "none"
+        : `${overdueBlocks.length}（最早 ${
+            overdueBlocks[0]?.date ?? ""
+          } · ${overdueTasks.slice(0, 5).join(" · ")}${
+            overdueTasks.length > 5 ? " …" : ""
+          }）— planned blocks whose time has passed with no recorded outcome; confirm them before replanning (plan_get lists ids)`
     }`,
     `- Estimate calibration: ${
       overview.calibration.ratio === null

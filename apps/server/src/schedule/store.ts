@@ -46,6 +46,7 @@ import {
   isValidTimezone,
   mondayOf,
   nowClockInTimezone,
+  nowMinutesInTimezone,
   rangeEndOf,
   serverTimezone,
   todayInTimezone,
@@ -1676,6 +1677,35 @@ export class ScheduleStore {
 
   getPlanForDate(date: string): SchedulePlan | undefined {
     return isValidDate(date) ? this.getPlan(mondayOf(date)) : undefined;
+  }
+
+  /**
+   * Planned blocks whose time has already passed (before today, or earlier
+   * today) with no recorded outcome. Their completion is unknown until the
+   * user confirms, so replanning must surface them instead of silently
+   * auto-skipping the work.
+   */
+  listOverduePlannedBlocks(
+    options: { today?: string; nowMinutes?: number; limit?: number } = {},
+  ): ScheduleBlock[] {
+    const timezone = this.getPreferences().timezone;
+    const today = options.today ?? todayInTimezone(timezone);
+    const nowMinutes = options.nowMinutes ?? nowMinutesInTimezone(timezone);
+    const overdue: ScheduleBlock[] = [];
+    for (const plan of this.plans.values()) {
+      for (const block of plan.blocks) {
+        if (block.status !== "planned") continue;
+        const dateComparison = compareDates(block.date, today);
+        const ended =
+          dateComparison < 0 ||
+          (dateComparison === 0 && clockToMinutes(block.end) <= nowMinutes);
+        if (ended) overdue.push(copyBlock(block));
+      }
+    }
+    overdue.sort(
+      (a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start),
+    );
+    return overdue.slice(0, options.limit ?? 20);
   }
 
   /**

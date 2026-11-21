@@ -331,6 +331,40 @@ function formatPlan(
 }
 
 /**
+ * Lists planned blocks whose time has passed with no recorded outcome. The
+ * planner auto-skips them on the next run, so the model must confirm each
+ * one with the user (done + actual minutes, or skipped) before replanning.
+ */
+function formatOverdueSection(
+  blocks: ScheduleBlock[],
+  tasks: ScheduleTask[],
+): string {
+  const taskIndex = new Map(tasks.map((task) => [task.id, task]));
+  const totalMinutes = blocks.reduce(
+    (total, block) => total + durationMinutes(block.start, block.end),
+    0,
+  );
+  const lines = [
+    `过期待确认（时间已过但未记录完成，${blocks.length} 块 / 共 ${formatMinutes(totalMinutes)}）：`,
+  ];
+  for (const block of blocks) {
+    const task = taskIndex.get(block.taskId);
+    lines.push(
+      `  · ${block.date} ${block.start}-${block.end} [${block.id}] ${
+        task?.title ?? "已删除任务"
+      } (${block.taskId})${
+        block.note.trim() === "" ? "" : ` — ${block.note.trim().slice(0, 200)}`
+      }`,
+    );
+  }
+  lines.push(
+    "",
+    "先用任务记录判断（任务已 done 无需处理；actualMinutes 已覆盖该块 → block_update status=done 且 actual_minutes=0，避免重复记账），其余用 ask_user_question 逐块确认：完成 → block_update status=done；未完成 → block_update status=skipped。",
+  );
+  return lines.join("\n");
+}
+
+/**
  * One consistent snapshot of a plan window — store reads, summary and the
  * shared agenda model — produced by a single `loadPlanView` pass and reused
  * by the text dump, the PNG render and the UI result meta.
@@ -1376,6 +1410,7 @@ export class ScheduleToolExecutor {
       parsed.data.from_date ?? today,
       parsed.data.days ?? 7,
     );
+    const overdue = this.options.store.listOverduePlannedBlocks();
     return {
       content: truncate(
         formatPlan(
@@ -1387,10 +1422,19 @@ export class ScheduleToolExecutor {
         ) +
           `\n\n历史校准：${JSON.stringify(
             this.options.store.getCalibration(),
-          )}`,
+          )}` +
+          (overdue.length > 0
+            ? `\n\n${formatOverdueSection(overdue, view.tasks)}`
+            : ""),
       ),
       status: "complete",
-      meta: planResultMeta({ view, extra: { today, data: {} } }),
+      meta: planResultMeta({
+        view,
+        extra: {
+          today,
+          data: overdue.length > 0 ? { overdue } : {},
+        },
+      }),
     };
   }
 
@@ -1561,6 +1605,20 @@ export class ScheduleToolExecutor {
       });
     }
 
+    // Snapshot the overdue blocks of the tasks this run replaces, so the
+    // result can report what applySchedule silently auto-skips or removes.
+    const overdueBefore = store
+      .listOverduePlannedBlocks()
+      .filter((block) => included.has(block.taskId));
+    const overdueSkipped = overdueBefore.filter(
+      (block) => compareDates(block.date, today) < 0,
+    );
+    const overdueTodayCount = overdueBefore.length - overdueSkipped.length;
+    const overdueSkippedMinutes = overdueSkipped.reduce(
+      (total, block) => total + durationMinutes(block.start, block.end),
+      0,
+    );
+
     const updatedPlans = await store.applySchedule({
       taskIds: [...included],
       removeFromDate,
@@ -1595,6 +1653,15 @@ export class ScheduleToolExecutor {
       `生成 ${result.blocks.length} 个 block，涉及 ${weeks.size} 个 ISO 周：${affected}。`,
       spillBlocks > 0
         ? `其中 ${spillBlocks} 个 block 排在 ${windowEnd} 之后（窗口外溢出）。`
+        : "",
+      overdueBefore.length > 0
+        ? `已将 ${overdueSkipped.length} 个过期未记录块标记为跳过${
+            overdueTodayCount > 0
+              ? `，另有 ${overdueTodayCount} 个今日已过时间的块已删除重排`
+              : ""
+          }（涉及约 ${formatMinutes(
+            overdueSkippedMinutes,
+          )}，工作量已保留并将重排）。如其中有些实际已完成，可用 block_update 改为 done，或用 task_upsert 补记实际用时。`
         : "",
       render !== null
         ? `日程 PNG 已保存：${render.filePath}`

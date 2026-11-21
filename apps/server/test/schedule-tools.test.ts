@@ -558,4 +558,97 @@ describe("schedule tools", () => {
       questionOutcome: "skipped",
     });
   });
+
+  it("lists overdue unconfirmed blocks in plan_get", async () => {
+    const created = await tools.execute(
+      "task_upsert",
+      JSON.stringify({
+        title: "写论文初稿",
+        estimated_minutes: 120,
+        estimate_confidence: "high",
+        priority: "high",
+      }),
+      ctx(),
+    );
+    expect(created.status).toBe("complete");
+    const task = store.listTasks()[0]!;
+    const today = todayInTimezone("Asia/Shanghai");
+    await store.applySchedule({
+      taskIds: [],
+      removeFromDate: today,
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b_overdue_1",
+          taskId: task.id,
+          date: addDays(today, -2),
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "精读基线论文",
+        },
+        {
+          id: "b_overdue_2",
+          taskId: task.id,
+          date: addDays(today, -1),
+          start: "14:00",
+          end: "15:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    const got = await tools.execute("plan_get", "{}", ctx());
+    expect(got.status).toBe("complete");
+    expect(got.content).toContain("过期待确认");
+    expect(got.content).toContain("2 块");
+    expect(got.content).toContain("b_overdue_1");
+    expect(got.content).toContain("写论文初稿");
+    const data = got.meta?.data as { overdue?: Array<{ id: string }> };
+    expect(data.overdue?.map((block) => block.id)).toEqual([
+      "b_overdue_1",
+      "b_overdue_2",
+    ]);
+  });
+
+  it("reports overdue blocks auto-skipped by plan_schedule", async () => {
+    const created = await tools.execute(
+      "task_upsert",
+      JSON.stringify({
+        title: "写论文初稿",
+        estimated_minutes: 120,
+        estimate_confidence: "high",
+        priority: "high",
+      }),
+      ctx(),
+    );
+    expect(created.status).toBe("complete");
+    const task = store.listTasks()[0]!;
+    const today = todayInTimezone("Asia/Shanghai");
+    await store.applySchedule({
+      taskIds: [],
+      removeFromDate: today,
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b_overdue",
+          taskId: task.id,
+          date: addDays(today, -1),
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    const planned = await tools.execute("plan_schedule", "{}", ctx());
+    expect(planned.status).toBe("complete");
+    expect(planned.content).toContain("已将 1 个过期未记录块标记为跳过");
+    expect(store.findBlock("b_overdue")?.block.status).toBe("skipped");
+  });
 });

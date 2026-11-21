@@ -132,6 +132,12 @@
 - `plan_replan` 从指定日期（默认今天）开始，保留 done block，把过去 planned block 标记
   为 skipped，删除并重排该日期之后的 planned block；容量不足时默认溢出到下一周，并在
   `warnings`/`unscheduled` 中如实报告。
+- 过期未确认：时间已过但既没记 done 也没记 skipped 的 planned block 属于"完成情况未知"。
+  每回合的运行时上下文会带出其数量，`plan_get` 在「过期待确认」小节列出明细与 block id。
+  规划/进度相关的回合里，助手先查任务记录（任务已 done、或 actualMinutes 已覆盖的块
+  直接标记），剩下的用 `ask_user_question` 逐块向用户确认，再按结果 `block_update` 记
+  done（可带实际用时）或 skipped；`plan_schedule`/`plan_replan` 的结果会报告本次自动
+  跳过了多少过期块，便于用户当场纠正。
 - 每次 `plan_schedule` / `plan_replan` 都会自动渲染 PNG；界面工具卡片可直接预览、
   下载或点击「发送到我的邮箱」。
 

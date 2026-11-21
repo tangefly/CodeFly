@@ -295,6 +295,96 @@ describe("ScheduleStore", () => {
     expect(reloaded.getTask(t1.id)?.title).toBe("任务一");
   });
 
+  it("lists overdue planned blocks whose time has passed", async () => {
+    const task = await store.createTask({
+      title: "任务",
+      estimatedMinutes: 300,
+    });
+    await store.applySchedule({
+      taskIds: [],
+      removeFromDate: "2026-11-16",
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b_past",
+          taskId: task.id,
+          date: "2026-11-17",
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b_done",
+          taskId: task.id,
+          date: "2026-11-17",
+          start: "10:00",
+          end: "11:00",
+          status: "done",
+          actualMinutes: 60,
+          note: "",
+        },
+        {
+          id: "b_skipped",
+          taskId: task.id,
+          date: "2026-11-18",
+          start: "09:00",
+          end: "10:00",
+          status: "skipped",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b_today_ended",
+          taskId: task.id,
+          date: "2026-11-19",
+          start: "08:00",
+          end: "09:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b_today_running",
+          taskId: task.id,
+          date: "2026-11-19",
+          start: "09:00",
+          end: "23:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+        {
+          id: "b_future",
+          taskId: task.id,
+          date: "2026-11-20",
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    const overdue = store.listOverduePlannedBlocks({
+      today: "2026-11-19",
+      nowMinutes: 600,
+    });
+    expect(overdue.map((block) => block.id)).toEqual([
+      "b_past",
+      "b_today_ended",
+    ]);
+
+    const limited = store.listOverduePlannedBlocks({
+      today: "2026-11-19",
+      nowMinutes: 600,
+      limit: 1,
+    });
+    expect(limited.map((block) => block.id)).toEqual(["b_past"]);
+  });
+
   it("drops future skipped blocks when replanning an included task", async () => {
     const task = await store.createTask({ title: "任务", estimatedMinutes: 60 });
     await store.applySchedule({
