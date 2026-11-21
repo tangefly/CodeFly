@@ -224,7 +224,7 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
   const status = statusMeta(message);
   const sendScheduleEmailNow = useAppStore((state) => state.sendScheduleEmailNow);
   const openSchedulePanel = useAppStore((state) => state.openSchedulePanel);
-  const [outputOpen, setOutputOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [emailing, setEmailing] = useState(false);
 
   const agenda = data.agenda ?? null;
@@ -247,7 +247,13 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
 
   return (
     <div className="cf-fade-up overflow-hidden rounded-xl border border-border bg-card/70">
-      <div className="flex items-start gap-2.5 px-3.5 py-2.5">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        title={expanded ? "收起工具结果" : "展开工具结果"}
+        className="flex w-full items-start gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-muted/20"
+      >
         <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
           {hasPlan ? (
             <CalendarDays className="h-3.5 w-3.5" />
@@ -257,8 +263,8 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
             <ListTodo className="h-3.5 w-3.5" />
           )}
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
+        <span className="block min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs font-medium text-foreground/90">{label}</span>
             <span
               className={cn(
@@ -283,161 +289,157 @@ export function ScheduleToolCard({ message }: { message: ToolMessage }) {
                 {formatDuration(meta.durationMs)}
               </span>
             ) : null}
-          </div>
+          </span>
           {agenda !== null ? (
-            <p className="mt-0.5 text-[10px] text-muted-foreground/70">
+            <span className="mt-0.5 block text-[10px] text-muted-foreground/70">
               {agenda.summary.taskCount} 项任务 · 计划{" "}
               {minutesLabel(agenda.summary.totalPlannedMinutes)} · 已完成{" "}
               {minutesLabel(agenda.summary.doneMinutes)}
               {agenda.unscheduled.length > 0
                 ? ` · 未排期 ${agenda.unscheduled.length} 项`
                 : " · 全部已排入"}
+            </span>
+          ) : null}
+        </span>
+        <ChevronRight
+          className={cn(
+            "mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/50 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+
+      {expanded ? (
+        <div className="space-y-2.5 px-3.5 pb-3">
+          {agenda !== null ? <ScheduleAgenda agenda={agenda} compact /> : null}
+
+          {hasAllocations ? (
+            <TaskAllocations allocations={data.taskAllocations ?? []} />
+          ) : null}
+          {hasPreferences && data.preferences ? (
+            <PreferencesSummary
+              preferences={data.preferences}
+              configured={data.configured === true}
+            />
+          ) : null}
+          {hasTasks ? <TaskList tasks={data.tasks ?? []} /> : null}
+
+          {hasBlock && data.block ? (
+            <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-2.5 py-2 text-[10px]">
+              <Clock3 className="h-3 w-3 text-primary" />
+              <span className="font-mono">
+                {data.block.date} {data.block.start}-{data.block.end}
+              </span>
+              <span className="rounded bg-muted/50 px-1.5 py-px text-[9px]">
+                {data.block.status}
+              </span>
+              {data.previous && data.previous.status !== data.block.status ? (
+                <span className="text-muted-foreground/60">
+                  （{data.previous.status} → {data.block.status}）
+                </span>
+              ) : null}
+              {data.block.actualMinutes !== null ? (
+                <span className="ml-auto font-mono text-[9px] text-muted-foreground/60">
+                  实际 {data.block.actualMinutes}m
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {agenda !== null && agenda.warnings.length > 0 ? (
+            <div className="rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-2">
+              {agenda.warnings.map((warning) => (
+                <p
+                  key={warning}
+                  className="flex items-start gap-1.5 text-[10px] leading-4 text-warning"
+                >
+                  <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                  {warning}
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          {agenda !== null && agenda.unscheduled.length > 0 ? (
+            <div className="rounded-lg border border-border/70 bg-background/30 px-2.5 py-2">
+              <p className="text-[10px] font-medium text-foreground/80">未排期任务</p>
+              {agenda.unscheduled.map((item) => (
+                <p
+                  key={item.taskId}
+                  className="mt-1 text-[10px] leading-4 text-muted-foreground"
+                >
+                  • {item.title} · 剩余 {minutesLabel(item.remainingMinutes)} · {item.reason}
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          {agenda !== null && agenda.notes.trim() !== "" ? (
+            <p className="rounded-lg bg-muted/20 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground">
+              备注：{agenda.notes}
             </p>
           ) : null}
-        </div>
-      </div>
 
-      <div className="space-y-2.5 px-3.5 pb-3">
-        {agenda !== null ? <ScheduleAgenda agenda={agenda} compact /> : null}
+          {imageDataUrl ? (
+            <div className="overflow-hidden rounded-lg border border-border/70 bg-white">
+              <img
+                src={imageDataUrl}
+                alt="未来 7 天日程"
+                className="max-h-[340px] w-full object-contain"
+              />
+            </div>
+          ) : null}
 
-        {hasAllocations ? (
-          <TaskAllocations allocations={data.taskAllocations ?? []} />
-        ) : null}
-        {hasPreferences && data.preferences ? (
-          <PreferencesSummary
-            preferences={data.preferences}
-            configured={data.configured === true}
-          />
-        ) : null}
-        {hasTasks ? <TaskList tasks={data.tasks ?? []} /> : null}
-
-        {hasBlock && data.block ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-2.5 py-2 text-[10px]">
-            <Clock3 className="h-3 w-3 text-primary" />
-            <span className="font-mono">
-              {data.block.date} {data.block.start}-{data.block.end}
-            </span>
-            <span className="rounded bg-muted/50 px-1.5 py-px text-[9px]">
-              {data.block.status}
-            </span>
-            {data.previous && data.previous.status !== data.block.status ? (
-              <span className="text-muted-foreground/60">
-                （{data.previous.status} → {data.block.status}）
-              </span>
-            ) : null}
-            {data.block.actualMinutes !== null ? (
-              <span className="ml-auto font-mono text-[9px] text-muted-foreground/60">
-                实际 {data.block.actualMinutes}m
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-
-        {agenda !== null && agenda.warnings.length > 0 ? (
-          <div className="rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-2">
-            {agenda.warnings.map((warning) => (
-              <p
-                key={warning}
-                className="flex items-start gap-1.5 text-[10px] leading-4 text-warning"
-              >
-                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                {warning}
-              </p>
-            ))}
-          </div>
-        ) : null}
-
-        {agenda !== null && agenda.unscheduled.length > 0 ? (
-          <div className="rounded-lg border border-border/70 bg-background/30 px-2.5 py-2">
-            <p className="text-[10px] font-medium text-foreground/80">未排期任务</p>
-            {agenda.unscheduled.map((item) => (
-              <p
-                key={item.taskId}
-                className="mt-1 text-[10px] leading-4 text-muted-foreground"
-              >
-                • {item.title} · 剩余 {minutesLabel(item.remainingMinutes)} · {item.reason}
-              </p>
-            ))}
-          </div>
-        ) : null}
-
-        {agenda !== null && agenda.notes.trim() !== "" ? (
-          <p className="rounded-lg bg-muted/20 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground">
-            备注：{agenda.notes}
-          </p>
-        ) : null}
-
-        {imageDataUrl ? (
-          <div className="overflow-hidden rounded-lg border border-border/70 bg-white">
-            <img
-              src={imageDataUrl}
-              alt="未来 7 天日程"
-              className="max-h-[340px] w-full object-contain"
-            />
-          </div>
-        ) : null}
-
-        {(hasPlan || imageDataUrl || hasPreferences || hasTasks) ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {imageDataUrl ? (
-              <a
-                href={imageDataUrl}
-                download={`codefly-agenda-${rangeStart ?? "plan"}.png`}
-                className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-background px-2 text-[10px] text-foreground/80 transition-colors hover:border-primary/30 hover:text-primary"
-              >
-                <Download className="h-3 w-3" />
-                下载 PNG
-              </a>
-            ) : null}
-            {agenda !== null && rangeStart ? (
+          {(hasPlan || imageDataUrl || hasPreferences || hasTasks) ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {imageDataUrl ? (
+                <a
+                  href={imageDataUrl}
+                  download={`codefly-agenda-${rangeStart ?? "plan"}.png`}
+                  className="inline-flex h-7 items-center gap-1 rounded-lg border border-border bg-background px-2 text-[10px] text-foreground/80 transition-colors hover:border-primary/30 hover:text-primary"
+                >
+                  <Download className="h-3 w-3" />
+                  下载 PNG
+                </a>
+              ) : null}
+              {agenda !== null && rangeStart ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[10px]"
+                  disabled={emailing}
+                  onClick={() => void sendEmail()}
+                >
+                  {emailing ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Mail className="h-3 w-3" />
+                  )}
+                  发送到我的邮箱
+                </Button>
+              ) : null}
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
                 className="h-7 text-[10px]"
-                disabled={emailing}
-                onClick={() => void sendEmail()}
+                onClick={openSchedulePanel}
               >
-                {emailing ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Mail className="h-3 w-3" />
-                )}
-                发送到我的邮箱
+                <CheckCircle2 className="h-3 w-3" />
+                打开日程面板
               </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 text-[10px]"
-              onClick={openSchedulePanel}
-            >
-              <CheckCircle2 className="h-3 w-3" />
-              打开日程面板
-            </Button>
-            {typeof data.filePath === "string" ? (
-              <span className="ml-auto max-w-full truncate font-mono text-[8px] text-muted-foreground/40">
-                {data.filePath}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
+              {typeof data.filePath === "string" ? (
+                <span className="ml-auto max-w-full truncate font-mono text-[8px] text-muted-foreground/40">
+                  {data.filePath}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
 
-        <button
-          type="button"
-          onClick={() => setOutputOpen((value) => !value)}
-          className="flex items-center gap-1 text-[9px] text-muted-foreground/50 transition-colors hover:text-foreground"
-        >
-          <ChevronRight
-            className={cn("h-3 w-3 transition-transform", outputOpen && "rotate-90")}
-          />
-          工具输出
-        </button>
-        {outputOpen ? (
           <pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded-lg bg-background/60 p-2 font-mono text-[9px] leading-4 text-muted-foreground">
             {message.content}
           </pre>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

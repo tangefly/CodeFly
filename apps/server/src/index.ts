@@ -233,6 +233,7 @@ async function main(): Promise<void> {
     tools: scheduleTools,
     questions,
     maxSteps: config.schedule.maxSteps,
+    historyBudgetChars: config.schedule.historyBudgetChars,
   });
 
   const app = Fastify({

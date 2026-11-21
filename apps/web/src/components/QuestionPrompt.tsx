@@ -185,19 +185,21 @@ export function QuestionPrompt() {
                         expired && "opacity-60",
                       )}
                     >
-                      <span
-                        className={cn(
-                          "text-xs font-medium",
-                          active ? "text-primary" : "text-foreground/85",
-                        )}
-                      >
-                        {option.label}
-                      </span>
-                      {option.description ? (
-                        <span className="mt-0.5 block text-[11px] leading-5 text-muted-foreground">
-                          {option.description}
+                      <span className="flex min-w-0 items-baseline gap-2">
+                        <span
+                          className={cn(
+                            "shrink-0 text-xs font-medium",
+                            active ? "text-primary" : "text-foreground/85",
+                          )}
+                        >
+                          {option.label}
                         </span>
-                      ) : null}
+                        {option.description ? (
+                          <span className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">
+                            {option.description}
+                          </span>
+                        ) : null}
+                      </span>
                     </button>
                   );
                 })}

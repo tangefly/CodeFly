@@ -146,6 +146,7 @@ describe("ScheduleService", () => {
         ask: async () => ({ answers: [], outcome: "skipped" as const }),
       },
       maxSteps: 10,
+      historyBudgetChars: 60_000,
     });
   });
 
@@ -183,6 +184,7 @@ describe("ScheduleService", () => {
     const contextText =
       typeof context?.content === "string" ? context.content : "";
     expect(contextText).toContain("Scheduling preferences: configured");
+    expect(contextText).toContain("breaks 午休12:00-13:00");
     expect(contextText).toContain("Rolling window (today → +6 days):");
     expect(contextText).toContain("Fixed events (1 total · 1 weekly · 0 one-off)");
     expect(contextText).toContain("周一 16:00-17:30 线上会议 A");

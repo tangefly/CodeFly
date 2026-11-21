@@ -1,6 +1,7 @@
 import type {
   AgentEvent,
   AgentToolCall,
+  ChatMessageRecord,
   ScheduleSession,
 } from "@codefly/protocol";
 import type { AuditLog } from "../audit/log.js";
@@ -12,6 +13,7 @@ import type { SessionRunLock } from "../llm/run-lock.js";
 import {
   recordsToLlmMessages,
   runToolLoop,
+  toolContentForModel,
   type ToolCallContext,
 } from "../llm/tool-loop.js";
 import { loadPromptFile } from "../prompt-file.js";
@@ -37,6 +39,7 @@ export interface ScheduleServiceDeps {
   tools: ScheduleToolExecutor;
   questions: QuestionServiceLike;
   maxSteps: number;
+  historyBudgetChars: number;
 }
 
 const READ_ONLY_SCHEDULE_TOOLS = new Set<string>([
@@ -106,7 +109,10 @@ export class ScheduleService {
         lock: this.deps.lock,
         audit: this.deps.audit,
         client: this.deps.client,
-        priorMessages: recordsToLlmMessages(prior),
+        priorMessages: scheduleHistoryForModel(
+          prior,
+          this.deps.historyBudgetChars,
+        ),
         isParallelTool: (name) => READ_ONLY_SCHEDULE_TOOLS.has(name),
         executeTool: (call, context) =>
           this.executeToolCall(session, call, context),
@@ -207,7 +213,16 @@ function runtimeContextMessage(
     `- Rolling window (today → +6 days): ${overview.rangeStart} ~ ${overview.rangeEnd}`,
     `- Scheduling preferences: ${
       overview.preferencesConfigured
-        ? `configured · workdays ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · max focus ${preferences.maxFocusMinutes}m · daily limit ${preferences.dailyFocusLimitMinutes}m · buffer ${Math.round(
+        ? `configured · workdays ${preferences.workdays.join(",")} · ${preferences.workStart}-${preferences.workEnd} · breaks ${
+            preferences.breaks.length === 0
+              ? "none"
+              : preferences.breaks
+                  .map(
+                    (brk) =>
+                      `${brk.label === "" ? "" : brk.label}${brk.start}-${brk.end}`,
+                  )
+                  .join(",")
+          } · max focus ${preferences.maxFocusMinutes}m · daily limit ${preferences.dailyFocusLimitMinutes}m · buffer ${Math.round(
             preferences.bufferRatio * 100,
           )}% · gap ${preferences.gapMinutes}m`
         : "NOT CONFIGURED — ask the user with ask_user_question and save with preferences_update"
@@ -248,4 +263,97 @@ function runtimeContextMessage(
     `</runtime_context>`,
   ];
   return { role: "user", content: lines.join("\n") };
+}
+
+/**
+ * Schedule tool results that dump a whole plan or task list; they go stale as
+ * soon as the next plan/CRUD call lands.
+ */
+const STALE_DUMP_TOOLS = new Set<string>([
+  "plan_schedule",
+  "plan_replan",
+  "plan_get",
+  "plan_render",
+  "plan_email",
+  "task_list",
+]);
+
+/**
+ * Keeps the newest turns intact and replaces stale plan/task dumps with short
+ * stubs once the history exceeds the schedule budget (same pattern as the
+ * paper service). The UI records are untouched: only the model-facing content
+ * of old tool results changes.
+ */
+export function scheduleHistoryForModel(
+  records: ChatMessageRecord[],
+  budgetChars: number,
+): ReturnType<typeof recordsToLlmMessages> {
+  const totalChars = records.reduce(
+    (total, record) => total + record.content.length,
+    0,
+  );
+  if (totalChars <= budgetChars) {
+    return recordsToLlmMessages(records);
+  }
+
+  // Never compact the current turn: everything before the last user message.
+  const lastUserIndex = records.findLastIndex(
+    (record) => record.role === "user",
+  );
+  const protectedIndex = lastUserIndex >= 0 ? lastUserIndex : 0;
+
+  const compactable = records.slice(0, protectedIndex).filter(
+    (record) =>
+      record.role === "tool" &&
+      typeof record.toolName === "string" &&
+      STALE_DUMP_TOOLS.has(record.toolName),
+  );
+
+  const compacted = new Set<string>();
+  let remaining = totalChars;
+  // Oldest first: the earliest snapshots are the stalest.
+  for (const record of compactable) {
+    if (remaining <= budgetChars) break;
+    if (record.content.length < 1000) continue;
+    compacted.add(record.id);
+    remaining -= record.content.length;
+    remaining += stubFor(record).length;
+  }
+
+  // The most recent dump results carry the block/task ids the next turn is
+  // most likely to reference; keep the last two verbatim and only go older.
+  if (remaining > budgetChars) {
+    const dumps = records.filter(
+      (record) =>
+        record.role === "tool" &&
+        typeof record.toolName === "string" &&
+        STALE_DUMP_TOOLS.has(record.toolName),
+    );
+    const keep = new Set(dumps.slice(-2).map((record) => record.id));
+    for (const record of dumps) {
+      if (remaining <= budgetChars) break;
+      if (keep.has(record.id) || compacted.has(record.id)) continue;
+      if (record.content.length < 1000) continue;
+      compacted.add(record.id);
+      remaining -= record.content.length;
+      remaining += stubFor(record).length;
+    }
+  }
+
+  return recordsToLlmMessages(records, {
+    toolContent: (record) =>
+      compacted.has(record.id)
+        ? stubFor(record)
+        : toolContentForModel(record.content, record.meta),
+  });
+}
+
+function stubFor(record: ChatMessageRecord): string {
+  const rangeStart = record.meta?.rangeStart;
+  const rangeEnd = record.meta?.rangeEnd;
+  const range =
+    typeof rangeStart === "string" && typeof rangeEnd === "string"
+      ? ` · ${rangeStart}~${rangeEnd}`
+      : "";
+  return `[Older schedule output omitted from model context: ${record.toolName ?? "tool"}${range} · ${record.content.length} chars. Call ${record.toolName ?? "plan_get"} again if this content is still needed.]`;
 }

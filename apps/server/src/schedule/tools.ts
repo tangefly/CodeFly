@@ -6,6 +6,7 @@ import {
   SCHEDULE_TASK_STATUSES,
   SCHEDULE_TIMES_OF_DAY,
   schedulePreferencesPatchSchema,
+  type ScheduleAgendaModel,
   type ScheduleBlock,
   type ScheduleFixedEvent,
   type SchedulePlan,
@@ -28,7 +29,12 @@ import {
 import type { LlmToolDefinition } from "../llm/client.js";
 import { buildScheduleAgenda } from "./agenda.js";
 import type { ScheduleEmailService } from "./email.js";
-import { CONFIDENCE_LABEL, PRIORITY_LABEL, renderAgendaPng } from "./render.js";
+import {
+  CONFIDENCE_LABEL,
+  PRIORITY_LABEL,
+  renderAgendaPng,
+  type RenderAgendaResult,
+} from "./render.js";
 import { generateSchedule } from "./scheduler.js";
 import type { ScheduleStore } from "./store.js";
 import {
@@ -324,41 +330,40 @@ function formatPlan(
   return lines.join("\n");
 }
 
-function planResultMeta(input: {
+/**
+ * One consistent snapshot of a plan window — store reads, summary and the
+ * shared agenda model — produced by a single `loadPlanView` pass and reused
+ * by the text dump, the PNG render and the UI result meta.
+ */
+interface PlanView {
+  startDate: string;
+  endDate: string;
   window: ScheduleWindow | null;
   tasks: ScheduleTask[];
   fixedEvents: ScheduleFixedEvent[];
-  preferences: SchedulePreferences;
   summary: SchedulePlanSummary;
-  startDate: string;
-  endDate: string;
+  agenda: ScheduleAgendaModel;
+}
+
+function planResultMeta(input: {
+  view: PlanView;
   extra: Record<string, unknown> & { data?: Record<string, unknown> };
 }): Record<string, unknown> {
-  const agenda = buildScheduleAgenda({
-    window: input.window,
-    tasks: input.tasks,
-    fixedEvents: input.fixedEvents,
-    preferences: input.preferences,
-    startDate: input.startDate,
-    endDate: input.endDate,
-    today: todayInTimezone(input.preferences.timezone),
-    nowClock: nowClockInTimezone(input.preferences.timezone),
-    summary: input.summary,
-  });
-  const taskAllocations = taskAllocationsFor(input.window, input.tasks);
+  const { view } = input;
+  const taskAllocations = taskAllocationsFor(view.window, view.tasks);
   return {
     kind: "schedule",
     view: "plan",
-    rangeStart: input.startDate,
-    rangeEnd: input.endDate,
-    summary: input.summary,
+    rangeStart: view.startDate,
+    rangeEnd: view.endDate,
+    summary: view.summary,
     taskAllocations,
     ...input.extra,
     data: {
       view: "plan",
-      agenda,
-      window: input.window,
-      summary: input.summary,
+      agenda: view.agenda,
+      window: view.window,
+      summary: view.summary,
       taskAllocations,
       ...input.extra.data,
     },
@@ -999,6 +1004,32 @@ export class ScheduleToolExecutor {
     return todayInTimezone(this.options.store.getPreferences().timezone);
   }
 
+  /** Loads the plan window, tasks, fixed events, summary and agenda in one pass. */
+  private loadPlanView(startDate: string, days: number): PlanView {
+    const store = this.options.store;
+    const preferences = store.getPreferences();
+    const endDate = rangeEndOf(startDate, days);
+    const window = store.getWindow(startDate, days);
+    const tasks = store.listTasks({ includeDone: true, limit: 200 });
+    const fixedEvents = store.listFixedEvents();
+    const summary =
+      window === null
+        ? emptySummary(startDate, endDate, preferences.timezone)
+        : store.summarizeWindow(window);
+    const agenda = buildScheduleAgenda({
+      window,
+      tasks,
+      fixedEvents,
+      preferences,
+      startDate,
+      endDate,
+      today: this.today(),
+      nowClock: nowClockInTimezone(preferences.timezone),
+      summary,
+    });
+    return { startDate, endDate, window, tasks, fixedEvents, summary, agenda };
+  }
+
   private preferencesGet(raw: string): ToolResult {
     const parsed = parseArgs(preferencesGetArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "preferences" });
@@ -1339,35 +1370,27 @@ export class ScheduleToolExecutor {
   private planGet(raw: string): ToolResult {
     const parsed = parseArgs(planGetArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const store = this.options.store;
-    const preferences = store.getPreferences();
+    const preferences = this.options.store.getPreferences();
     const today = this.today();
-    const startDate = parsed.data.from_date ?? today;
-    const days = parsed.data.days ?? 7;
-    const endDate = rangeEndOf(startDate, days);
-    const window = store.getWindow(startDate, days);
-    const tasks = store.listTasks({ includeDone: true, limit: 200 });
-    const fixedEvents = store.listFixedEvents();
-    const summary =
-      window === null
-        ? emptySummary(startDate, endDate, preferences.timezone)
-        : store.summarizeWindow(window);
+    const view = this.loadPlanView(
+      parsed.data.from_date ?? today,
+      parsed.data.days ?? 7,
+    );
     return {
       content: truncate(
-        formatPlan(window, tasks, fixedEvents, preferences, summary) +
-          `\n\n历史校准：${JSON.stringify(store.getCalibration())}`,
+        formatPlan(
+          view.window,
+          view.tasks,
+          view.fixedEvents,
+          preferences,
+          view.summary,
+        ) +
+          `\n\n历史校准：${JSON.stringify(
+            this.options.store.getCalibration(),
+          )}`,
       ),
       status: "complete",
-      meta: planResultMeta({
-        window,
-        tasks,
-        fixedEvents,
-        preferences,
-        summary,
-        startDate,
-        endDate,
-        extra: { today, data: {} },
-      }),
+      meta: planResultMeta({ view, extra: { today, data: {} } }),
     };
   }
 
@@ -1555,14 +1578,8 @@ export class ScheduleToolExecutor {
       unscheduled: result.unscheduled.length,
     });
 
-    const render = await this.tryRender(startDate, input.days, ctx);
-    const window = store.getWindow(startDate, input.days);
-    const latestTasks = store.listTasks({ includeDone: true, limit: 200 });
-    const fixedEvents = store.listFixedEvents();
-    const summary =
-      window === null
-        ? emptySummary(startDate, windowEnd, preferences.timezone)
-        : store.summarizeWindow(window);
+    const view = this.loadPlanView(startDate, input.days);
+    const render = await this.renderPlanView(view, ctx);
     const spillBlocks = result.blocks.filter(
       (block) => compareDates(block.date, windowEnd) > 0,
     ).length;
@@ -1583,7 +1600,13 @@ export class ScheduleToolExecutor {
         ? `日程 PNG 已保存：${render.filePath}`
         : "计划已保存，但 PNG 渲染失败；可稍后用 plan_render 重试。",
       "",
-      formatPlan(window, latestTasks, fixedEvents, preferences, summary),
+      formatPlan(
+        view.window,
+        view.tasks,
+        view.fixedEvents,
+        preferences,
+        view.summary,
+      ),
     ]
       .filter((line) => line !== "")
       .join("\n");
@@ -1593,13 +1616,7 @@ export class ScheduleToolExecutor {
       status: "complete",
       meta: {
         ...planResultMeta({
-          window,
-          tasks: latestTasks,
-          fixedEvents,
-          preferences,
-          summary,
-          startDate,
-          endDate: windowEnd,
+          view,
           extra: {
             today,
             filePath: render?.filePath,
@@ -1678,9 +1695,6 @@ export class ScheduleToolExecutor {
         status: block.status,
       });
 
-      const preferences = this.options.store.getPreferences();
-      const tasks = this.options.store.listTasks({ includeDone: true, limit: 200 });
-      const fixedEvents = this.options.store.listFixedEvents();
       const today = this.today();
       const days = 7;
       const todayWindowEnd = rangeEndOf(today, days);
@@ -1689,12 +1703,7 @@ export class ScheduleToolExecutor {
         compareDates(block.date, todayWindowEnd) <= 0
           ? today
           : addDays(block.date, -(days - 1));
-      const windowEnd = rangeEndOf(windowStart, days);
-      const window = this.options.store.getWindow(windowStart, days);
-      const summary =
-        window === null
-          ? emptySummary(windowStart, windowEnd, preferences.timezone)
-          : this.options.store.summarizeWindow(window);
+      const view = this.loadPlanView(windowStart, days);
       return {
         content: `Updated block ${block.id}: ${block.date} ${block.start}-${block.end} · ${block.status}${
           task === undefined
@@ -1703,13 +1712,7 @@ export class ScheduleToolExecutor {
         }`,
         status: "complete",
         meta: planResultMeta({
-          window,
-          tasks,
-          fixedEvents,
-          preferences,
-          summary,
-          startDate: windowStart,
-          endDate: windowEnd,
+          view,
           extra: { today, data: { block, previous: before.block } },
         }),
       };
@@ -1727,34 +1730,19 @@ export class ScheduleToolExecutor {
   ): Promise<ToolResult> {
     const parsed = parseArgs(planRenderArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const store = this.options.store;
-    const preferences = store.getPreferences();
     const startDate = parsed.data.from_date ?? this.today();
     const days = parsed.data.days ?? 7;
-    const endDate = rangeEndOf(startDate, days);
-    const render = await this.tryRender(startDate, days, ctx);
+    const view = this.loadPlanView(startDate, days);
+    const render = await this.renderPlanView(view, ctx);
     if (render === null) {
       return toolError("渲染 PNG 失败。", { view: "plan" });
     }
-    const tasks = store.listTasks({ includeDone: true, limit: 200 });
-    const fixedEvents = store.listFixedEvents();
-    const window = store.getWindow(startDate, days);
-    const summary =
-      window === null
-        ? emptySummary(startDate, endDate, preferences.timezone)
-        : store.summarizeWindow(window);
     return {
-      content: `Rendered ${render.width}×${render.height} PNG for ${startDate} ~ ${endDate}:\n${render.filePath}`,
+      content: `Rendered ${render.width}×${render.height} PNG for ${view.startDate} ~ ${view.endDate}:\n${render.filePath}`,
       status: "complete",
       meta: {
         ...planResultMeta({
-          window,
-          tasks,
-          fixedEvents,
-          preferences,
-          summary,
-          startDate,
-          endDate,
+          view,
           extra: {
             filePath: render.filePath,
             width: render.width,
@@ -1777,57 +1765,45 @@ export class ScheduleToolExecutor {
   ): Promise<ToolResult> {
     const parsed = parseArgs(planEmailArgs, raw);
     if (!parsed.ok) return toolError(parsed.message, { view: "plan" });
-    const store = this.options.store;
-    const preferences = store.getPreferences();
     const startDate = parsed.data.from_date ?? this.today();
     const days = parsed.data.days ?? 7;
-    const endDate = rangeEndOf(startDate, days);
-    const window = store.getWindow(startDate, days);
-    if (window === null) {
+    const view = this.loadPlanView(startDate, days);
+    if (view.window === null) {
       return toolError(
-        `这个时间窗口还没有计划：${startDate} ~ ${endDate}。先用 plan_schedule 生成计划。`,
+        `这个时间窗口还没有计划：${view.startDate} ~ ${view.endDate}。先用 plan_schedule 生成计划。`,
         { view: "plan" },
       );
     }
-    const tasks = store.listTasks({ includeDone: true, limit: 200 });
-    const fixedEvents = store.listFixedEvents();
-    const summary = store.summarizeWindow(window);
-    const render = await this.tryRender(startDate, days, ctx);
+    const render = await this.renderPlanView(view, ctx);
     if (render === null) {
       return toolError("渲染日程 PNG 失败，未发送邮件。", { view: "plan" });
     }
     try {
       const result = await this.options.email.sendPlan({
-        window,
-        agenda: render.agenda,
-        summary,
+        window: view.window,
+        agenda: view.agenda,
+        summary: view.summary,
         png: render.buffer,
-        fileName: `codefly-agenda-${startDate}.png`,
+        fileName: `codefly-agenda-${view.startDate}.png`,
         note: parsed.data.note,
       });
       void this.options.audit.append({
         type: "schedule.email.sent",
         sessionId: ctx.session.id,
-        rangeStart: startDate,
-        rangeEnd: endDate,
+        rangeStart: view.startDate,
+        rangeEnd: view.endDate,
         to: result.to,
         messageId: result.messageId,
         imagePath: render.filePath,
       });
       return {
-        content: `已把 ${startDate} ~ ${endDate} 的日程发送到 ${result.to}（messageId: ${
+        content: `已把 ${view.startDate} ~ ${view.endDate} 的日程发送到 ${result.to}（messageId: ${
           result.messageId ?? "n/a"
         }）。附件：${render.filePath}`,
         status: "complete",
         meta: {
           ...planResultMeta({
-            window,
-            tasks,
-            fixedEvents,
-            preferences,
-            summary,
-            startDate,
-            endDate,
+            view,
             extra: {
               filePath: render.filePath,
               emailedTo: result.to,
@@ -1849,37 +1825,15 @@ export class ScheduleToolExecutor {
     }
   }
 
-  private async tryRender(
-    startDate: string,
-    days: number,
+  private async renderPlanView(
+    view: PlanView,
     ctx: ScheduleToolContext,
-  ): Promise<Awaited<ReturnType<typeof renderAgendaPng>> | null> {
+  ): Promise<RenderAgendaResult | null> {
     try {
       ctx.progress("正在渲染日程议程…");
-      const store = this.options.store;
-      const preferences = store.getPreferences();
-      const endDate = rangeEndOf(startDate, days);
-      const window = store.getWindow(startDate, days);
-      const tasks = store.listTasks({ includeDone: true, limit: 200 });
-      const fixedEvents = store.listFixedEvents();
-      const summary =
-        window === null
-          ? emptySummary(startDate, endDate, preferences.timezone)
-          : store.summarizeWindow(window);
-      const agenda = buildScheduleAgenda({
-        window,
-        tasks,
-        fixedEvents,
-        preferences,
-        startDate,
-        endDate,
-        today: this.today(),
-        nowClock: nowClockInTimezone(preferences.timezone),
-        summary,
-      });
       return await renderAgendaPng({
-        agenda,
-        outputDir: store.getExportsDir(),
+        agenda: view.agenda,
+        outputDir: this.options.store.getExportsDir(),
       });
     } catch (error) {
       console.error("[schedule] render failed", error);

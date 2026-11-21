@@ -81,6 +81,11 @@ export const config = {
   },
   schedule: {
     maxSteps: num(process.env.CODEFLY_SCHEDULE_MAX_STEPS, 80),
+    /** Characters of schedule tool output kept in the model context per request. */
+    historyBudgetChars: num(
+      process.env.CODEFLY_SCHEDULE_HISTORY_BUDGET_CHARS,
+      60_000,
+    ),
   },
 } as const;
 
