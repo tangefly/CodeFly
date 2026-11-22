@@ -663,7 +663,91 @@ describe("schedule tools", () => {
     ]);
   });
 
-  it("reports overdue blocks auto-skipped by plan_schedule", async () => {
+  it("refuses plan_schedule and plan_replan while overdue blocks are unconfirmed", async () => {
+    const created = await tools.execute(
+      "task_upsert",
+      JSON.stringify({
+        title: "写论文初稿",
+        estimated_minutes: 120,
+        estimate_confidence: "high",
+        priority: "high",
+      }),
+      ctx(),
+    );
+    expect(created.status).toBe("complete");
+    const task = store.listTasks()[0]!;
+    const today = todayInTimezone("Asia/Shanghai");
+    await store.applySchedule({
+      taskIds: [],
+      removeFromDate: today,
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b_gate_1",
+          taskId: task.id,
+          date: addDays(today, -2),
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "精读基线论文",
+        },
+        {
+          id: "b_gate_2",
+          taskId: task.id,
+          date: addDays(today, -1),
+          start: "14:00",
+          end: "15:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+
+    const refused = await tools.execute("plan_schedule", "{}", ctx());
+    expect(refused.status).toBe("error");
+    expect(refused.content).toContain("plan_schedule 未执行");
+    expect(refused.content).toContain("过期待确认");
+    expect(refused.content).toContain("b_gate_1");
+    expect(refused.content).toContain("ask_user_question");
+    expect(refused.content).toContain("force_overdue_skip");
+    const data = refused.meta?.data as {
+      overdue?: Array<{ id: string }>;
+    };
+    expect(data.overdue?.map((block) => block.id)).toEqual([
+      "b_gate_1",
+      "b_gate_2",
+    ]);
+    // Nothing was touched by the refused call.
+    expect(store.findBlock("b_gate_1")?.block.status).toBe("planned");
+    expect(store.findBlock("b_gate_2")?.block.status).toBe("planned");
+
+    const replanRefused = await tools.execute("plan_replan", "{}", ctx());
+    expect(replanRefused.status).toBe("error");
+    expect(replanRefused.content).toContain("plan_replan 未执行");
+
+    // Confirm with the user's answers, then the same call succeeds.
+    const done = await tools.execute(
+      "block_update",
+      JSON.stringify({ block_id: "b_gate_1", status: "done" }),
+      ctx(),
+    );
+    expect(done.status).toBe("complete");
+    const skipped = await tools.execute(
+      "block_update",
+      JSON.stringify({ block_id: "b_gate_2", status: "skipped" }),
+      ctx(),
+    );
+    expect(skipped.status).toBe("complete");
+
+    const planned = await tools.execute("plan_schedule", "{}", ctx());
+    expect(planned.status).toBe("complete");
+    expect(store.findBlock("b_gate_1")?.block.status).toBe("done");
+    expect(store.findBlock("b_gate_2")?.block.status).toBe("skipped");
+  });
+
+  it("reports overdue blocks auto-skipped by plan_schedule with force_overdue_skip", async () => {
     const created = await tools.execute(
       "task_upsert",
       JSON.stringify({
@@ -695,9 +779,15 @@ describe("schedule tools", () => {
       ],
     });
 
-    const planned = await tools.execute("plan_schedule", "{}", ctx());
+    const planned = await tools.execute(
+      "plan_schedule",
+      JSON.stringify({ force_overdue_skip: true }),
+      ctx(),
+    );
     expect(planned.status).toBe("complete");
-    expect(planned.content).toContain("已将 1 个过期未记录块标记为跳过");
+    expect(planned.content).toContain(
+      "已将 1 个过期未记录块按未完成标记为跳过（force_overdue_skip）",
+    );
     expect(store.findBlock("b_overdue")?.block.status).toBe("skipped");
   });
 });

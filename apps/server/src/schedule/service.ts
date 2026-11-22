@@ -277,7 +277,7 @@ function runtimeContextMessage(
             overdueBlocks[0]?.date ?? ""
           } · ${overdueTasks.slice(0, 5).join(" · ")}${
             overdueTasks.length > 5 ? " …" : ""
-          }）— planned blocks whose time has passed with no recorded outcome; confirm them before replanning (plan_get lists ids)`
+          }）— planned blocks whose time has passed with no recorded outcome; plan_schedule/plan_replan refuse until they are confirmed with the user (plan_get lists ids)`
     }`,
     `- Estimate calibration: ${
       overview.calibration.ratio === null

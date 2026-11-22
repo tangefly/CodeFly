@@ -360,8 +360,9 @@ function formatPlan(
 
 /**
  * Lists planned blocks whose time has passed with no recorded outcome. The
- * planner auto-skips them on the next run, so the model must confirm each
- * one with the user (done + actual minutes, or skipped) before replanning.
+ * planning tools refuse to run while any remain, so the model must confirm
+ * each one with the user (done + actual minutes, or skipped) before
+ * replanning; force_overdue_skip is the only bypass.
  */
 function formatOverdueSection(
   blocks: ScheduleBlock[],
@@ -543,6 +544,7 @@ const planScheduleArgs = z
     days: z.number().int().min(1).max(21).optional(),
     task_ids: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
     allow_spill: z.boolean().optional(),
+    force_overdue_skip: z.boolean().optional(),
     notes: z.string().max(20_000).optional(),
   })
   .strict();
@@ -553,6 +555,7 @@ const planReplanArgs = z
     days: z.number().int().min(1).max(21).optional(),
     task_ids: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
     allow_spill: z.boolean().optional(),
+    force_overdue_skip: z.boolean().optional(),
     notes: z.string().max(20_000).optional(),
   })
   .strict();
@@ -878,7 +881,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_schedule",
       description:
-        "Generate or regenerate a rolling N-day plan starting from today (default) or from_date. Preserves completed blocks, replaces future planned blocks for the selected tasks, respects working hours/breaks, never schedules into time that already passed today, carves out fixed events (courses/meetings) and buffers uncertain estimates. Works with zero tasks: a window with only fixed events still produces an agenda. Renders and saves a PNG automatically.",
+        "Generate or regenerate a rolling N-day plan starting from today (default) or from_date. Preserves completed blocks, replaces future planned blocks for the selected tasks, respects working hours/breaks, never schedules into time that already passed today, carves out fixed events (courses/meetings) and buffers uncertain estimates. Works with zero tasks: a window with only fixed events still produces an agenda. Renders and saves a PNG automatically. REFUSES with an error while overdue unconfirmed blocks exist (time passed, no recorded outcome): confirm each with the user via ask_user_question, record done/skipped with block_update, then retry. force_overdue_skip=true bypasses the gate only when the user explicitly declines to confirm.",
       parameters: {
         type: "object",
         properties: {
@@ -901,6 +904,11 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
             type: "boolean",
             description: "Allow overflow beyond the window (default true).",
           },
+          force_overdue_skip: {
+            type: "boolean",
+            description:
+              "Only set true when the user explicitly declined to confirm the overdue blocks (e.g. 别问了直接排). Overdue unconfirmed blocks are then treated as not done: auto-skipped and their work rescheduled.",
+          },
           notes: { type: "string" },
         },
         additionalProperties: false,
@@ -912,7 +920,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "plan_replan",
       description:
-        "Replan a rolling window from a date (default today). Marks overdue planned blocks as skipped, keeps completed blocks, and moves unfinished work into free slots around fixed events, optionally spilling beyond the window. Renders and saves a PNG agenda automatically.",
+        "Replan a rolling window from a date (default today). Keeps completed blocks and moves unfinished work into free slots around fixed events, optionally spilling beyond the window. Renders and saves a PNG agenda automatically. REFUSES with an error while overdue unconfirmed blocks exist (time passed, no recorded outcome): confirm each with the user via ask_user_question, record done/skipped with block_update, then retry. force_overdue_skip=true bypasses the gate only when the user explicitly declines to confirm, and then overdue planned blocks are treated as not done (auto-skipped, work rescheduled).",
       parameters: {
         type: "object",
         properties: {
@@ -928,6 +936,11 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
           },
           task_ids: { type: "array", items: { type: "string" } },
           allow_spill: { type: "boolean" },
+          force_overdue_skip: {
+            type: "boolean",
+            description:
+              "Only set true when the user explicitly declined to confirm the overdue blocks. They are then auto-skipped and their work rescheduled.",
+          },
           notes: { type: "string" },
         },
         additionalProperties: false,
@@ -1487,6 +1500,7 @@ export class ScheduleToolExecutor {
       days: parsed.data.days ?? 7,
       taskIds: parsed.data.task_ids,
       allowSpill: parsed.data.allow_spill !== false,
+      forceOverdueSkip: parsed.data.force_overdue_skip === true,
       notes: parsed.data.notes,
       ctx,
     });
@@ -1504,6 +1518,7 @@ export class ScheduleToolExecutor {
       days: parsed.data.days ?? 7,
       taskIds: parsed.data.task_ids,
       allowSpill: parsed.data.allow_spill !== false,
+      forceOverdueSkip: parsed.data.force_overdue_skip === true,
       notes: parsed.data.notes,
       ctx,
     });
@@ -1515,6 +1530,7 @@ export class ScheduleToolExecutor {
     days: number;
     taskIds?: string[];
     allowSpill: boolean;
+    forceOverdueSkip?: boolean;
     notes?: string;
     ctx: ScheduleToolContext;
   }): Promise<ToolResult> {
@@ -1522,6 +1538,29 @@ export class ScheduleToolExecutor {
     const store = this.options.store;
     const preferences = store.getPreferences();
     const today = this.today();
+
+    // Hard gate: planning must not silently auto-skip work whose outcome is
+    // unknown. Refuse while any overdue planned block is unconfirmed and make
+    // the model reconcile it with the user (ask_user_question + block_update)
+    // before retrying. force_overdue_skip is the explicit user-waived escape.
+    if (!input.forceOverdueSkip) {
+      const overdue = store.listOverduePlannedBlocks();
+      if (overdue.length > 0) {
+        const tasks = store.listTasks({ includeDone: true, limit: 200 });
+        const toolName =
+          input.mode === "schedule" ? "plan_schedule" : "plan_replan";
+        return toolError(
+          [
+            `${toolName} 未执行：存在 ${overdue.length} 个过期待确认块（时间已过但未记录完成）。完成情况未知的工作不能被静默跳过或重排。`,
+            "",
+            formatOverdueSection(overdue, tasks),
+            "",
+            `确认并用 block_update 记录后重试 ${toolName}。仅当用户明确表示不想逐块确认时，才传 force_overdue_skip=true 按未完成处理并继续。`,
+          ].join("\n"),
+          { view: "plan", overdue },
+        );
+      }
+    }
 
     // A rolling window always starts now or later. Requested past dates are
     // clamped to today instead of erroring so the model can recover.
@@ -1692,13 +1731,13 @@ export class ScheduleToolExecutor {
         ? `其中 ${spillBlocks} 个 block 排在 ${windowEnd} 之后（窗口外溢出）。`
         : "",
       overdueBefore.length > 0
-        ? `已将 ${overdueSkipped.length} 个过期未记录块标记为跳过${
+        ? `已将 ${overdueSkipped.length} 个过期未记录块按未完成标记为跳过（force_overdue_skip）${
             overdueTodayCount > 0
               ? `，另有 ${overdueTodayCount} 个今日已过时间的块已删除重排`
               : ""
-          }（涉及约 ${formatMinutes(
+          }，涉及约 ${formatMinutes(
             overdueSkippedMinutes,
-          )}，工作量已保留并将重排）。如其中有些实际已完成，可用 block_update 改为 done，或用 task_upsert 补记实际用时。`
+          )}，工作量已保留并将重排。如其中有些实际已完成，可用 block_update 改为 done，或用 task_upsert 补记实际用时。`
         : "",
       render !== null
         ? `日程 PNG 已保存：${render.filePath}`
