@@ -420,6 +420,7 @@ function normalizeFixedEvent(raw: unknown): ScheduleFixedEvent | null {
     end,
     location: asString(raw.location).slice(0, 120),
     note: asString(raw.note).slice(0, 10_000),
+    busy: asBoolean(raw.busy, true),
     createdAt: asNullableString(raw.createdAt) ?? now,
     updatedAt: asNullableString(raw.updatedAt) ?? now,
   };
@@ -1078,6 +1079,7 @@ export class ScheduleStore {
       end,
       location: (input.location ?? "").trim().slice(0, 120),
       note: (input.note ?? "").slice(0, 10_000),
+      busy: input.busy ?? true,
       createdAt: now,
       updatedAt: now,
     };
@@ -1131,6 +1133,7 @@ export class ScheduleStore {
       event.location = patch.location.trim().slice(0, 120);
     }
     if (patch.note !== undefined) event.note = patch.note.slice(0, 10_000);
+    if (patch.busy !== undefined) event.busy = patch.busy;
     // Re-validate the kind-specific fields and the time window after patching.
     if (
       (event.kind === "weekly" && event.weekday === null) ||
@@ -1168,6 +1171,7 @@ export class ScheduleStore {
     end?: string;
     location?: string;
     note?: string;
+    busy?: boolean;
   }): Promise<{ event: ScheduleFixedEvent; created: boolean }> {
     const existing =
       input.id === undefined ? undefined : this.getFixedEvent(input.id);
@@ -1181,6 +1185,7 @@ export class ScheduleStore {
         end: input.end,
         location: input.location,
         note: input.note,
+        busy: input.busy,
       });
       return { event, created: false };
     }
@@ -1205,6 +1210,7 @@ export class ScheduleStore {
       end: input.end,
       location: input.location,
       note: input.note,
+      busy: input.busy,
     });
     return { event, created: true };
   }
@@ -1314,6 +1320,7 @@ export class ScheduleStore {
           end: candidate.end,
           location: candidate.location,
           note: "",
+          busy: true,
           createdAt: now,
           updatedAt: now,
         };
@@ -2012,8 +2019,10 @@ export class ScheduleStore {
       }
     }
     // Fixed commitments (courses, meetings) are not blocks but still occupy
-    // wall-clock time; moving a block on top of them is rejected.
+    // wall-clock time; moving a block on top of them is rejected. Non-busy
+    // events are parallel-by-design, so blocks may sit inside them.
     for (const event of this.fixedEventsForDate(candidate.date)) {
+      if (!event.busy) continue;
       const eventStart = clockToMinutes(event.start);
       const eventEnd = clockToMinutes(event.end);
       if (start < eventEnd && eventStart < end) {

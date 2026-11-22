@@ -139,6 +139,55 @@ describe("schedule tools", () => {
     expect(got.content).toContain(plan!.blocks[0]!.id);
   });
 
+  it("schedules tasks inside a non-busy course and renders them side by side", async () => {
+    const created = await tools.execute(
+      "fixed_event_upsert",
+      JSON.stringify({
+        title: "线性代数",
+        kind: "weekly",
+        weekday: 1,
+        start: "09:00",
+        end: "11:00",
+        busy: false,
+      }),
+      ctx(),
+    );
+    expect(created.status).toBe("complete");
+    expect(created.content).toContain("时段可安排任务");
+    const event = store.listFixedEvents()[0]!;
+    expect(event.busy).toBe(false);
+
+    await tools.execute(
+      "task_upsert",
+      JSON.stringify({
+        title: "期末复习",
+        estimated_minutes: 90,
+        estimate_confidence: "high",
+        priority: "high",
+      }),
+      ctx(),
+    );
+    const planned = await tools.execute(
+      "plan_schedule",
+      JSON.stringify({ from_date: startDate, allow_spill: true }),
+      ctx(),
+    );
+    expect(planned.status).toBe("complete");
+    const blocks = store.getPlan(startDate)!.blocks;
+    // The task starts inside the course window, not after it.
+    expect(blocks[0]?.start).toBe("09:00");
+
+    const got = await tools.execute(
+      "plan_get",
+      JSON.stringify({ from_date: startDate }),
+      ctx(),
+    );
+    // Course and task share one line with the parallel marker.
+    expect(got.content).toContain("（固定·可并行）∥");
+    expect(got.content).toContain("线性代数");
+    expect(got.content).toContain("期末复习");
+  });
+
   it("stores an optional breakdown and writes step notes into planned blocks", async () => {
     const created = await tools.execute(
       "task_upsert",

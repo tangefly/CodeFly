@@ -542,7 +542,8 @@ export type ScheduleFixedEventKind =
 /**
  * A commitment that occupies wall-clock time every week (courses, meetings)
  * or on one specific day. Fixed events are not tasks: they need no estimate
- * and can form a valid weekly plan on their own.
+ * and can form a valid weekly plan on their own. A non-busy event (busy
+ * = false) keeps its slot in the plan while remaining schedulable time.
  */
 export interface ScheduleFixedEvent {
   id: string;
@@ -557,6 +558,12 @@ export interface ScheduleFixedEvent {
   end: string;
   location: string;
   note: string;
+  /**
+   * Whether the event truly occupies the user: busy events are carved out of
+   * schedulable time; non-busy ones (a course the user attends but works
+   * through) stay visible in the plan while tasks may be scheduled inside.
+   */
+  busy: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -570,6 +577,7 @@ export interface ScheduleFixedEventInput {
   end?: string;
   location?: string;
   note?: string;
+  busy?: boolean;
 }
 
 /**
@@ -720,6 +728,20 @@ export interface ScheduleWindow {
   notes: string;
 }
 
+/**
+ * A task block scheduled inside a non-busy fixed event's window. Carried on
+ * the fixed item so every surface can render course and task side by side.
+ */
+export interface ScheduleAgendaParallelBlock {
+  blockId: string;
+  title: string;
+  /** Local wall-clock HH:mm. */
+  start: string;
+  end: string;
+  status: ScheduleBlockStatus;
+  priority: SchedulePriority | null;
+}
+
 /** One chronological entry in a day agenda: a fixed event or a task block. */
 export interface ScheduleAgendaItem {
   id: string;
@@ -733,6 +755,10 @@ export interface ScheduleAgendaItem {
   priority: SchedulePriority | null;
   location: string;
   note: string;
+  /** Whether a fixed event occupies the user; null on task items. */
+  busy: boolean | null;
+  /** Task blocks running inside this non-busy fixed event's window. */
+  parallelBlocks?: ScheduleAgendaParallelBlock[];
 }
 
 export interface ScheduleAgendaDay {

@@ -31,9 +31,10 @@ function itemTone(item: ScheduleAgendaItem): string {
 
 function itemMeta(item: ScheduleAgendaItem): string {
   if (item.kind === "fixed") {
-    return item.location.trim() === ""
-      ? "固定安排"
-      : `固定 · ${item.location.trim()}`;
+    const location = item.location.trim();
+    const parts = location === "" ? ["固定"] : ["固定", location];
+    if (item.busy === false) parts.push("可并行");
+    return parts.join(" · ");
   }
   const status =
     item.status === "done"
@@ -103,7 +104,78 @@ function DayCard({
           </p>
         ) : (
           <div className={compact ? "space-y-1" : "space-y-1.5"}>
-            {day.items.map((item) => (
+            {day.items.map((item) =>
+              item.parallelBlocks !== undefined &&
+              item.parallelBlocks.length > 0 ? (
+                <div
+                  key={item.id}
+                  className="flex flex-wrap items-center gap-1.5 rounded-r-md border-l-2 border-teal-500/70 bg-teal-500/[0.06] px-2 py-1"
+                >
+                  <span
+                    className={cn(
+                      "flex min-w-0 items-center gap-1.5 rounded-md border border-teal-500/50 bg-teal-500/10 px-1.5 py-0.5",
+                    )}
+                    title={`${item.start}-${item.end} ${item.title}`}
+                  >
+                    <span
+                      className={cn(
+                        "shrink-0 font-mono text-muted-foreground/80",
+                        compact ? "text-[9px]" : "text-[10px]",
+                      )}
+                    >
+                      {item.start}-{item.end}
+                    </span>
+                    <span
+                      className={cn(
+                        "truncate font-medium text-foreground/90",
+                        compact ? "text-[10.5px]" : "text-[11px]",
+                      )}
+                    >
+                      {item.title}
+                    </span>
+                    <span className="shrink-0 text-[8.5px] text-muted-foreground/65">
+                      固定·可并行
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground/50">
+                    ∥
+                  </span>
+                  {item.parallelBlocks.map((block) => (
+                    <span
+                      key={block.blockId}
+                      className="flex min-w-0 items-center gap-1.5 rounded-md border border-sky-500/50 bg-sky-500/10 px-1.5 py-0.5"
+                      title={`${block.start}-${block.end} ${block.title}`}
+                    >
+                      <span
+                        className={cn(
+                          "shrink-0 font-mono text-muted-foreground/80",
+                          compact ? "text-[9px]" : "text-[10px]",
+                          block.status === "skipped" && "line-through",
+                        )}
+                      >
+                        {block.start}-{block.end}
+                      </span>
+                      <span
+                        className={cn(
+                          "truncate font-medium text-foreground/90",
+                          compact ? "text-[10.5px]" : "text-[11px]",
+                          block.status === "skipped" && "line-through",
+                        )}
+                      >
+                        {block.status === "done" ? "✓ " : ""}
+                        {block.title}
+                      </span>
+                      <span className="shrink-0 text-[8.5px] text-muted-foreground/65">
+                        {block.status === "done"
+                          ? "已完成"
+                          : block.status === "skipped"
+                            ? "已跳过"
+                            : "待办"}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
               <div
                 key={item.id}
                 className={cn(

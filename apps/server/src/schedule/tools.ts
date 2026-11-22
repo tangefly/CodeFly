@@ -27,7 +27,7 @@ import {
   type QuestionServiceLike,
 } from "../interaction/ask-user-question.js";
 import type { LlmToolDefinition } from "../llm/client.js";
-import { buildScheduleAgenda } from "./agenda.js";
+import { buildScheduleAgenda, pairParallelBlocks } from "./agenda.js";
 import type { ScheduleEmailService } from "./email.js";
 import {
   CONFIDENCE_LABEL,
@@ -169,8 +169,9 @@ function formatFixedEvent(event: ScheduleFixedEvent): string {
     event.kind === "weekly"
       ? `每周${weekdayNumberName(event.weekday ?? 1)}`
       : `${event.date}（${weekdayName(event.date ?? "")}）`;
+  const busySuffix = event.busy ? "" : " · 时段可安排任务";
   return [
-    `[${event.id}] ${event.title} · ${when} ${event.start}-${event.end}`,
+    `[${event.id}] ${event.title} · ${when} ${event.start}-${event.end}${busySuffix}`,
     event.location.trim() !== "" ? `   地点 ${event.location}` : null,
     event.note.trim() !== "" ? `   ${event.note.trim().slice(0, 1000)}` : null,
   ]
@@ -262,14 +263,41 @@ function formatPlan(
     );
     const dayEvents = fixedEventsForDateOf(fixedEvents, date);
     if (blocks.length === 0 && dayEvents.length === 0) continue;
+    const { byEventId, absorbedBlockIds } = pairParallelBlocks(
+      dayEvents,
+      blocks,
+      taskIndex,
+    );
     lines.push("", `${weekdayName(date)} ${date}`);
     for (const event of dayEvents) {
       const location = event.location.trim() === "" ? "" : ` @${event.location}`;
+      const parallel = byEventId.get(event.id);
+      if (parallel === undefined) {
+        const suffix = event.busy ? "（固定）" : "（固定·可并行）";
+        lines.push(
+          `  ▣ ${event.start}-${event.end} ${event.title}${location}${suffix}`,
+        );
+        continue;
+      }
+      // Course and the task blocks inside its window share one line so the
+      // parallel arrangement reads at a glance.
+      const tasks = parallel
+        .map((block) => {
+          const status =
+            block.status === "done"
+              ? "✓"
+              : block.status === "skipped"
+                ? "—"
+                : "·";
+          return `${status}${block.start}-${block.end} ${block.title}`;
+        })
+        .join(" ∥ ");
       lines.push(
-        `  ▣ ${event.start}-${event.end} ${event.title}${location}（固定）`,
+        `  ▣ ${event.start}-${event.end} ${event.title}${location}（固定·可并行）∥ ${tasks}`,
       );
     }
     for (const block of blocks) {
+      if (absorbedBlockIds.has(block.id)) continue;
       const task = taskIndex.get(block.taskId);
       const status =
         block.status === "done"
@@ -492,6 +520,7 @@ const fixedEventUpsertArgs = z
     end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
     location: z.string().trim().max(120).optional(),
     note: z.string().max(10_000).optional(),
+    busy: z.boolean().optional(),
   })
   .strict();
 
@@ -776,7 +805,7 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
     function: {
       name: "fixed_event_upsert",
       description:
-        "Create or update a fixed commitment (course, meeting, appointment). New events require title, kind (weekly|once), start and end, plus weekday 1-7 (weekly) or date YYYY-MM-DD (once). If any of those are missing or ambiguous, ask the user with ask_user_question instead of guessing. Use this for courses and recurring meetings instead of creating tasks; do not re-create events that fixed_event_list already shows.",
+        "Create or update a fixed commitment (course, meeting, appointment). New events require title, kind (weekly|once), start and end, plus weekday 1-7 (weekly) or date YYYY-MM-DD (once). If any of those are missing or ambiguous, ask the user with ask_user_question instead of guessing. Use this for courses and recurring meetings instead of creating tasks; do not re-create events that fixed_event_list already shows. Set busy=false when the user works through the commitment (e.g. a course they do not listen to): the event stays in the plan but its slot remains schedulable, so task blocks may run in parallel with it.",
       parameters: {
         type: "object",
         properties: {
@@ -797,6 +826,11 @@ const DEFINITIONS: Record<string, LlmToolDefinition> = {
           end: { type: "string", description: "HH:mm; must be after start." },
           location: { type: "string" },
           note: { type: "string" },
+          busy: {
+            type: "boolean",
+            description:
+              "Whether the event truly occupies the user (default true). busy=false keeps the slot visible in the plan but schedulable for tasks.",
+          },
         },
         additionalProperties: false,
       },
@@ -1335,6 +1369,7 @@ export class ScheduleToolExecutor {
         end: args.end,
         location: args.location,
         note: args.note,
+        busy: args.busy,
       });
       void this.options.audit.append({
         type: "schedule.fixed_event.changed",
@@ -1344,7 +1379,9 @@ export class ScheduleToolExecutor {
         title: event.title,
       });
       const hint = created
-        ? "\n固定安排会占用对应时段；用 plan_schedule 重新生成日程即可生效。"
+        ? event.busy
+          ? "\n固定安排会占用对应时段；用 plan_schedule 重新生成日程即可生效。"
+          : "\n该时段仍可安排任务；用 plan_schedule 重新生成日程即可生效。"
         : "";
       return {
         content: `${created ? "Created" : "Updated"} fixed event:\n${formatFixedEvent(event)}${hint}`,

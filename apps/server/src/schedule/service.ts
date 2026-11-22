@@ -215,7 +215,10 @@ function runtimeContextMessage(
           : `${event.date ?? ""}`;
       const location =
         event.location.trim() === "" ? "" : ` @${event.location.trim()}`;
-      return `${when} ${event.start}-${event.end} ${event.title}${location}`;
+      // Non-busy events keep their slot schedulable; flag them so the agent
+      // plans tasks into that time instead of treating it as blocked.
+      const parallel = event.busy ? "" : " · 可并行安排任务";
+      return `${when} ${event.start}-${event.end} ${event.title}${location}${parallel}`;
     });
 
   const lines = [

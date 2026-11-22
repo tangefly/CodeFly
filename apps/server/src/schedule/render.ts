@@ -29,6 +29,15 @@ export interface RenderAgendaResult {
   dataUrl: string | null;
 }
 
+/**
+ * Inline images travel to LLM providers, which reject any image whose width
+ * or height exceeds 8192 px. A tall agenda at print-quality scale grows past
+ * that, so the data URL carries a downscaled copy capped at 4096 px on its
+ * long edge — comfortably inside provider limits and cheaper in tokens. The
+ * file on disk (and `buffer`) keeps full print quality for export and email.
+ */
+const INLINE_MAX_EDGE = 4096;
+
 export const PRIORITY_LABEL: Record<SchedulePriority, string> = {
   urgent: "紧急",
   high: "高",
@@ -120,9 +129,10 @@ function itemColor(item: ScheduleAgendaItem): string {
 
 function itemMeta(item: ScheduleAgendaItem): string {
   if (item.kind === "fixed") {
-    return item.location.trim() === ""
-      ? "固定安排"
-      : `固定 · ${item.location.trim()}`;
+    const location = item.location.trim();
+    const parts = location === "" ? ["固定"] : ["固定", location];
+    if (item.busy === false) parts.push("可并行");
+    return parts.join(" · ");
   }
   const status =
     item.status === "done"
@@ -281,32 +291,93 @@ export async function renderAgendaPng(
         push(
           `<rect x="${margin + 1}" y="${rowY + 7}" width="3" height="${itemHeight - 14}" rx="1.5" fill="${color}"/>`,
         );
-        push(
-          `<text x="${margin + 14}" y="${rowY + 23}" font-size="11.5" fill="${color}">${escapeXml(
-            `${item.start}-${item.end}`,
-          )}</text>`,
-        );
-        const titleMax = contentWidth - 110 - 170;
-        push(
-          `<text x="${margin + 108}" y="${rowY + 23}" font-size="12.5" font-weight="600" fill="${
-            item.status === "skipped" ? "#9ca3af" : "#111827"
-          }">${escapeXml(
-            truncate(
-              `${item.status === "done" ? "✓ " : item.status === "skipped" ? "— " : ""}${item.title}`,
-              titleMax,
-              12.5,
-            ),
-          )}</text>`,
-        );
-        push(
-          `<text x="${margin + contentWidth - 14}" y="${rowY + 23}" font-size="10.5" fill="#6b7280" text-anchor="end">${escapeXml(
-            truncate(
-              item.note.trim() === "" ? itemMeta(item) : `${itemMeta(item)} · ${item.note.trim()}`,
-              170,
-              10.5,
-            ),
-          )}</text>`,
-        );
+        if (item.parallelBlocks !== undefined && item.parallelBlocks.length > 0) {
+          // Course on the left, task blocks running inside it on the right,
+          // split by a divider so the parallel arrangement reads at a glance.
+          const splitX = margin + Math.round(contentWidth * 0.44);
+          push(
+            `<line x1="${splitX}" y1="${rowY + 8}" x2="${splitX}" y2="${rowY + itemHeight - 8}" stroke="#dbe4ee"/>`,
+          );
+          push(
+            `<text x="${margin + 14}" y="${rowY + 23}" font-size="11.5" fill="${color}">${escapeXml(
+              `${item.start}-${item.end}`,
+            )}</text>`,
+          );
+          push(
+            `<text x="${margin + 108}" y="${rowY + 23}" font-size="12.5" font-weight="600" fill="#111827">${escapeXml(
+              truncate(item.title, splitX - (margin + 108) - 12, 12.5),
+            )}</text>`,
+          );
+          const taskAreaStart = splitX + 14;
+          const taskAreaEnd = margin + contentWidth - 14;
+          let taskX = taskAreaStart;
+          const separator = " ∥ ";
+          for (let blockIndex = 0; blockIndex < item.parallelBlocks.length; blockIndex += 1) {
+            const block = item.parallelBlocks[blockIndex]!;
+            if (blockIndex > 0) {
+              const separatorWidth = textWidth(separator, 10.5);
+              if (taskX + separatorWidth > taskAreaEnd) break;
+              push(
+                `<text x="${taskX}" y="${rowY + 23}" font-size="10.5" fill="#94a3b8">${escapeXml(separator)}</text>`,
+              );
+              taskX += separatorWidth;
+            }
+            const time = `${block.start}-${block.end} `;
+            const mark =
+              block.status === "done"
+                ? "✓ "
+                : block.status === "skipped"
+                  ? "— "
+                  : "";
+            const title = `${mark}${block.title}`;
+            const timeWidth = textWidth(time, 11.5);
+            const maxTitleWidth = Math.max(
+              40,
+              taskAreaEnd - taskX - timeWidth,
+            );
+            const titleWidth = Math.min(
+              textWidth(truncate(title, maxTitleWidth, 11.5), 11.5),
+              maxTitleWidth,
+            );
+            if (taskX + timeWidth + 20 > taskAreaEnd) break;
+            push(
+              `<text x="${taskX}" y="${rowY + 23}" font-size="11.5" fill="#1d4ed8">${escapeXml(time)}</text>`,
+            );
+            push(
+              `<text x="${taskX + timeWidth}" y="${rowY + 23}" font-size="11.5" font-weight="600" fill="${
+                block.status === "skipped" ? "#9ca3af" : "#111827"
+              }">${escapeXml(truncate(title, maxTitleWidth, 11.5))}</text>`,
+            );
+            taskX += timeWidth + titleWidth;
+          }
+        } else {
+          push(
+            `<text x="${margin + 14}" y="${rowY + 23}" font-size="11.5" fill="${color}">${escapeXml(
+              `${item.start}-${item.end}`,
+            )}</text>`,
+          );
+          const titleMax = contentWidth - 110 - 170;
+          push(
+            `<text x="${margin + 108}" y="${rowY + 23}" font-size="12.5" font-weight="600" fill="${
+              item.status === "skipped" ? "#9ca3af" : "#111827"
+            }">${escapeXml(
+              truncate(
+                `${item.status === "done" ? "✓ " : item.status === "skipped" ? "— " : ""}${item.title}`,
+                titleMax,
+                12.5,
+              ),
+            )}</text>`,
+          );
+          push(
+            `<text x="${margin + contentWidth - 14}" y="${rowY + 23}" font-size="10.5" fill="#6b7280" text-anchor="end">${escapeXml(
+              truncate(
+                item.note.trim() === "" ? itemMeta(item) : `${itemMeta(item)} · ${item.note.trim()}`,
+                170,
+                10.5,
+              ),
+            )}</text>`,
+          );
+        }
         if (index < day.items.length - 1) {
           push(
             `<line x1="${margin + 14}" y1="${rowY + itemHeight}" x2="${margin + contentWidth - 14}" y2="${rowY + itemHeight}" stroke="#eef2f7"/>`,
@@ -415,6 +486,19 @@ export async function renderAgendaPng(
   const filePath = path.join(input.outputDir, fileName);
   await writeFile(filePath, data);
 
+  const inline =
+    Math.max(info.width, info.height) <= INLINE_MAX_EDGE
+      ? data
+      : await sharp(data)
+          .resize({
+            width: INLINE_MAX_EDGE,
+            height: INLINE_MAX_EDGE,
+            fit: "inside",
+            withoutEnlargement: true,
+          })
+          .png({ compressionLevel: 9 })
+          .toBuffer();
+
   return {
     agenda,
     buffer: data,
@@ -422,8 +506,8 @@ export async function renderAgendaPng(
     width: info.width,
     height: info.height,
     dataUrl:
-      data.byteLength <= 1_500_000
-        ? `data:image/png;base64,${data.toString("base64")}`
+      inline.byteLength <= 1_500_000
+        ? `data:image/png;base64,${inline.toString("base64")}`
         : null,
   };
 }

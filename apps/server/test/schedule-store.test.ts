@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -631,6 +631,63 @@ describe("ScheduleStore", () => {
     expect(reloaded.getFixedEvent(weekly.id)).toBeUndefined();
   });
 
+  it("supports non-busy events and defaults legacy data to busy", async () => {
+    const busyDefault = await store.createFixedEvent({
+      title: "组会",
+      kind: "weekly",
+      weekday: 1,
+      start: "16:00",
+      end: "17:30",
+    });
+    expect(busyDefault.busy).toBe(true);
+
+    const parallel = await store.upsertFixedEvent({
+      title: "线性代数",
+      kind: "weekly",
+      weekday: 1,
+      start: "09:00",
+      end: "11:00",
+      busy: false,
+    });
+    expect(parallel.created).toBe(true);
+    expect(parallel.event.busy).toBe(false);
+
+    const updated = await store.updateFixedEvent(parallel.event.id, {
+      busy: true,
+    });
+    expect(updated.busy).toBe(true);
+
+    const reloaded = new ScheduleStore(dir);
+    await reloaded.init();
+    expect(reloaded.getFixedEvent(parallel.event.id)?.busy).toBe(true);
+
+    // A pre-busy-era file without the field still loads as busy.
+    await writeFile(
+      path.join(dir, "schedule", "fixed-events.json"),
+      JSON.stringify({
+        version: 1,
+        events: [
+          {
+            id: "fixed_legacy",
+            title: "老课程",
+            kind: "weekly",
+            weekday: 2,
+            date: null,
+            start: "08:00",
+            end: "09:35",
+            location: "",
+            note: "",
+            createdAt: "2026-11-01T00:00:00.000Z",
+            updatedAt: "2026-11-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    const legacy = new ScheduleStore(dir);
+    await legacy.init();
+    expect(legacy.getFixedEvent("fixed_legacy")?.busy).toBe(true);
+  });
+
   it("migrates legacy fixed-commitment memories into fixed events once", async () => {
     await store.upsertMemory({
       key: "class_schedule_constraint",
@@ -728,5 +785,53 @@ describe("ScheduleStore", () => {
     });
     expect(updated.block.start).toBe("13:00");
     expect(store.getFixedEvent(event.id)).toBeDefined();
+  });
+
+  it("allows blocks inside a non-busy event and pairs them in the agenda", async () => {
+    await store.createFixedEvent({
+      title: "线性代数",
+      kind: "weekly",
+      weekday: 1,
+      start: "09:00",
+      end: "11:00",
+      busy: false,
+    });
+    const task = await store.createTask({ title: "任务", estimatedMinutes: 60 });
+    await store.applySchedule({
+      taskIds: [task.id],
+      removeFromDate: "2026-11-16",
+      skipBeforeDate: null,
+      addBlocks: [
+        {
+          id: "b1",
+          taskId: task.id,
+          date: "2026-11-16",
+          start: "09:00",
+          end: "10:00",
+          status: "planned",
+          actualMinutes: null,
+          note: "",
+        },
+      ],
+    });
+    // The block sits inside the course window without a BLOCK_OVERLAP error.
+    const moved = await store.updateBlock("b1", {
+      start: "09:30",
+      end: "10:30",
+    });
+    expect(moved.block.start).toBe("09:30");
+
+    const overview = store.overview("2026-11-16");
+    const monday = overview.agenda.days[0]!;
+    const courseItem = monday.items.find((item) => item.kind === "fixed");
+    expect(courseItem).toMatchObject({ title: "线性代数", busy: false });
+    expect(courseItem?.parallelBlocks).toHaveLength(1);
+    expect(courseItem?.parallelBlocks?.[0]).toMatchObject({
+      blockId: "b1",
+      start: "09:30",
+      end: "10:30",
+    });
+    // No standalone task row: the block renders beside its course.
+    expect(monday.items.some((item) => item.kind === "task")).toBe(false);
   });
 });

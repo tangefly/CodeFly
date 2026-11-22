@@ -318,6 +318,7 @@ export const scheduleFixedEventCreateSchema = z
     end: clockSchema,
     location: z.string().trim().max(120).optional(),
     note: z.string().max(10_000).optional(),
+    busy: z.boolean().optional(),
   })
   .refine((value) => value.kind === "weekly" || value.date !== undefined, {
     path: ["date"],
@@ -342,6 +343,7 @@ export const scheduleFixedEventUpdateSchema = z
     end: clockSchema.optional(),
     location: z.string().trim().max(120).optional(),
     note: z.string().max(10_000).optional(),
+    busy: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "no fields to update",

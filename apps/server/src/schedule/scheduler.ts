@@ -273,7 +273,10 @@ function buildDayPools(input: SchedulerInput): DayPool[] {
 
     // Fixed commitments (courses, meetings) are carved out like breaks. They
     // reduce schedulable capacity but never consume the daily focus limit.
+    // Non-busy events (a course the user works through) stay in the plan but
+    // remain schedulable time, so they are not carved out at all.
     for (const event of fixedEventsForDate(input.fixedEvents ?? [], date, weekday)) {
+      if (!event.busy) continue;
       intervals = subtractInterval(
         intervals,
         Math.max(dayWorkStart, clockToMinutes(event.start) - gapMinutes),

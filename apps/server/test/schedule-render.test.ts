@@ -11,6 +11,7 @@ import type {
 } from "@codefly/protocol";
 import { buildScheduleAgenda } from "../src/schedule/agenda.js";
 import { renderAgendaPng } from "../src/schedule/render.js";
+import sharp from "sharp";
 
 const preferences: SchedulePreferences = {
   timezone: "Asia/Shanghai",
@@ -107,6 +108,7 @@ const fixedEvents: ScheduleFixedEvent[] = [
     end: "17:30",
     location: "线上",
     note: "",
+    busy: true,
     createdAt: "2026-11-01T00:00:00.000Z",
     updatedAt: "2026-11-01T00:00:00.000Z",
   },
@@ -120,6 +122,7 @@ const fixedEvents: ScheduleFixedEvent[] = [
     end: "12:00",
     location: "",
     note: "",
+    busy: true,
     createdAt: "2026-11-01T00:00:00.000Z",
     updatedAt: "2026-11-01T00:00:00.000Z",
   },
@@ -225,5 +228,75 @@ describe("schedule agenda renderer", () => {
     // 2026-11-21 is Saturday and 2026-11-22 is Sunday.
     expect(agenda.days[5]?.freeMinutes).toBeNull();
     expect(agenda.days[6]?.freeMinutes).toBeNull();
+  });
+
+  it("renders task blocks inside a non-busy course side by side", async () => {
+    const parallelCourse: ScheduleFixedEvent = {
+      id: "fixed_class",
+      title: "线性代数",
+      kind: "weekly",
+      weekday: 1,
+      date: null,
+      start: "09:00",
+      end: "11:00",
+      location: "3-130",
+      note: "",
+      busy: false,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      updatedAt: "2026-11-01T00:00:00.000Z",
+    };
+    const agenda = agendaFor({ events: [parallelCourse, ...fixedEvents] });
+    const monday = agenda.days[0]!;
+    // The block b1 (09:00-10:30, done) is absorbed into the course item
+    // instead of standing alone, and the course itself stays listed.
+    expect(monday.items.map((item) => item.kind)).toEqual(["fixed", "fixed"]);
+    const courseItem = monday.items[0]!;
+    expect(courseItem).toMatchObject({
+      title: "线性代数",
+      busy: false,
+    });
+    expect(courseItem.parallelBlocks).toHaveLength(1);
+    expect(courseItem.parallelBlocks?.[0]).toMatchObject({
+      blockId: "b1",
+      title: task.title,
+      start: "09:00",
+      end: "10:30",
+      status: "done",
+    });
+    // The course time stays free; only the block inside it (90m) and the
+    // busy meeting (16:00-17:30) consume the 480-minute workday.
+    expect(monday.plannedMinutes).toBe(90 + 90);
+    expect(monday.freeMinutes).toBe(480 - 90 - 90);
+
+    const result = await renderAgendaPng({ agenda, outputDir: dir, scale: 1 });
+    expect(result.buffer.byteLength).toBeGreaterThan(1000);
+  });
+
+  it("downsizes the inline data URL when the print PNG exceeds provider limits", async () => {
+    // A dense day (75 rows) pushes the 3x print raster past the 8192 px cap
+    // that LLM providers enforce on inline images.
+    const tallWindow: ScheduleWindow = {
+      ...window,
+      blocks: Array.from({ length: 75 }, (_, index) => ({
+        id: `tall_${index}`,
+        taskId: task.id,
+        date: "2026-11-16",
+        start: "09:00",
+        end: "09:30",
+        status: "planned",
+        actualMinutes: null,
+        note: "",
+      })),
+    };
+    const agenda = agendaFor({ window: tallWindow });
+    const result = await renderAgendaPng({ agenda, outputDir: dir });
+    expect(result.height).toBeGreaterThan(8192);
+    // The inline copy stays small enough for providers to accept.
+    expect(result.dataUrl).not.toBeNull();
+    const base64 = result.dataUrl!.slice("data:image/png;base64,".length);
+    const decoded = await sharp(Buffer.from(base64, "base64")).metadata();
+    expect(Math.max(decoded.width ?? 0, decoded.height ?? 0)).toBeLessThanOrEqual(
+      4096,
+    );
   });
 });

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import sharp from "sharp";
 import type { AgentEvent, AgentSession, AuditEvent } from "@codefly/protocol";
 import type { AuditLog } from "../src/audit/log.js";
 import type { ExecService } from "../src/exec/service.js";
@@ -1037,6 +1038,31 @@ describe("AgentToolExecutor tools", () => {
       expect(String(result.meta?.imageDataUrl)).toMatch(
         /^data:image\/png;base64,/,
       );
+    });
+
+    it("downscales images wider than the provider pixel limit", async () => {
+      const wide = await sharp({
+        create: { width: 9000, height: 80, channels: 3, background: "#ffffff" },
+      })
+        .png()
+        .toBuffer();
+      await writeFile(path.join(workspace, "wide.png"), wide);
+      const result = await executor.execute(
+        "read_image",
+        JSON.stringify({ path: "wide.png" }),
+        context(),
+      );
+      expect(result.status).toBe("complete");
+      // The file's original dimensions are still reported...
+      expect(result.meta).toMatchObject({ width: 9000, height: 80 });
+      // ...but the inline copy stays inside the 8192 px provider limit.
+      const base64 = String(result.meta?.imageDataUrl).replace(
+        /^data:image\/\w+;base64,/,
+        "",
+      );
+      const decoded = await sharp(Buffer.from(base64, "base64")).metadata();
+      expect(decoded.width ?? 0).toBeLessThanOrEqual(8192);
+      expect(decoded.height ?? 0).toBeLessThanOrEqual(8192);
     });
 
     it("rejects non-images, directories and missing files", async () => {

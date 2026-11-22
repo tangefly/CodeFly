@@ -2,6 +2,8 @@ import type {
   ScheduleAgendaDay,
   ScheduleAgendaItem,
   ScheduleAgendaModel,
+  ScheduleAgendaParallelBlock,
+  ScheduleBlock,
   ScheduleFixedEvent,
   SchedulePlanSummary,
   SchedulePreferences,
@@ -67,14 +69,73 @@ export function fixedEventsForDate(
     .sort((a, b) => a.start.localeCompare(b.start) || a.title.localeCompare(b.title));
 }
 
+/**
+ * Assigns task blocks that overlap a non-busy fixed event's window to that
+ * event, so course and task render side by side. A block overlapping several
+ * events joins the one it overlaps most. `blocks` must already be filtered to
+ * the same date as `events`. Returns the absorbed block ids so they are not
+ * emitted as standalone agenda items.
+ */
+export function pairParallelBlocks(
+  events: ScheduleFixedEvent[],
+  blocks: ScheduleBlock[],
+  taskIndex: Map<string, ScheduleTask>,
+): {
+  byEventId: Map<string, ScheduleAgendaParallelBlock[]>;
+  absorbedBlockIds: Set<string>;
+} {
+  const byEventId = new Map<string, ScheduleAgendaParallelBlock[]>();
+  const absorbedBlockIds = new Set<string>();
+  const nonBusy = events.filter((event) => !event.busy);
+  if (nonBusy.length === 0) return { byEventId, absorbedBlockIds };
+  for (const block of blocks) {
+    const start = clockToMinutes(block.start);
+    const end = clockToMinutes(block.end);
+    let best: ScheduleFixedEvent | null = null;
+    let bestOverlap = 0;
+    for (const event of nonBusy) {
+      const overlap =
+        Math.min(end, clockToMinutes(event.end)) -
+        Math.max(start, clockToMinutes(event.start));
+      if (overlap > bestOverlap) {
+        best = event;
+        bestOverlap = overlap;
+      }
+    }
+    if (best === null) continue;
+    const task = taskIndex.get(block.taskId);
+    const list = byEventId.get(best.id) ?? [];
+    list.push({
+      blockId: block.id,
+      title: task?.title ?? "已删除任务",
+      start: block.start,
+      end: block.end,
+      status: block.status,
+      priority: task?.priority ?? null,
+    });
+    byEventId.set(best.id, list);
+    absorbedBlockIds.add(block.id);
+  }
+  return { byEventId, absorbedBlockIds };
+}
+
 function agendaItemsForDay(input: {
   date: string;
   fixedEvents: ScheduleFixedEvent[];
   window: ScheduleWindow | null;
   taskIndex: Map<string, ScheduleTask>;
 }): ScheduleAgendaItem[] {
+  const dayEvents = fixedEventsForDate(input.fixedEvents, input.date);
+  const dayBlocks = (input.window?.blocks ?? []).filter(
+    (block) => block.date === input.date,
+  );
+  const { byEventId, absorbedBlockIds } = pairParallelBlocks(
+    dayEvents,
+    dayBlocks,
+    input.taskIndex,
+  );
   const items: ScheduleAgendaItem[] = [];
-  for (const event of fixedEventsForDate(input.fixedEvents, input.date)) {
+  for (const event of dayEvents) {
     items.push({
       id: `fixed:${event.id}:${input.date}`,
       kind: "fixed",
@@ -86,10 +147,12 @@ function agendaItemsForDay(input: {
       priority: null,
       location: event.location,
       note: event.note,
+      busy: event.busy,
+      parallelBlocks: byEventId.get(event.id),
     });
   }
-  for (const block of input.window?.blocks ?? []) {
-    if (block.date !== input.date) continue;
+  for (const block of dayBlocks) {
+    if (absorbedBlockIds.has(block.id)) continue;
     const task = input.taskIndex.get(block.taskId);
     items.push({
       id: block.id,
@@ -102,6 +165,7 @@ function agendaItemsForDay(input: {
       priority: task?.priority ?? null,
       location: "",
       note: block.note,
+      busy: null,
     });
   }
   // Chronological order; fixed commitments win ties so they anchor the day.
@@ -141,6 +205,19 @@ function freeMinutesForDay(input: {
   }
   for (const item of input.items) {
     if (item.status === "skipped") continue;
+    if (item.kind === "fixed" && item.busy === false) {
+      // The course itself leaves its slot usable; only the work actually
+      // scheduled inside it consumes free time.
+      for (const block of item.parallelBlocks ?? []) {
+        if (block.status === "skipped") continue;
+        free = subtractInterval(
+          free,
+          Math.max(dayStart, clockToMinutes(block.start)),
+          Math.min(workEnd, clockToMinutes(block.end)),
+        );
+      }
+      continue;
+    }
     free = subtractInterval(
       free,
       Math.max(dayStart, clockToMinutes(item.start)),
@@ -185,6 +262,16 @@ export function buildScheduleAgenda(input: {
     });
     const plannedMinutes = items.reduce((total, item) => {
       if (item.status === "skipped") return total;
+      if (item.kind === "fixed" && item.busy === false) {
+        // A parallel course does not consume time; count the work inside it.
+        return total + (item.parallelBlocks ?? []).reduce(
+          (sum, block) =>
+            block.status === "skipped"
+              ? sum
+              : sum + durationMinutes(block.start, block.end),
+          0,
+        );
+      }
       return total + durationMinutes(item.start, item.end);
     }, 0);
     days.push({

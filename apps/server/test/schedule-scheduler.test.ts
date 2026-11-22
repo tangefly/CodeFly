@@ -74,6 +74,7 @@ function fixedEvent(
     end: overrides.end ?? "09:35",
     location: overrides.location ?? "",
     note: "",
+    busy: overrides.busy ?? true,
     createdAt: "2026-11-01T00:00:00.000Z",
     updatedAt: "2026-11-01T00:00:00.000Z",
   };
@@ -421,6 +422,37 @@ describe("generateSchedule", () => {
       ["11:10", "11:40"],
       ["13:00", "14:30"],
     ]);
+  });
+
+  it("schedules tasks inside non-busy fixed events", () => {
+    // Same Monday course 09:00-11:00, but the user works through it: the
+    // slot stays schedulable and the task starts at work start.
+    const result = generateSchedule({
+      startDate: "2026-11-16",
+      endDate: "2026-11-16",
+      today: "2026-11-16",
+      tasks: [task({ id: "t1", remainingMinutes: 120 })],
+      existingBlocks: [],
+      fixedEvents: [
+        fixedEvent({
+          id: "class",
+          title: "课程",
+          kind: "weekly",
+          weekday: 1,
+          start: "09:00",
+          end: "11:00",
+          busy: false,
+        }),
+      ],
+      preferences: PREFERENCES,
+    });
+    expect(result.blocks.map((item) => [item.start, item.end])).toEqual([
+      ["09:00", "10:30"],
+      ["10:40", "11:10"],
+    ]);
+    // The parallel course never consumed capacity, so the full workday minus
+    // the lunch break remains (540 - 60).
+    expect(result.capacityMinutes).toBe(480);
   });
 
   it("works with fixed events only and no tasks", () => {

@@ -182,6 +182,37 @@ describe("schedule management routes", () => {
       "18:00",
     );
 
+    // Non-busy courses keep their slot visible but schedulable.
+    const createdParallel = await app.inject({
+      method: "POST",
+      url: "/api/schedule/fixed-events",
+      payload: {
+        title: "线性代数",
+        kind: "weekly",
+        weekday: 1,
+        start: "09:00",
+        end: "11:00",
+        busy: false,
+      },
+    });
+    expect(createdParallel.statusCode).toBe(201);
+    const parallelEvent = (createdParallel.json() as { event: { id: string } })
+      .event;
+    const busyPatched = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule/fixed-events/${parallelEvent.id}`,
+      payload: { busy: true },
+    });
+    expect(busyPatched.statusCode).toBe(200);
+    expect((busyPatched.json() as { event: { busy: boolean } }).event.busy).toBe(
+      true,
+    );
+    const parallelDeleted = await app.inject({
+      method: "DELETE",
+      url: `/api/schedule/fixed-events/${parallelEvent.id}`,
+    });
+    expect(parallelDeleted.statusCode).toBe(204);
+
     const deleted = await app.inject({
       method: "DELETE",
       url: `/api/schedule/fixed-events/${event.id}`,
@@ -190,7 +221,7 @@ describe("schedule management routes", () => {
     expect(store.getFixedEvent(event.id)).toBeUndefined();
     expect(
       auditEvents.filter((item) => item.type === "schedule.fixed_event.changed"),
-    ).toHaveLength(3);
+    ).toHaveLength(6);
   });
 
   it("stores email settings without returning the password", async () => {

@@ -554,7 +554,10 @@ export function recordsToLlmMessages(
     .filter(
       (record) =>
         record.role === "tool" &&
-        typeof record.meta?.imageDataUrl === "string",
+        typeof record.meta?.imageDataUrl === "string" &&
+        // Schedule renders attach a deterministic agenda PNG for the UI only
+        // (see toolContentForModel); it never occupies an inline-image slot.
+        record.meta?.kind !== "schedule",
     )
     .map((record) => record.id);
   const keepImageIds = new Set(imageIds.slice(-(options.maxInlineImages ?? 2)));
@@ -621,7 +624,9 @@ export function recordsToLlmMessages(
 /**
  * Tool results are text unless the tool attached an image (read_image); the
  * provider then receives a text+image content array so the model can see it.
- * `includeImage: false` turns an old image into a text placeholder.
+ * `includeImage: false` turns an old image into a text placeholder. Schedule
+ * renders are the exception: their PNG is a deterministic UI attachment and
+ * the model already receives the same agenda as text, so it is never inlined.
  */
 export function toolContentForModel(
   content: string,
@@ -629,7 +634,11 @@ export function toolContentForModel(
   options: { includeImage?: boolean } = {},
 ): string | LlmContentPart[] {
   const dataUrl = meta?.imageDataUrl;
-  if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) {
+  if (
+    typeof dataUrl === "string" &&
+    dataUrl.startsWith("data:image/") &&
+    meta?.kind !== "schedule"
+  ) {
     if (options.includeImage === false) {
       return `${content}\n\n[image omitted from history to save context; call read_image again if it is still needed]`;
     }

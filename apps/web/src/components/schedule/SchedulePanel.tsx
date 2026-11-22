@@ -409,6 +409,7 @@ function FixedEventEditor({
     end: string;
     location: string;
     note: string;
+    busy: boolean;
   }) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -422,6 +423,7 @@ function FixedEventEditor({
   const [end, setEnd] = useState(initial?.end ?? "09:00");
   const [location, setLocation] = useState(initial?.location ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
+  const [busy, setBusy] = useState(initial?.busy ?? true);
   const [saving, setSaving] = useState(false);
 
   const save = async (): Promise<void> => {
@@ -436,6 +438,7 @@ function FixedEventEditor({
       end,
       location: location.trim(),
       note,
+      busy,
     });
     setSaving(false);
   };
@@ -533,6 +536,15 @@ function FixedEventEditor({
         className="w-full resize-y rounded-lg border border-border bg-background px-2 py-1.5 text-xs leading-5 focus:border-primary/40 focus:outline-none"
         placeholder="备注（可选）"
       />
+      <label className="flex cursor-pointer items-center gap-2 text-[11px] text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={!busy}
+          onChange={(event) => setBusy(!event.target.checked)}
+          className="h-3.5 w-3.5 accent-teal-500"
+        />
+        该时段可同时安排任务（如上课不听讲，任务会与课程并列显示）
+      </label>
       <div className="flex justify-end gap-1.5">
         <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
           取消
@@ -618,6 +630,7 @@ export function SchedulePanel() {
     end: string;
     location: string;
     note: string;
+    busy: boolean;
   }): Promise<void> => {
     if (fixedEditor?.id) {
       const ok = await updateFixedEvent(fixedEditor.id, value);
@@ -908,6 +921,11 @@ export function SchedulePanel() {
                         <span className="rounded bg-teal-500/15 px-1 py-px text-[8px] text-teal-600">
                           {event.kind === "weekly" ? "每周" : "单次"}
                         </span>
+                        {!event.busy ? (
+                          <span className="rounded bg-sky-500/15 px-1 py-px text-[8px] text-sky-600">
+                            可并行
+                          </span>
+                        ) : null}
                         <span className="font-mono text-[9px] text-muted-foreground/70">
                           {event.kind === "weekly"
                             ? `${WEEKDAY_OPTIONS[(event.weekday ?? 1) - 1]}`

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessageRecord } from "@codefly/protocol";
+import { toolContentForModel } from "../src/llm/tool-loop.js";
 import { scheduleHistoryForModel } from "../src/schedule/service.js";
 
 function record(
@@ -44,6 +45,45 @@ describe("scheduleHistoryForModel", () => {
     const messages = scheduleHistoryForModel(records, 10_000);
     const tool = messages.find((message) => message.role === "tool");
     expect(tool?.content).toBe("计划 2026-11-16 ~ 2026-11-22 …");
+  });
+
+  it("never inlines the agenda PNG for the model, even freshly rendered", () => {
+    const records = [
+      record("u1", "user", "排一下这周"),
+      record("a1", "assistant", "", {
+        toolCalls: [
+          { id: "c1", name: "plan_schedule", arguments: "{}" },
+        ],
+      }),
+      record("t1", "tool", "已生成计划…", {
+        toolCallId: "c1",
+        toolName: "plan_schedule",
+        meta: {
+          kind: "schedule",
+          // The agenda PNG is a UI-only attachment; the model gets the same
+          // agenda as text, so the image must never reach the provider.
+          imageDataUrl: "data:image/png;base64,aGVsbG8=",
+        },
+      }),
+      record("a2", "assistant", "总结"),
+    ];
+    const messages = scheduleHistoryForModel(records, 10_000);
+    const tool = messages.find((message) => message.role === "tool");
+    // Plain text content, no image_url part.
+    expect(tool?.content).toBe("已生成计划…");
+  });
+
+  it("keeps inlining real image reads while skipping schedule renders", () => {
+    const dataUrl = "data:image/png;base64,aGVsbG8=";
+    // read_image results still reach the provider as text+image.
+    expect(toolContentForModel("看这张图", { kind: "image", imageDataUrl: dataUrl })).toEqual([
+      { type: "text", text: "看这张图" },
+      { type: "image_url", image_url: { url: dataUrl } },
+    ]);
+    // Schedule renders are UI-only and stay plain text.
+    expect(
+      toolContentForModel("已生成计划", { kind: "schedule", imageDataUrl: dataUrl }),
+    ).toBe("已生成计划");
   });
 
   it("compacts older plan dumps once over budget", () => {

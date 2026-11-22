@@ -3,6 +3,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
+import sharp from "sharp";
 import type {
   AgentEvent,
   AgentSession,
@@ -3557,7 +3558,27 @@ async function readImageResult(
   const dimensions = imageDimensions(buffer, mime);
   const size =
     dimensions === null ? "unknown dimensions" : `${dimensions.width}x${dimensions.height}`;
-  const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+  // Providers cap inline images at 8192 px per side; downscale oversized
+  // pictures (re-encoded as PNG) instead of failing the whole chat request.
+  const PROVIDER_MAX_EDGE = 8192;
+  let inlineBuffer = buffer;
+  let inlineMime = mime;
+  if (
+    dimensions !== null &&
+    Math.max(dimensions.width, dimensions.height) > PROVIDER_MAX_EDGE
+  ) {
+    inlineBuffer = await sharp(buffer)
+      .resize({
+        width: PROVIDER_MAX_EDGE,
+        height: PROVIDER_MAX_EDGE,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .png()
+      .toBuffer();
+    inlineMime = "image/png";
+  }
+  const dataUrl = `data:${inlineMime};base64,${inlineBuffer.toString("base64")}`;
 
   return {
     content: `Read image ${target} (${mime}, ${size}, ${buffer.length} bytes). The image is attached to this tool result; inspect it directly instead of guessing from the path.`,

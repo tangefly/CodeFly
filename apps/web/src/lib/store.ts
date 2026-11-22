@@ -45,6 +45,7 @@ import type {
   TodoItem,
 } from "@codefly/protocol";
 import { api, asApiError, clearToken, getToken, saveToken } from "./api.js";
+import { dingWhenAway } from "./ding.js";
 import { isAbortError, streamSse } from "./sse.js";
 import { MODE_LABEL, uid } from "./utils.js";
 
@@ -671,6 +672,8 @@ export const useAppStore = create<AppState>()((set, get) => {
                   approval,
                 ].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
               }));
+              // The run is blocked on the user's approval decision.
+              dingWhenAway();
               break;
             }
             case "agent.approval_decided":
@@ -715,6 +718,8 @@ export const useAppStore = create<AppState>()((set, get) => {
                   pending,
                 ],
               }));
+              // The run is paused waiting for the user's answers.
+              dingWhenAway();
               break;
             }
             case "agent.question_answered":
@@ -729,6 +734,7 @@ export const useAppStore = create<AppState>()((set, get) => {
               set((current) =>
                 upsertStoredMessage(current, sessionId, event.message),
               );
+              dingWhenAway();
               break;
             case "agent.error": {
               finished = true;
@@ -749,6 +755,7 @@ export const useAppStore = create<AppState>()((set, get) => {
               } else {
                 get().notify("error", event.message);
               }
+              dingWhenAway();
               break;
             }
             case "session.updated":
@@ -766,6 +773,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         set((current) =>
           settleAgentStreaming(current, sessionId, { cancelled: true }),
         );
+        // The stream ended without agent.done/agent.error — abnormal stop.
+        dingWhenAway();
       }
     } catch (error) {
       if (isAbortError(error)) {
@@ -778,6 +787,7 @@ export const useAppStore = create<AppState>()((set, get) => {
           settleAgentStreaming(current, sessionId, { error: message }),
         );
         get().notify("error", message);
+        dingWhenAway();
       }
     } finally {
       aborters.delete(sessionId);
@@ -1334,6 +1344,7 @@ export const useAppStore = create<AppState>()((set, get) => {
                 firstTokenMs: event.message.firstTokenMs ?? message.firstTokenMs,
               })),
             );
+            dingWhenAway();
           } else if (event.type === "chat.error") {
             finished = true;
             if (event.messageId === "") {
@@ -1348,6 +1359,7 @@ export const useAppStore = create<AppState>()((set, get) => {
                 })),
               );
             }
+            dingWhenAway();
           } else if (event.type === "session.updated") {
             set((current) => ({
               sessions: current.sessions.map((session) =>
@@ -1362,6 +1374,8 @@ export const useAppStore = create<AppState>()((set, get) => {
         set((current) =>
           settleStreaming(current, sessionId, { cancelled: true }),
         );
+        // The stream ended without chat.done/chat.error — abnormal stop.
+        dingWhenAway();
       }
     } catch (error) {
       if (isAbortError(error)) {
@@ -1372,6 +1386,7 @@ export const useAppStore = create<AppState>()((set, get) => {
         const message = asApiError(error).message;
         set((current) => settleStreaming(current, sessionId, { error: message }));
         get().notify("error", message);
+        dingWhenAway();
       }
     } finally {
       chatAborters.delete(sessionId);
